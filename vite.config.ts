@@ -3,6 +3,21 @@ import { defineConfig } from 'vite';
 import { SvelteKitPWA } from '@vite-pwa/sveltekit';
 
 export default defineConfig({
+	// Daemon is deliberately reachable from the tethered phone over the USB
+	// network interface; Vite's default host-header allowlist blocks any
+	// request whose Host isn't localhost/127.0.0.1 with an empty reply.
+	// `allowedHosts: true` disables that check. The daemon is single-user,
+	// LAN-bound, and rate-isolated by the cable — no external attack surface.
+	server: {
+		host: true,
+		allowedHosts: true,
+		port: 5179
+	},
+	preview: {
+		host: true,
+		allowedHosts: true,
+		port: 5179
+	},
 	plugins: [
 		sveltekit(),
 		SvelteKitPWA({
