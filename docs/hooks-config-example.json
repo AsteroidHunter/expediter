@@ -1,0 +1,82 @@
+{
+	"_comment": "Merge ONLY this 'hooks' block into your ~/.claude/settings.json. Leave env, plugins, voice, theme, etc. alone. Replace /PATH/TO/expediter with your absolute clone path. Each event-name key drives one substep of Expediter's ticket lifecycle: Stop / PermissionRequest / Notification create or refresh a ticket; UserPromptSubmit / PostToolUse / PostToolUseFailure / SessionEnd clear the ticket.",
+	"hooks": {
+		"Stop": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "/PATH/TO/expediter/bin/expediter-hook.sh Stop"
+					}
+				]
+			}
+		],
+		"PermissionRequest": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "/PATH/TO/expediter/bin/expediter-hook.sh PermissionRequest"
+					}
+				]
+			}
+		],
+		"Notification": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "/PATH/TO/expediter/bin/expediter-hook.sh Notification"
+					}
+				]
+			}
+		],
+		"UserPromptSubmit": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "/PATH/TO/expediter/bin/expediter-hook.sh UserPromptSubmit"
+					}
+				]
+			}
+		],
+		"PostToolUse": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "/PATH/TO/expediter/bin/expediter-hook.sh PostToolUse"
+					}
+				]
+			}
+		],
+		"PostToolUseFailure": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "/PATH/TO/expediter/bin/expediter-hook.sh PostToolUseFailure"
+					}
+				]
+			}
+		],
+		"SessionEnd": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "/PATH/TO/expediter/bin/expediter-hook.sh SessionEnd"
+					}
+				]
+			}
+		]
+	}
+}
