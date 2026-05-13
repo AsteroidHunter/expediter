@@ -18,6 +18,7 @@ fi
 # Defaults; can be overridden in ~/.expediter/env
 export EXPEDITER_HOST="${EXPEDITER_HOST:-0.0.0.0}"
 export EXPEDITER_PORT="${EXPEDITER_PORT:-5179}"
+export EXPEDITER_TRANSCRIPT_ROOT="${EXPEDITER_TRANSCRIPT_ROOT:-${HOME}/.claude}"
 
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
