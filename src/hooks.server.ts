@@ -31,7 +31,8 @@ const IP_ALLOWLIST: IpRule[] = [
 	{ kind: 'exact', value: '::1' },
 	{ kind: 'cidr', base: '172.20.10.0', bits: 28 },
 	{ kind: 'cidr', base: '192.0.0.0', bits: 29 },
-	{ kind: 'cidr', base: '192.168.42.0', bits: 24 }
+	{ kind: 'cidr', base: '192.168.42.0', bits: 24 },
+	{ kind: 'cidr', base: '192.168.1.0', bits: 24 }
 ];
 
 function normalizeIp(addr: string | null | undefined): string | null {
@@ -80,7 +81,8 @@ const HOST_EXACT = new Set<string>([
 const TETHER_HOST_PATTERNS: Array<{ re: RegExp; max: number }> = [
 	{ re: new RegExp(`^172\\.20\\.10\\.(\\d{1,3}):${PORT}$`), max: 15 },
 	{ re: new RegExp(`^192\\.0\\.0\\.(\\d{1,3}):${PORT}$`), max: 7 },
-	{ re: new RegExp(`^192\\.168\\.42\\.(\\d{1,3}):${PORT}$`), max: 255 }
+	{ re: new RegExp(`^192\\.168\\.42\\.(\\d{1,3}):${PORT}$`), max: 255 },
+	{ re: new RegExp(`^192\\.168\\.1\\.(\\d{1,3}):${PORT}$`), max: 255 }
 ];
 
 function isAllowedHost(host: string | null): boolean {
