@@ -18,9 +18,9 @@ function isTextBlock(b: ContentBlock): b is TextBlock {
 // supplying e.g. /etc/passwd or ~/.ssh/id_ed25519 and getting it forwarded to
 // the Anthropic summarize call. The gate in src/hooks.server.ts is the primary
 // shield; this is the fallback if the gate is ever loosened or bypassed.
-const TRANSCRIPT_ROOT = path.resolve(
-	process.env.EXPEDITER_TRANSCRIPT_ROOT ?? path.join(os.homedir(), '.claude')
-);
+// Hard-coded because adapter-node refuses to start if any non-allowlisted
+// EXPEDITER_* env var is set (build/env.js validates the prefix strictly).
+const TRANSCRIPT_ROOT = path.resolve(path.join(os.homedir(), '.claude'));
 
 export async function latestAssistantText(transcriptPath: string): Promise<string | null> {
 	const resolved = path.resolve(transcriptPath);

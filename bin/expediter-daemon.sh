@@ -15,10 +15,13 @@ if [ -f "$ENV_FILE" ]; then
 	set +a
 fi
 
-# Defaults; can be overridden in ~/.expediter/env
+# Defaults; can be overridden in ~/.expediter/env.
+# NOTE: adapter-node validates EXPEDITER_* env vars against a strict allowlist
+# (build/env.js) — any non-allowlisted prefixed var causes startup failure.
+# So application-level config (e.g. transcript containment root) must NOT use
+# the EXPEDITER_ prefix; that root is hard-coded in src/lib/transcript.ts.
 export EXPEDITER_HOST="${EXPEDITER_HOST:-0.0.0.0}"
 export EXPEDITER_PORT="${EXPEDITER_PORT:-5179}"
-export EXPEDITER_TRANSCRIPT_ROOT="${EXPEDITER_TRANSCRIPT_ROOT:-${HOME}/.claude}"
 
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
