@@ -1,5 +1,35 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
 # internal docs, extremely sensitive
 expediterwiki
+
+# python venv
+.venv
+
+# Claude Code local-only settings
+.claude/settings.local.json
 
 # Dev-only fixtures, scratch, and other untracked working files
 internal
