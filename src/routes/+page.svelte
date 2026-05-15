@@ -17,6 +17,11 @@
 	let tickets = $state<Ticket[]>([]);
 	let connected = $state(false);
 	let focusing = $state<string | null>(null);
+	let mockMode = false;
+
+	const mockLoaders = import.meta.glob<{ getMockTickets: () => Ticket[] }>(
+		'../../internal/fixtures/mocktickets.ts'
+	);
 
 	let eventSource: EventSource | null = null;
 	let wakeLock: WakeLockSentinel | null = null;
@@ -26,6 +31,7 @@
 
 	function openStream(): void {
 		if (!browser) return;
+		if (mockMode) return;
 		if (eventSource) {
 			try {
 				eventSource.close();
@@ -119,7 +125,16 @@
 	let now = $state(Date.now());
 	let ageTimer: ReturnType<typeof setInterval> | null = null;
 
-	onMount(() => {
+	onMount(async () => {
+		if (browser && new URLSearchParams(window.location.search).has('mock')) {
+			const loader = Object.values(mockLoaders)[0];
+			if (loader) {
+				mockMode = true;
+				connected = true;
+				const mod = await loader();
+				tickets = mod.getMockTickets();
+			}
+		}
 		openStream();
 		void acquireWakeLock();
 		visibilityListener = onVisibilityChange;
