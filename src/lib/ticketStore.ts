@@ -21,7 +21,22 @@ function notify(): void {
 	for (const cb of subscribers) cb(snap);
 }
 
+// PermissionRequest is the precise "blocked on a tool dialog" signal and must
+// win the visual (red tint). Notification fires alongside it for the same
+// dialog and would otherwise clobber the event_type back to a generic ticket.
+// Stop sits in the middle: a real turn-end after a permission ask should
+// supersede the PermissionRequest, but a duplicate Notification should not.
+const EVENT_PRIORITY: Record<EventType, number> = {
+	PermissionRequest: 2,
+	Stop: 1,
+	Notification: 0
+};
+
 export function upsert(ticket: Ticket): void {
+	const existing = store.get(ticket.session_id);
+	if (existing && EVENT_PRIORITY[ticket.event_type] < EVENT_PRIORITY[existing.event_type]) {
+		return;
+	}
 	store.set(ticket.session_id, ticket);
 	notify();
 }
