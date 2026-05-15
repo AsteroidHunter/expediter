@@ -30,3 +30,12 @@ expediterwiki
 
 # Claude Code local-only settings
 .claude/settings.local.json
+
+# Dev-only fixtures, scratch, and other untracked working files
+internal
+
+# Local-only Claude Code workspace (skills, hooks, settings)
+.claude/
+
+# Local-only editor settings
+.vscode/
