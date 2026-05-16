@@ -112,6 +112,18 @@
 		return parts[parts.length - 1] ?? cwd;
 	}
 
+	function typeClass(t: EventType): string {
+		if (t === 'PermissionRequest') return 'type-permission';
+		if (t === 'Notification') return 'type-notification';
+		return 'type-stop';
+	}
+
+	function typeLabel(t: EventType): string {
+		if (t === 'PermissionRequest') return 'PERMISSION';
+		if (t === 'Notification') return 'NOTIFY';
+		return 'STOP';
+	}
+
 	function formatAge(createdAt: number, now: number): string {
 		const seconds = Math.max(0, Math.floor((now - createdAt) / 1000));
 		if (seconds < 5) return 'now';
@@ -182,7 +194,10 @@
 
 <main>
 	<header>
-		<span class="brand">expediter</span>
+		<div class="brand">
+			<span class="brand-name">Expediter</span>
+			<span class="brand-version">(v0.1)</span>
+		</div>
 		<span class="conn" class:on={connected} aria-label={connected ? 'connected' : 'disconnected'}
 		></span>
 	</header>
@@ -196,18 +211,23 @@
 		<ul class="queue">
 			{#each tickets as ticket (ticket.session_id)}
 				<li
-					class="ticket"
-					class:permission={ticket.event_type === 'PermissionRequest'}
+					class="ticket {typeClass(ticket.event_type)}"
 					class:pressing={focusing === ticket.session_id}
 					animate:flip={{ duration: 220 }}
 					in:fly={{ y: -8, duration: 180 }}
 					out:fly={{ y: 8, duration: 140 }}
 				>
 					<button type="button" onclick={() => focusSession(ticket)}>
-						<div class="title">{ticket.title}</div>
-						<div class="meta">
-							<span class="project">{projectLabel(ticket.cwd)}</span>
+						<div class="stub">
+							<span class="type">{typeLabel(ticket.event_type)}</span>
 							<span class="age">{formatAge(ticket.created_at, now)}</span>
+						</div>
+						<div class="perforation" aria-hidden="true"></div>
+						<div class="body">
+							<div class="title">{ticket.title}</div>
+							{#if ticket.cwd}
+								<div class="project">{projectLabel(ticket.cwd)}</div>
+							{/if}
 						</div>
 					</button>
 				</li>
@@ -220,7 +240,7 @@
 	:global(html, body) {
 		margin: 0;
 		padding: 0;
-		background: #0a0a0a;
+		background: #fffdf5;
 		color: #e6e6e6;
 		font-family:
 			ui-monospace,
@@ -255,22 +275,58 @@
 	}
 
 	.brand {
-		font-size: 13px;
-		letter-spacing: 0.18em;
-		text-transform: uppercase;
-		color: #6e6e6e;
+		display: flex;
+		align-items: baseline;
+		gap: 7px;
+		font-size: 14px;
+		letter-spacing: 0.01em;
+		color: #2a1f15;
+	}
+	.brand-name {
+		font-weight: 600;
+	}
+	.brand-version {
+		font-size: 11px;
+		font-weight: 500;
+		color: rgba(42, 31, 21, 0.38);
+		letter-spacing: 0.04em;
 	}
 
 	.conn {
-		width: 8px;
-		height: 8px;
+		position: relative;
+		width: 11px;
+		height: 11px;
+		border: 1px solid #c9bd9a;
 		border-radius: 50%;
-		background: #3a3a3a;
+		box-sizing: border-box;
+		transition:
+			border-color 200ms ease,
+			box-shadow 200ms ease;
+	}
+	.conn::before {
+		content: '';
+		position: absolute;
+		inset: 2px;
+		border-radius: 50%;
+		background: #c9bd9a;
 		transition: background 200ms ease;
 	}
 	.conn.on {
-		background: #4ade80;
-		box-shadow: 0 0 8px rgba(74, 222, 128, 0.4);
+		border-color: #5b8a3a;
+		box-shadow: 0 0 0 3px rgba(91, 138, 58, 0.12);
+	}
+	.conn.on::before {
+		background: #5b8a3a;
+		animation: led-breathe 2.4s ease-in-out infinite;
+	}
+	@keyframes led-breathe {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.55;
+		}
 	}
 
 	.empty {
@@ -300,21 +356,41 @@
 		padding: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
+		gap: 16px;
 	}
 
 	.ticket {
-		background: #141414;
-		border: 1px solid #1f1f1f;
-		border-radius: 14px;
-		overflow: hidden;
-		transition:
-			transform 120ms ease,
-			background 120ms ease;
+		--page-bg: #fffdf5;
+		--bg: #fff1c9;
+		--border: #ead68f;
+		--title: #2a1f15;
+		--muted: #8a7a45;
+		--accent: #6e5a20;
+		--notch-size: 18px;
+		--notch-offset: 14px;
+
+		position: relative;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 0;
+		box-shadow:
+			0 1px 0 rgba(80, 60, 30, 0.04),
+			0 2px 10px rgba(80, 60, 30, 0.06);
+		transition: transform 120ms ease;
 	}
-	.ticket.permission {
-		background: #1a0f12;
-		border-color: #4a1c25;
+	.ticket.type-permission {
+		--bg: #f9d5cc;
+		--border: #e0a89a;
+		--title: #5a1e1a;
+		--muted: #a06860;
+		--accent: #8b2e1f;
+	}
+	.ticket.type-notification {
+		--bg: #ffe0c8;
+		--border: #e8c0a0;
+		--title: #4a2f1a;
+		--muted: #a07a55;
+		--accent: #8a5a28;
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
@@ -328,37 +404,82 @@
 		border: 0;
 		color: inherit;
 		font: inherit;
-		padding: 16px 18px;
+		padding: 0;
 		cursor: pointer;
 	}
 
-	.title {
-		font-size: 17px;
-		line-height: 1.3;
-		color: #f4f4f4;
-		word-break: break-word;
+	.stub {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		padding: 12px 18px;
+		font-size: 11px;
+		letter-spacing: 0.22em;
+		text-transform: uppercase;
 	}
-	.ticket.permission .title {
-		color: #ffb4b9;
+	.stub .type {
+		color: var(--accent);
+		font-weight: 700;
+	}
+	.stub .age {
+		color: var(--muted);
+		font-variant-numeric: tabular-nums;
+		letter-spacing: 0.04em;
+		font-weight: 600;
+		text-transform: none;
 	}
 
-	.meta {
-		margin-top: 8px;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		font-size: 12px;
-		color: #6e6e6e;
-		letter-spacing: 0.04em;
+	.perforation {
+		position: relative;
+		height: 1px;
+		margin: 0 var(--notch-offset);
+		background-image: linear-gradient(
+			to right,
+			var(--border) 0,
+			var(--border) 4px,
+			transparent 4px,
+			transparent 8px
+		);
+		background-size: 8px 1px;
+		background-repeat: repeat-x;
 	}
+	.perforation::before,
+	.perforation::after {
+		content: '';
+		position: absolute;
+		top: 50%;
+		width: var(--notch-size);
+		height: var(--notch-size);
+		border-radius: 50%;
+		background: var(--page-bg);
+		transform: translateY(-50%);
+	}
+	.perforation::before {
+		left: calc(-1 * (var(--notch-offset) + var(--notch-size) / 2));
+	}
+	.perforation::after {
+		right: calc(-1 * (var(--notch-offset) + var(--notch-size) / 2));
+	}
+
+	.body {
+		padding: 14px 18px 18px;
+	}
+
+	.title {
+		font-size: 16px;
+		line-height: 1.4;
+		color: var(--title);
+		word-break: break-word;
+	}
+
 	.project {
-		max-width: 70%;
+		margin-top: 10px;
+		font-size: 11px;
+		color: var(--muted);
+		letter-spacing: 0.08em;
+		text-transform: lowercase;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-	.age {
-		font-variant-numeric: tabular-nums;
 	}
 </style>
