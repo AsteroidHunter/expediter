@@ -96,6 +96,14 @@ export function getCachedTitle(session_id: string): string {
 export function setCachedTitle(session_id: string, title: string): void {
 	const entry = getOrCreateTopic(session_id);
 	entry.cachedTitle = title;
+	// Patch any currently-displayed ticket for this session so the body fills in
+	// live (via SSE) when the async refresh completes, instead of waiting for the
+	// next Stop / PermissionRequest event.
+	const ticket = store.get(session_id);
+	if (ticket && ticket.title !== title) {
+		store.set(session_id, { ...ticket, title });
+		notify();
+	}
 }
 
 // Fire a refresh whenever (a) we have an empty cache and at least one prompt

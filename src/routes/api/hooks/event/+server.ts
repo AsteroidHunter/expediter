@@ -13,7 +13,7 @@ import {
 	type EventType
 } from '$lib/ticketStore';
 import { summarize } from '$lib/summarize';
-import { latestAssistantText } from '$lib/transcript';
+import { recentTranscriptText } from '$lib/transcript';
 import { getRefreshInterval } from '$lib/config';
 import { watchForDecline } from '$lib/declineWatcher';
 
@@ -42,16 +42,31 @@ type HookPayload = {
 // guarantees `refreshInFlight` is cleared even if summarize or transcript-read
 // throws, so a hang or error doesn't leave the session permanently un-refreshable.
 async function maybeRefreshTopic(session_id: string, transcript_path: string): Promise<void> {
+	// const t0 = Date.now();
+	// const sid = session_id.slice(0, 8);
+	// const log = (msg: string): void => {
+	// 	console.log(`[trace:refresh sid=${sid} T+${Date.now() - t0}ms] ${msg}`);
+	// };
+	// log(`enter; transcript_path=${transcript_path}`);
 	markRefreshStart(session_id);
 	try {
-		const text = await latestAssistantText(transcript_path).catch(() => null);
+		// log('reading transcript');
+		const text = await recentTranscriptText(transcript_path).catch(() => null);
+		// log(`transcript read; text=${text === null ? 'null' : `len=${text.length}`}`);
 		if (!text) return;
+		// log('calling summarize');
 		const title = await summarize(text);
-		if (title) setCachedTitle(session_id, title);
+		// log(`summarize returned; title=${title === null ? 'null' : `"${title}"`}`);
+		if (title) {
+			setCachedTitle(session_id, title);
+			// log('setCachedTitle called');
+		}
 	} catch (err) {
+		// log(`caught: ${err}`);
 		console.warn('[refresh]', err);
 	} finally {
 		markRefreshEnd(session_id);
+		// log('markRefreshEnd; done');
 	}
 }
 
@@ -70,10 +85,13 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	if (CLEAR_EVENTS.has(hook_event_name)) {
 		if (hook_event_name === 'UserPromptSubmit') {
+			// Increment the counter as a measure of user-side activity (drives the
+			// every-N cadence). Do NOT fire the refresh here — at this moment the
+			// transcript contains only the user's prompt and no assistant text yet,
+			// so latestAssistantText would return null and the refresh would no-op.
+			// The refresh is fired below from Stop / PermissionRequest / Notification,
+			// where assistant content actually exists.
 			incrementCounter(session_id);
-			if (transcript_path && shouldRefresh(session_id, getRefreshInterval())) {
-				void maybeRefreshTopic(session_id, transcript_path);
-			}
 		} else if (hook_event_name === 'SessionEnd') {
 			deleteSessionTopic(session_id);
 		}
@@ -88,6 +106,18 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	if (!tmux_pane) {
 		return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
+	}
+
+	// Fire the refresh from the ticket-producing side, where the transcript
+	// already contains the latest assistant text. Fire-and-forget; setCachedTitle
+	// patches this ticket live via SSE when the refresh completes.
+	// const sidShort = session_id.slice(0, 8);
+	// const shouldFire = transcript_path ? shouldRefresh(session_id, getRefreshInterval()) : false;
+	// console.log(
+	// 	`[trace:hook sid=${sidShort}] event=${hook_event_name} transcript_path=${transcript_path ? 'set' : 'missing'} shouldRefresh=${shouldFire} cachedTitle="${getCachedTitle(session_id)}"`
+	// );
+	if (transcript_path && shouldRefresh(session_id, getRefreshInterval())) {
+		void maybeRefreshTopic(session_id, transcript_path);
 	}
 
 	const created_at = Date.now();

@@ -116,6 +116,31 @@ test('markRefreshEnd on unknown session is a no-op (does not throw)', () => {
 	expect(() => markRefreshEnd('never-touched')).not.toThrow();
 });
 
+test('setCachedTitle live-updates the displayed ticket for the same session', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.title).toBe('');
+
+	setCachedTitle(id, 'topic arrived');
+
+	expect(list().find((t) => t.session_id === id)?.title).toBe('topic arrived');
+	remove(id);
+});
+
+test('setCachedTitle does not change the ticket store when no ticket exists for the session', () => {
+	const id = nextId();
+	setCachedTitle(id, 'cache only');
+	expect(list().find((t) => t.session_id === id)).toBeUndefined();
+	expect(getCachedTitle(id)).toBe('cache only');
+});
+
 test('removeIfMatch removes and returns true when created_at matches', () => {
 	const id = nextId();
 	const created_at = Date.now();
