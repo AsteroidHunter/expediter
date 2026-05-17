@@ -25,15 +25,34 @@ test('shouldRefresh returns false before any prompt (counter === 0)', () => {
 	expect(shouldRefresh(id, 5)).toBe(false);
 });
 
-test('shouldRefresh returns true exactly at multiples of intervalN', () => {
+test('shouldRefresh returns true on the first prompt when cache is empty', () => {
+	const id = nextId();
+	incrementCounter(id); // 1
+	expect(shouldRefresh(id, 5)).toBe(true);
+});
+
+test('shouldRefresh keeps firing while cache is empty (failed refresh retry)', () => {
 	const id = nextId();
 	for (let i = 1; i <= 4; i++) {
+		incrementCounter(id);
+		expect(shouldRefresh(id, 5)).toBe(true); // cache still empty → retry
+	}
+});
+
+test('shouldRefresh settles to every-N cadence once cache is populated', () => {
+	const id = nextId();
+	incrementCounter(id); // 1
+	expect(shouldRefresh(id, 5)).toBe(true);
+	setCachedTitle(id, 'first title');
+
+	for (let i = 2; i <= 4; i++) {
 		incrementCounter(id);
 		expect(shouldRefresh(id, 5)).toBe(false);
 	}
 	incrementCounter(id); // 5
 	expect(shouldRefresh(id, 5)).toBe(true);
 
+	setCachedTitle(id, 'second title');
 	incrementCounter(id); // 6
 	expect(shouldRefresh(id, 5)).toBe(false);
 
@@ -47,7 +66,7 @@ test('shouldRefresh returns true exactly at multiples of intervalN', () => {
 
 test('shouldRefresh returns false while refreshInFlight is true', () => {
 	const id = nextId();
-	for (let i = 0; i < 5; i++) incrementCounter(id);
+	incrementCounter(id); // 1 (cache empty → would refresh)
 	expect(shouldRefresh(id, 5)).toBe(true);
 
 	markRefreshStart(id);
