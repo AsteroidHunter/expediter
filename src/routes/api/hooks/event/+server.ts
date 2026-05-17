@@ -76,12 +76,9 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (transcript_path) {
 		const text = await latestAssistantText(transcript_path).catch(() => null);
 		if (text) {
-			try {
-				title = await summarize(text);
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : 'summarize failed';
-				title = msg.includes('ANTHROPIC_API_KEY') ? '(no api key)' : '(summary failed)';
-			}
+			// TODO Phase 4: drop this entire block — title comes from getCachedTitle().
+			// summarize() no longer throws; null = soft failure → fall back to placeholder.
+			title = (await summarize(text)) ?? '(summary failed)';
 		}
 	}
 
