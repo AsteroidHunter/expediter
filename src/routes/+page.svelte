@@ -5,6 +5,8 @@
 	import { browser } from '$app/environment';
 
 	type EventType = 'Stop' | 'PermissionRequest' | 'Notification';
+	// `title` may be empty string before the async topic refresh has run;
+	// rendered conditionally so empty values produce no element.
 	type Ticket = {
 		session_id: string;
 		tmux_pane: string;
@@ -219,14 +221,14 @@
 				>
 					<button type="button" onclick={() => focusSession(ticket)}>
 						<div class="stub">
+							<span class="project">{projectLabel(ticket.cwd)}</span>
 							<span class="type">{typeLabel(ticket.event_type)}</span>
 							<span class="age">{formatAge(ticket.created_at, now)}</span>
 						</div>
 						<div class="perforation" aria-hidden="true"></div>
 						<div class="body">
-							<div class="title">{ticket.title}</div>
-							{#if ticket.cwd}
-								<div class="project">{projectLabel(ticket.cwd)}</div>
+							{#if ticket.title}
+								<div class="title">{ticket.title}</div>
 							{/if}
 						</div>
 					</button>
@@ -412,16 +414,30 @@
 		display: flex;
 		justify-content: space-between;
 		align-items: baseline;
+		gap: 10px;
 		padding: 12px 18px;
 		font-size: 11px;
 		letter-spacing: 0.22em;
 		text-transform: uppercase;
 	}
+	.stub .project {
+		flex: 1;
+		min-width: 0;
+		color: var(--title);
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: none;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
 	.stub .type {
+		flex-shrink: 0;
 		color: var(--accent);
 		font-weight: 700;
 	}
 	.stub .age {
+		flex-shrink: 0;
 		color: var(--muted);
 		font-variant-numeric: tabular-nums;
 		letter-spacing: 0.04em;
@@ -472,14 +488,4 @@
 		word-break: break-word;
 	}
 
-	.project {
-		margin-top: 10px;
-		font-size: 11px;
-		color: var(--muted);
-		letter-spacing: 0.08em;
-		text-transform: lowercase;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
 </style>
