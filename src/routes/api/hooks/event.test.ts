@@ -1,5 +1,8 @@
 import { test, expect } from 'bun:test';
 import type { RequestEvent } from '@sveltejs/kit';
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { POST } from './event/+server';
 import {
 	getCachedTitle,
@@ -164,4 +167,99 @@ test('invalid JSON body returns 400', async () => {
 	});
 	const response = await POST({ request } as unknown as RequestEvent);
 	expect(response.status).toBe(400);
+});
+
+// Integration: PermissionRequest kicks off the decline watcher, and a denial
+// line appended to the real transcript file makes the ticket disappear.
+// The transcript path must live under ~/.claude/ to pass the watcher's
+// containment check. Cleanup runs after the assertions so the watcher's
+// cancel (on detection) lands before the file is unlinked.
+test('PermissionRequest + appended denial line clears the ticket via the watcher', async () => {
+	const tempDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const tempFile = path.join(tempDir, 'transcript.jsonl');
+	writeFileSync(tempFile, '');
+
+	const id = nextId();
+	const result = await callHandler({
+		hook_event_name: 'PermissionRequest',
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		transcript_path: tempFile
+	});
+	expect(result.status).toBe(200);
+	expect(list().find((t) => t.session_id === id)).toBeDefined();
+
+	// Give the watcher's async start block time to capture the starting offset
+	// and attach fs.watch before we append.
+	await new Promise((r) => setTimeout(r, 80));
+
+	const denialLine =
+		JSON.stringify({
+			type: 'user',
+			message: {
+				content: [
+					{
+						type: 'tool_result',
+						is_error: true,
+						content: "The user doesn't want to proceed with this tool use."
+					}
+				]
+			}
+		}) + '\n';
+	appendFileSync(tempFile, denialLine);
+
+	const start = Date.now();
+	while (Date.now() - start < 700) {
+		if (!list().find((t) => t.session_id === id)) break;
+		await new Promise((r) => setTimeout(r, 20));
+	}
+
+	expect(list().find((t) => t.session_id === id)).toBeUndefined();
+
+	rmSync(tempDir, { recursive: true, force: true });
+	deleteSessionTopic(id);
+});
+
+// Confirm the wiring is gated to PermissionRequest only: a Stop event for the
+// same kind of payload should NOT spawn a watcher, so a later denial line in
+// the file should not affect the Stop ticket.
+test('Stop does not spawn a watcher (denial line in transcript has no effect)', async () => {
+	const tempDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const tempFile = path.join(tempDir, 'transcript.jsonl');
+	writeFileSync(tempFile, '');
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		transcript_path: tempFile
+	});
+	expect(list().find((t) => t.session_id === id)).toBeDefined();
+
+	await new Promise((r) => setTimeout(r, 80));
+	appendFileSync(
+		tempFile,
+		JSON.stringify({
+			type: 'user',
+			message: {
+				content: [
+					{
+						type: 'tool_result',
+						is_error: true,
+						content: "The user doesn't want to proceed with this tool use."
+					}
+				]
+			}
+		}) + '\n'
+	);
+	await new Promise((r) => setTimeout(r, 200));
+
+	expect(list().find((t) => t.session_id === id)).toBeDefined();
+
+	rmSync(tempDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
 });

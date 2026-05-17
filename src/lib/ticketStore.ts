@@ -66,6 +66,19 @@ export function remove(session_id: string): boolean {
 	return existed;
 }
 
+// Conditional remove: only deletes the ticket if it still has the captured
+// created_at. Lets a long-lived async observer (e.g. the transcript decline
+// watcher) safely fire after the ticket it tracked may have been cleared and
+// replaced by a newer one for the same session_id — the late call no-ops
+// instead of removing the wrong ticket.
+export function removeIfMatch(session_id: string, created_at: number): boolean {
+	const existing = store.get(session_id);
+	if (!existing || existing.created_at !== created_at) return false;
+	store.delete(session_id);
+	notify();
+	return true;
+}
+
 export function list(): Ticket[] {
 	return snapshot();
 }

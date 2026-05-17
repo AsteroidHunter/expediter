@@ -2,6 +2,7 @@ import { json, type RequestHandler } from '@sveltejs/kit';
 import {
 	upsert,
 	remove,
+	removeIfMatch,
 	incrementCounter,
 	getCachedTitle,
 	setCachedTitle,
@@ -14,6 +15,7 @@ import {
 import { summarize } from '$lib/summarize';
 import { latestAssistantText } from '$lib/transcript';
 import { getRefreshInterval } from '$lib/config';
+import { watchForDecline } from '$lib/declineWatcher';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -88,14 +90,32 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
 	}
 
+	const created_at = Date.now();
 	upsert({
 		session_id,
 		tmux_pane,
 		cwd: cwd ?? '',
 		title: getCachedTitle(session_id),
 		event_type: eventType,
-		created_at: Date.now()
+		created_at
 	});
+
+	// Claude Code emits no hook event when the user manually declines or
+	// interrupts a permission prompt, so a PermissionRequest ticket would
+	// otherwise sit on screen until the next UserPromptSubmit happens to clear
+	// it. Tail the transcript JSONL for the rejection tool_result line and
+	// remove the ticket the moment it appears. The created_at guard makes a
+	// late watcher fire a no-op if the ticket was already cleared/replaced.
+	if (eventType === 'PermissionRequest' && transcript_path) {
+		watchForDecline({
+			transcriptPath: transcript_path,
+			sessionId: session_id,
+			createdAt: created_at,
+			onDecline: () => {
+				removeIfMatch(session_id, created_at);
+			}
+		});
+	}
 
 	return json({ ok: true, action: 'upserted' });
 };

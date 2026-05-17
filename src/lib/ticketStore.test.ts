@@ -6,7 +6,13 @@ import {
 	shouldRefresh,
 	markRefreshStart,
 	markRefreshEnd,
-	deleteSessionTopic
+	deleteSessionTopic,
+	upsert,
+	list,
+	remove,
+	removeIfMatch,
+	subscribe,
+	type Ticket
 } from './ticketStore';
 
 // Each test uses a unique session_id so module-level state doesn't leak between tests.
@@ -108,6 +114,68 @@ test('setCachedTitle on unknown session lazily creates the entry', () => {
 
 test('markRefreshEnd on unknown session is a no-op (does not throw)', () => {
 	expect(() => markRefreshEnd('never-touched')).not.toThrow();
+});
+
+test('removeIfMatch removes and returns true when created_at matches', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at
+	});
+
+	expect(removeIfMatch(id, created_at)).toBe(true);
+	expect(list().find((t) => t.session_id === id)).toBeUndefined();
+});
+
+test('removeIfMatch returns false and leaves the ticket when created_at differs', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at
+	});
+
+	expect(removeIfMatch(id, created_at - 1)).toBe(false);
+	expect(list().find((t) => t.session_id === id)?.created_at).toBe(created_at);
+	remove(id);
+});
+
+test('removeIfMatch returns false when no ticket exists for the session', () => {
+	expect(removeIfMatch(nextId(), 0)).toBe(false);
+});
+
+test('removeIfMatch notifies subscribers only when it actually removes', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at
+	});
+
+	const snapshots: Ticket[][] = [];
+	const unsub = subscribe((snap) => snapshots.push(snap));
+
+	const noopBefore = snapshots.length;
+	expect(removeIfMatch(id, created_at - 1)).toBe(false);
+	expect(snapshots.length).toBe(noopBefore); // mismatch → no notify
+
+	expect(removeIfMatch(id, created_at)).toBe(true);
+	expect(snapshots.length).toBe(noopBefore + 1); // real remove → one notify
+
+	unsub();
 });
 
 test('multiple sessions are isolated', () => {
