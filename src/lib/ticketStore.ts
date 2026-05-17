@@ -66,17 +66,6 @@ export function remove(session_id: string): boolean {
 	return existed;
 }
 
-// TODO Phase 4: remove this helper once the synchronous summarize call (and
-// its created_at-guarded patch) goes away. Kept here in the interim so
-// +server.ts compiles between phases.
-export function patchTitle(session_id: string, created_at: number, title: string): boolean {
-	const existing = store.get(session_id);
-	if (!existing || existing.created_at !== created_at) return false;
-	store.set(session_id, { ...existing, title });
-	notify();
-	return true;
-}
-
 export function list(): Ticket[] {
 	return snapshot();
 }

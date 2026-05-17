@@ -1,7 +1,19 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
-import { upsert, remove, patchTitle, type EventType } from '$lib/ticketStore';
+import {
+	upsert,
+	remove,
+	incrementCounter,
+	getCachedTitle,
+	setCachedTitle,
+	shouldRefresh,
+	markRefreshStart,
+	markRefreshEnd,
+	deleteSessionTopic,
+	type EventType
+} from '$lib/ticketStore';
 import { summarize } from '$lib/summarize';
 import { latestAssistantText } from '$lib/transcript';
+import { getRefreshInterval } from '$lib/config';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -24,6 +36,23 @@ type HookPayload = {
 	tmux_pane?: string;
 };
 
+// Fire-and-forget topic refresh. Caller never awaits. The try/finally pair
+// guarantees `refreshInFlight` is cleared even if summarize or transcript-read
+// throws, so a hang or error doesn't leave the session permanently un-refreshable.
+async function maybeRefreshTopic(session_id: string, transcript_path: string): Promise<void> {
+	markRefreshStart(session_id);
+	try {
+		const text = await latestAssistantText(transcript_path).catch(() => null);
+		if (!text) return;
+		const title = await summarize(text);
+		if (title) setCachedTitle(session_id, title);
+	} catch (err) {
+		console.warn('[refresh]', err);
+	} finally {
+		markRefreshEnd(session_id);
+	}
+}
+
 export const POST: RequestHandler = async ({ request }) => {
 	let payload: HookPayload;
 	try {
@@ -37,13 +66,15 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'missing hook_event_name or session_id' }, { status: 400 });
 	}
 
-	// TEMP instrumentation — confirm which hooks actually fire when a permission
-	// is declined / interrupted in Claude Code. Remove after diagnosis.
-	console.log(
-		`[hook] ${hook_event_name} session=${session_id.slice(0, 8)} pane=${tmux_pane ?? '<none>'}`
-	);
-
 	if (CLEAR_EVENTS.has(hook_event_name)) {
+		if (hook_event_name === 'UserPromptSubmit') {
+			incrementCounter(session_id);
+			if (transcript_path && shouldRefresh(session_id, getRefreshInterval())) {
+				void maybeRefreshTopic(session_id, transcript_path);
+			}
+		} else if (hook_event_name === 'SessionEnd') {
+			deleteSessionTopic(session_id);
+		}
 		remove(session_id);
 		return json({ ok: true, action: 'cleared' });
 	}
@@ -57,31 +88,14 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
 	}
 
-	// Upsert with a placeholder title BEFORE awaiting summarize() — otherwise a
-	// clear event for the same session_id that arrives during the summarize
-	// await would remove() nothing, and the late upsert would land a phantom
-	// ticket that nothing clears. The placeholder also makes red permission
-	// tickets visible instantly instead of after Haiku latency.
-	const created_at = Date.now();
 	upsert({
 		session_id,
 		tmux_pane,
 		cwd: cwd ?? '',
-		title: '(awaiting)',
+		title: getCachedTitle(session_id),
 		event_type: eventType,
-		created_at
+		created_at: Date.now()
 	});
 
-	let title = '(awaiting)';
-	if (transcript_path) {
-		const text = await latestAssistantText(transcript_path).catch(() => null);
-		if (text) {
-			// TODO Phase 4: drop this entire block — title comes from getCachedTitle().
-			// summarize() no longer throws; null = soft failure → fall back to placeholder.
-			title = (await summarize(text)) ?? '(summary failed)';
-		}
-	}
-
-	const patched = patchTitle(session_id, created_at, title);
-	return json({ ok: true, action: patched ? 'upserted' : 'cleared-mid-flight', title });
+	return json({ ok: true, action: 'upserted' });
 };
