@@ -3,16 +3,16 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const DEFAULT_REFRESH_EVERY = 5;
-const CONFIG_PATH = join(homedir(), '.expediter', 'config.json');
+const DEFAULT_CONFIG_PATH = join(homedir(), '.expediter', 'config.json');
 
 // Read fresh on every call. The file is tiny and the call rate is one read per
 // UserPromptSubmit hook — microseconds. Skipping caching means a future
 // settings UI writing the file is picked up on the very next hook event with
-// no invalidation dance.
-export function getRefreshInterval(): number {
+// no invalidation dance. `configPath` is injectable for tests.
+export function getRefreshInterval(configPath: string = DEFAULT_CONFIG_PATH): number {
 	let raw: string;
 	try {
-		raw = readFileSync(CONFIG_PATH, 'utf8');
+		raw = readFileSync(configPath, 'utf8');
 	} catch {
 		return DEFAULT_REFRESH_EVERY;
 	}
