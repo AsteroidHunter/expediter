@@ -47,6 +47,17 @@ export function remove(session_id: string): boolean {
 	return existed;
 }
 
+// Patches the title of an existing ticket only if `created_at` still matches —
+// guards against a clear (or a replacement upsert) that arrived while an
+// async title source (e.g. summarize()) was in flight.
+export function patchTitle(session_id: string, created_at: number, title: string): boolean {
+	const existing = store.get(session_id);
+	if (!existing || existing.created_at !== created_at) return false;
+	store.set(session_id, { ...existing, title });
+	notify();
+	return true;
+}
+
 export function list(): Ticket[] {
 	return snapshot();
 }
