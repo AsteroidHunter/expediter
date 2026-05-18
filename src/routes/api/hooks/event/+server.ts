@@ -2,8 +2,8 @@ import { json, type RequestHandler } from '@sveltejs/kit';
 import {
 	upsert,
 	remove,
-	removeIfMatch,
 	markInactive,
+	markInactiveIfMatch,
 	incrementCounter,
 	getCachedTitle,
 	setCachedTitle,
@@ -142,15 +142,16 @@ export const POST: RequestHandler = async ({ request }) => {
 	// interrupts a permission prompt, so a PermissionRequest ticket would
 	// otherwise sit on screen until the next UserPromptSubmit happens to clear
 	// it. Tail the transcript JSONL for the rejection tool_result line and
-	// remove the ticket the moment it appears. The created_at guard makes a
-	// late watcher fire a no-op if the ticket was already cleared/replaced.
+	// soft-clear the ticket (mark inactive) the moment it appears. The
+	// created_at guard makes a late watcher no-op if the ticket was already
+	// cleared/replaced by a newer event for the same session_id.
 	if (eventType === 'PermissionRequest' && transcript_path) {
 		watchForDecline({
 			transcriptPath: transcript_path,
 			sessionId: session_id,
 			createdAt: created_at,
 			onDecline: () => {
-				removeIfMatch(session_id, created_at);
+				markInactiveIfMatch(session_id, created_at);
 			}
 		});
 	}
