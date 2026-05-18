@@ -20,4 +20,6 @@ jobs:
 
       - run: bun run check
 
+      - run: mkdir -p ~/.claude
+
       - run: bun test
