@@ -3,6 +3,17 @@
 	"private": true,
 	"version": "0.0.1",
 	"type": "module",
+	"description": "Local-first ticket UI for Claude Code, driven by hook events from your active sessions.",
+	"author": "Akash Satpathy",
+	"license": "SEE LICENSE IN LICENSE",
+	"homepage": "https://github.com/AsteroidHunter/expediter#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/AsteroidHunter/expediter.git"
+	},
+	"bugs": {
+		"url": "https://github.com/AsteroidHunter/expediter/issues"
+	},
 	"scripts": {
 		"dev": "vite dev --host 0.0.0.0 --port 5179",
 		"build": "vite build",
