@@ -84,33 +84,36 @@ export async function focusPane(pane: string): Promise<void> {
 		throw new FocusError(`invalid pane id '${pane}'`);
 	}
 
-	let target: string;
+	let session: string;
 	try {
 		const { stdout } = await execFileAsync('tmux', [
 			'display-message',
 			'-p',
 			'-t',
 			pane,
-			'#{session_name}:#{window_id}'
+			'#{session_name}'
 		]);
-		target = stdout.trim();
+		session = stdout.trim();
 	} catch {
 		throw new FocusError(`pane '${pane}' no longer exists`);
 	}
 
-	if (!target) {
-		throw new FocusError(`pane '${pane}' resolved to empty target`);
+	if (!session) {
+		throw new FocusError(`pane '${pane}' resolved to empty session`);
 	}
 
+	// select-pane (not select-window) so two Claude sessions sharing one tmux
+	// window land on the exact pane the ticket came from instead of whichever
+	// pane was last active. select-pane also makes the parent window active,
+	// so no separate select-window call is needed.
 	try {
-		await execFileAsync('tmux', ['select-window', '-t', target]);
+		await execFileAsync('tmux', ['select-pane', '-t', pane]);
 	} catch {
-		throw new FocusError(`tmux select-window failed for '${target}'`);
+		throw new FocusError(`tmux select-pane failed for '${pane}'`);
 	}
 
-	const session = target.split(':')[0] ?? '';
-	const tty = session ? await clientTtyForSession(session) : null;
-	console.log(`[focus] target=${target} session=${session} tty=${tty ?? '<none>'}`);
+	const tty = await clientTtyForSession(session);
+	console.log(`[focus] pane=${pane} session=${session} tty=${tty ?? '<none>'}`);
 
 	const pre = await captureTerminalState();
 	console.log(`[focus] state pre=${pre}`);
