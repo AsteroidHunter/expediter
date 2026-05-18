@@ -14,6 +14,7 @@
 		title: string;
 		event_type: EventType;
 		created_at: number;
+		inactive: boolean;
 	};
 
 	let tickets = $state<Ticket[]>([]);
@@ -215,6 +216,7 @@
 				<li
 					class="ticket {typeClass(ticket.event_type)}"
 					class:pressing={focusing === ticket.session_id}
+					class:inactive={ticket.inactive}
 					animate:flip={{ duration: 220 }}
 					in:fly={{ y: -8, duration: 180 }}
 					out:fly={{ y: 8, duration: 140 }}
@@ -396,6 +398,14 @@
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
+	}
+	/* Handled tickets sink into the inactive tier of the dock. Opacity + a
+	   saturation cut reads as "you've dealt with this" without changing the
+	   shape, so the existing flip animation still moves the ticket cleanly
+	   between tiers. */
+	.ticket.inactive {
+		opacity: 0.55;
+		filter: saturate(0.4);
 	}
 
 	.ticket button {
