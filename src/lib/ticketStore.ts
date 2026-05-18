@@ -10,6 +10,10 @@ export type Ticket = {
 	title: string;
 	event_type: EventType;
 	created_at: number;
+	// True after a clear event (UserPromptSubmit / PostToolUse / PostToolUseFailure
+	// / manual permission decline) — ticket sinks into the gray tier of the dock
+	// but is not deleted. Cleared back to false on the next upsert (reactivation).
+	inactive: boolean;
 };
 
 type SessionTopic = {
@@ -32,7 +36,12 @@ function getOrCreateTopic(session_id: string): SessionTopic {
 }
 
 function snapshot(): Ticket[] {
-	return Array.from(store.values()).sort((a, b) => b.created_at - a.created_at);
+	// Two-tier sort: active tickets first, inactive second; within each tier,
+	// newest created_at first.
+	return Array.from(store.values()).sort((a, b) => {
+		if (a.inactive !== b.inactive) return a.inactive ? 1 : -1;
+		return b.created_at - a.created_at;
+	});
 }
 
 function notify(): void {
@@ -51,12 +60,19 @@ const EVENT_PRIORITY: Record<EventType, number> = {
 	Notification: 0
 };
 
-export function upsert(ticket: Ticket): void {
+export function upsert(ticket: Omit<Ticket, 'inactive'>): void {
 	const existing = store.get(ticket.session_id);
-	if (existing && EVENT_PRIORITY[ticket.event_type] < EVENT_PRIORITY[existing.event_type]) {
+	// EVENT_PRIORITY guards against same-cycle Notification clobbering a
+	// PermissionRequest. Once a ticket is inactive the prior cycle is over, so
+	// reactivation bypasses the priority check and the new event_type wins.
+	if (
+		existing &&
+		!existing.inactive &&
+		EVENT_PRIORITY[ticket.event_type] < EVENT_PRIORITY[existing.event_type]
+	) {
 		return;
 	}
-	store.set(ticket.session_id, ticket);
+	store.set(ticket.session_id, { ...ticket, inactive: false });
 	notify();
 }
 
@@ -75,6 +91,28 @@ export function removeIfMatch(session_id: string, created_at: number): boolean {
 	const existing = store.get(session_id);
 	if (!existing || existing.created_at !== created_at) return false;
 	store.delete(session_id);
+	notify();
+	return true;
+}
+
+// Soft-remove counterpart of remove(): flips the ticket to inactive instead of
+// deleting it, and bumps created_at so the inactive tier sorts most-recently-
+// handled first. Returns true if a ticket existed for this session.
+export function markInactive(session_id: string): boolean {
+	const existing = store.get(session_id);
+	if (!existing) return false;
+	store.set(session_id, { ...existing, inactive: true, created_at: Date.now() });
+	notify();
+	return true;
+}
+
+// Conditional soft-remove: mirror of removeIfMatch for the perpetual model.
+// Used by the decline watcher to sink a declined permission ticket only if it
+// is still the same ticket the watcher captured.
+export function markInactiveIfMatch(session_id: string, created_at: number): boolean {
+	const existing = store.get(session_id);
+	if (!existing || existing.created_at !== created_at) return false;
+	store.set(session_id, { ...existing, inactive: true, created_at: Date.now() });
 	notify();
 	return true;
 }
