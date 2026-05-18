@@ -3,6 +3,7 @@ import {
 	upsert,
 	remove,
 	removeIfMatch,
+	markInactive,
 	incrementCounter,
 	getCachedTitle,
 	setCachedTitle,
@@ -92,11 +93,18 @@ export const POST: RequestHandler = async ({ request }) => {
 			// The refresh is fired below from Stop / PermissionRequest / Notification,
 			// where assistant content actually exists.
 			incrementCounter(session_id);
-		} else if (hook_event_name === 'SessionEnd') {
-			deleteSessionTopic(session_id);
 		}
-		remove(session_id);
-		return json({ ok: true, action: 'cleared' });
+		// SessionEnd is the only terminal clear: the Claude session is genuinely
+		// over, so hard-delete the ticket and its topic state. The other clear
+		// events represent "handled, not gone" — sink the ticket into the inactive
+		// tier of the dock instead.
+		if (hook_event_name === 'SessionEnd') {
+			deleteSessionTopic(session_id);
+			remove(session_id);
+			return json({ ok: true, action: 'cleared' });
+		}
+		markInactive(session_id);
+		return json({ ok: true, action: 'marked_inactive' });
 	}
 
 	const eventType = SUMMARIZE_EVENTS[hook_event_name];
