@@ -85,13 +85,18 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	if (CLEAR_EVENTS.has(hook_event_name)) {
 		if (hook_event_name === 'UserPromptSubmit') {
-			// Increment the counter as a measure of user-side activity (drives the
-			// every-N cadence). Do NOT fire the refresh here — at this moment the
-			// transcript contains only the user's prompt and no assistant text yet,
-			// so latestAssistantText would return null and the refresh would no-op.
-			// The refresh is fired below from Stop / PermissionRequest / Notification,
-			// where assistant content actually exists.
+			// Increment the counter (drives the every-N cadence) and kick off the
+			// summarize refresh here, against the just-submitted user message.
+			// Firing from UserPromptSubmit (instead of Stop) lets summarize run in
+			// parallel with the assistant's work, so the title is already cached by
+			// the time the ticket upserts on Stop / PermissionRequest / Notification.
+			// recentTranscriptText reads both user and assistant turns, so summarizing
+			// the user's prompt + prior context is sufficient — assistant text is not
+			// required.
 			incrementCounter(session_id);
+			if (transcript_path && shouldRefresh(session_id, getRefreshInterval())) {
+				void maybeRefreshTopic(session_id, transcript_path);
+			}
 		} else if (hook_event_name === 'SessionEnd') {
 			deleteSessionTopic(session_id);
 		}
@@ -108,18 +113,12 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
 	}
 
-	// Fire the refresh from the ticket-producing side, where the transcript
-	// already contains the latest assistant text. Fire-and-forget; setCachedTitle
-	// patches this ticket live via SSE when the refresh completes.
-	// const sidShort = session_id.slice(0, 8);
-	// const shouldFire = transcript_path ? shouldRefresh(session_id, getRefreshInterval()) : false;
-	// console.log(
-	// 	`[trace:hook sid=${sidShort}] event=${hook_event_name} transcript_path=${transcript_path ? 'set' : 'missing'} shouldRefresh=${shouldFire} cachedTitle="${getCachedTitle(session_id)}"`
-	// );
-	if (transcript_path && shouldRefresh(session_id, getRefreshInterval())) {
-		void maybeRefreshTopic(session_id, transcript_path);
-	}
-
+	// Title generation happens on UserPromptSubmit (see CLEAR_EVENTS branch above);
+	// by the time we land here the cache is typically populated and getCachedTitle
+	// below returns a non-empty string. If the UserPromptSubmit-side refresh failed
+	// or hasn't completed yet, the ticket will still upsert with title="" and the
+	// SSE live-patch in setCachedTitle will fill it in once the in-flight refresh
+	// resolves.
 	const created_at = Date.now();
 	upsert({
 		session_id,

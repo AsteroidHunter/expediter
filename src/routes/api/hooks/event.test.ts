@@ -38,10 +38,11 @@ test('UserPromptSubmit increments the session counter', async () => {
 	deleteSessionTopic(id);
 });
 
-test('UserPromptSubmit at counter < N does not call summarize (no refresh fires)', async () => {
+test('UserPromptSubmit with a failing transcript read keeps the cache empty', async () => {
 	const id = nextId();
-	// 4 hits with interval=5 — none should reach the refresh path. We assert by
-	// verifying the cache stays empty (no setCachedTitle has run).
+	// UserPromptSubmit now triggers maybeRefreshTopic directly. With a bad
+	// transcript_path the read fails, summarize never runs, and setCachedTitle
+	// is not called — cache stays empty across repeated hits.
 	for (let i = 0; i < 4; i++) {
 		await callHandler({
 			hook_event_name: 'UserPromptSubmit',
