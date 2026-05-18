@@ -13,6 +13,8 @@ declare module 'bun:test' {
 		toBeDefined(): void;
 		toBeUndefined(): void;
 		toBeLessThanOrEqual(expected: number): void;
+		toBeGreaterThanOrEqual(expected: number): void;
+		toEqual(expected: unknown): void;
 		toThrow(): void;
 		not: Matchers;
 	}

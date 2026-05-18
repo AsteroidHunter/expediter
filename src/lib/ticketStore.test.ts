@@ -11,6 +11,8 @@ import {
 	list,
 	remove,
 	removeIfMatch,
+	markInactive,
+	markInactiveIfMatch,
 	subscribe,
 	type Ticket
 } from './ticketStore';
@@ -201,6 +203,206 @@ test('removeIfMatch notifies subscribers only when it actually removes', () => {
 	expect(snapshots.length).toBe(noopBefore + 1); // real remove → one notify
 
 	unsub();
+});
+
+test('upsert defaults inactive to false on the stored ticket', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.inactive).toBe(false);
+	remove(id);
+});
+
+test('markInactive flips an active ticket and returns true', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	expect(markInactive(id)).toBe(true);
+	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	remove(id);
+});
+
+test('markInactive bumps created_at so the inactive tier sorts most-recent-first', () => {
+	const id = nextId();
+	const original = Date.now() - 10_000;
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Stop',
+		created_at: original
+	});
+	const beforeCall = Date.now();
+	markInactive(id);
+	const after = list().find((t) => t.session_id === id);
+	expect(after?.created_at).toBeGreaterThanOrEqual(beforeCall);
+	remove(id);
+});
+
+test('markInactive returns false and does not notify on unknown session', () => {
+	const snapshots: Ticket[][] = [];
+	const unsub = subscribe((snap) => snapshots.push(snap));
+	const before = snapshots.length;
+	expect(markInactive(nextId())).toBe(false);
+	expect(snapshots.length).toBe(before);
+	unsub();
+});
+
+test('markInactiveIfMatch sinks the ticket when created_at matches', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at
+	});
+	expect(markInactiveIfMatch(id, created_at)).toBe(true);
+	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	remove(id);
+});
+
+test('markInactiveIfMatch returns false and leaves the ticket active on mismatch', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at
+	});
+	expect(markInactiveIfMatch(id, created_at - 1)).toBe(false);
+	expect(list().find((t) => t.session_id === id)?.inactive).toBe(false);
+	remove(id);
+});
+
+test('markInactiveIfMatch returns false on unknown session', () => {
+	expect(markInactiveIfMatch(nextId(), 0)).toBe(false);
+});
+
+test('upsert reactivates an inactive ticket: inactive cleared, event_type overrides priority', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at: Date.now()
+	});
+	markInactive(id);
+	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+
+	// Notification has lower priority than PermissionRequest. On an active
+	// ticket it would be discarded; on an inactive one (reactivation path) it
+	// must win and the ticket goes back to active.
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Notification',
+		created_at: Date.now()
+	});
+
+	const t = list().find((t) => t.session_id === id);
+	expect(t?.inactive).toBe(false);
+	expect(t?.event_type).toBe('Notification');
+	remove(id);
+});
+
+test('upsert on an active ticket still honors EVENT_PRIORITY', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at: Date.now()
+	});
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Notification',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('PermissionRequest');
+	remove(id);
+});
+
+test('list() places all active tickets before any inactive tickets', () => {
+	const active = nextId();
+	const inactive = nextId();
+	// Stage inactive ticket with a more recent created_at than the active one
+	// to confirm tier dominates raw recency.
+	upsert({
+		session_id: active,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now() - 5_000
+	});
+	upsert({
+		session_id: inactive,
+		tmux_pane: '%2',
+		cwd: '',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	markInactive(inactive);
+
+	const ours = list().filter((t) => t.session_id === active || t.session_id === inactive);
+	expect(ours.map((t) => t.session_id)).toEqual([active, inactive]);
+
+	remove(active);
+	remove(inactive);
+});
+
+test('list() sorts within the active tier by created_at desc', () => {
+	const older = nextId();
+	const newer = nextId();
+	upsert({
+		session_id: older,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Stop',
+		created_at: 1_000
+	});
+	upsert({
+		session_id: newer,
+		tmux_pane: '%2',
+		cwd: '',
+		title: '',
+		event_type: 'Stop',
+		created_at: 2_000
+	});
+	const ours = list().filter((t) => t.session_id === older || t.session_id === newer);
+	expect(ours.map((t) => t.session_id)).toEqual([newer, older]);
+	remove(older);
+	remove(newer);
 });
 
 test('multiple sessions are isolated', () => {
