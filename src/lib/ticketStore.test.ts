@@ -26,8 +26,15 @@ test('incrementCounter returns 1 on first call, increments thereafter', () => {
 	expect(incrementCounter(id)).toBe(3);
 });
 
-test('shouldRefresh returns false before any prompt (counter === 0)', () => {
+test('shouldRefresh returns true on a session with no entry (dev-server restart case)', () => {
 	const id = nextId();
+	expect(shouldRefresh(id, 5)).toBe(true);
+});
+
+test('shouldRefresh returns false when entry exists with counter === 0', () => {
+	const id = nextId();
+	markRefreshStart(id);
+	markRefreshEnd(id);
 	expect(shouldRefresh(id, 5)).toBe(false);
 });
 
@@ -103,7 +110,6 @@ test('deleteSessionTopic clears all per-session state', () => {
 	deleteSessionTopic(id);
 
 	expect(getCachedTitle(id)).toBe('');
-	expect(shouldRefresh(id, 1)).toBe(false); // counter reset
 });
 
 test('setCachedTitle on unknown session lazily creates the entry', () => {

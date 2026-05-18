@@ -56,14 +56,16 @@ test('UserPromptSubmit at counter < N does not call summarize (no refresh fires)
 test('PostToolUse does not increment the counter (would over-trigger)', async () => {
 	const id = nextId();
 	await callHandler({ hook_event_name: 'PostToolUse', session_id: id });
-	// No counter entry → shouldRefresh returns false (counter === 0 guard).
-	expect(shouldRefresh(id, 1)).toBe(false);
+	// PostToolUse routes through CLEAR_EVENTS and returns before shouldRefresh
+	// is reached in production; assert the cache stayed empty as a side-effect
+	// check that no summarize ran.
+	expect(getCachedTitle(id)).toBe('');
 });
 
 test('PostToolUseFailure does not increment the counter', async () => {
 	const id = nextId();
 	await callHandler({ hook_event_name: 'PostToolUseFailure', session_id: id });
-	expect(shouldRefresh(id, 1)).toBe(false);
+	expect(getCachedTitle(id)).toBe('');
 });
 
 test('Stop with a cached title upserts a ticket carrying that title', async () => {

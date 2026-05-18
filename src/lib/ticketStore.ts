@@ -109,10 +109,13 @@ export function setCachedTitle(session_id: string, title: string): void {
 // Fire a refresh whenever (a) we have an empty cache and at least one prompt
 // has happened (so brand-new sessions or expediter-started-mid-session get a
 // topic immediately, and earlier failed refreshes get retried), or (b) we
-// hit the regular every-N cadence once the cache is populated.
+// hit the regular every-N cadence once the cache is populated. A missing
+// entry means the dev-server restarted mid-session; the caller already gated
+// on transcript_path + SUMMARIZE_EVENT, so we know the session is real.
 export function shouldRefresh(session_id: string, intervalN: number): boolean {
 	const entry = sessionTopics.get(session_id);
-	if (!entry || entry.refreshInFlight || entry.counter === 0) return false;
+	if (!entry) return true;
+	if (entry.refreshInFlight || entry.counter === 0) return false;
 	if (entry.cachedTitle === '') return true;
 	return entry.counter % intervalN === 0;
 }
