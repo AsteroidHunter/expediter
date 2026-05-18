@@ -1,1 +1,1 @@
-![Expediter banner](docs/assets/expediterv0_banner.png)
+![Expediter banner](docs/assets/expediterv0_banner.webp)
