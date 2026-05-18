@@ -13,6 +13,9 @@ declare module 'bun:test' {
 		toBeDefined(): void;
 		toBeUndefined(): void;
 		toBeLessThanOrEqual(expected: number): void;
+		toBeInstanceOf(expected: unknown): void;
+		toContain(expected: unknown): void;
+		toEqual(expected: unknown): void;
 		toThrow(): void;
 		not: Matchers;
 	}
