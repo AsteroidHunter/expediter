@@ -11,6 +11,18 @@ import qrcode from 'qrcode-terminal';
 
 const PORT = process.env.EXPEDITER_PORT ?? '5179';
 const HOME = process.env.EXPEDITER_HOME;
+const PRINT_URL = process.argv.includes('--print-url');
+const SHOW_HELP = process.argv.includes('--help') || process.argv.includes('-h');
+
+if (SHOW_HELP) {
+	console.log('Usage: expediter [--print-url] [--help]');
+	console.log('');
+	console.log('  --print-url   Also print the tethered URL as text (default: QR only).');
+	console.log('                Use this only if your phone cannot scan the QR — the URL');
+	console.log('                contains the session token and will stay in terminal scrollback.');
+	console.log('  --help, -h    Show this message.');
+	process.exit(0);
+}
 
 if (!HOME) {
 	console.error('expediter: EXPEDITER_HOME is not set. Re-run install.sh from the cloned repo.');
@@ -18,17 +30,24 @@ if (!HOME) {
 }
 
 // --- pick the URL the phone should hit ---
-// Mirror bin/tether-ip.mjs: rank candidates so iOS USB hotspot comes first,
-// then iOS 17+ USB tether, Android tether, LAN, link-local. The phone has to
-// reach the daemon over the tether interface for the origin gate to pass.
+// Wireless first: standard LAN ranges rank ahead of USB-tether subnets. The
+// tether-specific patterns (172.20.10.x, 192.0.0.x, 192.168.42.x) are subsets
+// of broader RFC1918 ranges, so they must be checked first — otherwise the
+// generic RFC1918 match would score them as standard LAN.
 function score(addr) {
-	if (addr.startsWith('172.20.10.')) return 0;
-	if (addr.startsWith('192.0.0.')) return 1;
+	// USB-tether subnets (specific) → rank below standard LAN
+	if (addr.startsWith('172.20.10.')) return 2;
+	if (addr.startsWith('192.0.0.')) return 2;
 	if (addr.startsWith('192.168.42.')) return 2;
-	if (addr.startsWith('192.168.')) return 3;
-	if (addr.startsWith('10.')) return 3;
-	if (addr.startsWith('169.254.')) return 4;
-	return 5;
+
+	// Standard LAN (RFC1918)
+	if (addr.startsWith('192.168.')) return 0;
+	if (addr.startsWith('10.')) return 0;
+	if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return 0;
+
+	// Link-local — last resort
+	if (addr.startsWith('169.254.')) return 3;
+	return 4;
 }
 
 function pickTetherAddress() {
@@ -67,26 +86,63 @@ async function waitForDaemon(timeoutMs = 15_000) {
 	return false;
 }
 
-function printAccess() {
+// --- fetch the in-memory token from the loopback-only endpoint ---
+async function fetchToken() {
+	let res;
+	try {
+		res = await fetch(`http://127.0.0.1:${PORT}/api/token`, {
+			signal: AbortSignal.timeout(2000)
+		});
+	} catch (err) {
+		throw new Error(
+			`expediter: could not reach the daemon at http://127.0.0.1:${PORT}/api/token to read the session token. Is the daemon running? (${err.message})`
+		);
+	}
+	if (res.status !== 200) {
+		throw new Error(
+			`expediter: /api/token returned HTTP ${res.status}. Expected 200. The daemon may be misconfigured.`
+		);
+	}
+	return await res.text();
+}
+
+async function printAccess() {
 	const addr = pickTetherAddress();
 	if (!addr) {
 		console.log('');
 		console.log(`Daemon running at http://localhost:${PORT}/`);
 		console.log('');
-		console.log('No tether interface detected. Plug your phone in with USB Personal Hotspot');
-		console.log('on, then re-run `expediter` to get the URL + QR code.');
+		console.log('No external network interface detected. Connect to Wi-Fi or plug your phone');
+		console.log('in with USB Personal Hotspot, then re-run `expediter` to get the QR code.');
 		return;
 	}
-	const url = `http://${addr}:${PORT}/`;
+
+	let token;
+	try {
+		token = await fetchToken();
+	} catch (err) {
+		console.error('');
+		console.error(err.message);
+		process.exit(1);
+	}
+
+	const url = `http://${addr}:${PORT}/#${token}`;
 	console.log('');
-	console.log(`  ${url}`);
+	console.log('  Scan the QR with your phone:');
 	console.log('');
 	qrcode.generate(url, { small: true });
+	if (PRINT_URL) {
+		console.log('');
+		console.log(`  ${url}`);
+		console.log('');
+		console.log('  WARNING: the URL above contains the session token and will stay in');
+		console.log('  your terminal scrollback. Restart the daemon to invalidate it.');
+	}
 }
 
 // --- main ---
 if (await isDaemonUp()) {
-	printAccess();
+	await printAccess();
 	process.exit(0);
 }
 
@@ -103,7 +159,7 @@ process.on('SIGINT', () => child.kill('SIGINT'));
 process.on('SIGTERM', () => child.kill('SIGTERM'));
 
 if (await waitForDaemon()) {
-	printAccess();
+	await printAccess();
 } else {
 	console.error('expediter: daemon did not come up within 15s; check the logs above.');
 }
