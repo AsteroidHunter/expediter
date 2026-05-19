@@ -32,7 +32,11 @@ export async function summarize(
 	const prompt = `${INSTRUCTION}\n\nMessage:\n\n"""\n${message}\n"""`;
 	const traceId = ++traceCounter;
 	const t0 = Date.now();
+	// Gated on DEBUG_SUMMARIZE so per-summary trace + stderr echo only run when
+	// diagnosing the summarize subprocess locally. console.warn calls below for
+	// timeouts, spawn errors, and non-zero exits stay unconditional.
 	const log = (msg: string): void => {
+		if (!process.env.DEBUG_SUMMARIZE) return;
 		console.log(`[trace:summarize#${traceId} T+${Date.now() - t0}ms] ${msg}`);
 	};
 	log(
@@ -50,19 +54,25 @@ export async function summarize(
 			resolve(result);
 		};
 
+		const args = [
+			'-p',
+			prompt,
+			'--model',
+			'haiku',
+			'--output-format',
+			'text',
+			'--no-session-persistence'
+		];
+		// `--debug` emits verbose stderr from `claude -p` (request bodies,
+		// routing decisions, partial prompt content) which then gets echoed by
+		// the stderr handler below. Gated on the same flag as `log()` so a
+		// single env var turns on full subprocess diagnostics.
+		if (process.env.DEBUG_SUMMARIZE) args.push('--debug');
+
 		log('spawning claude');
 		const proc = spawnFn(
 			'claude',
-			[
-				'-p',
-				prompt,
-				'--model',
-				'haiku',
-				'--output-format',
-				'text',
-				'--no-session-persistence',
-				'--debug'
-			],
+			args,
 			// Clear TMUX_PANE so the subprocess's own hook firing bails at the
 			// `[ -z "${TMUX_PANE:-}" ]` gate in expediter-hook.sh, instead of
 			// looping UserPromptSubmit/Stop back to this server as a phantom

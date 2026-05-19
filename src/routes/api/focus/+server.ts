@@ -1,6 +1,13 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
 import { focusPane, FocusError } from '$lib/tmux';
 
+// Gated on DEBUG_FOCUS so happy-path request/ok logs only run when diagnosing
+// tap-to-focus locally. Error-path console.log calls below stay unconditional
+// so failed taps are always visible.
+const debugFocus = (msg: string): void => {
+	if (process.env.DEBUG_FOCUS) console.log(msg);
+};
+
 export const POST: RequestHandler = async ({ request }) => {
 	let body: { pane?: string };
 	try {
@@ -15,11 +22,11 @@ export const POST: RequestHandler = async ({ request }) => {
 	}
 
 	const t0 = Date.now();
-	console.log(`[focus] req pane=${pane}`);
+	debugFocus(`[focus] req pane=${pane}`);
 	try {
 		await focusPane(pane);
 		const dt = Date.now() - t0;
-		console.log(`[focus] ok pane=${pane} dt=${dt}ms`);
+		debugFocus(`[focus] ok pane=${pane} dt=${dt}ms`);
 		return json({ ok: true });
 	} catch (err) {
 		const dt = Date.now() - t0;

@@ -10,6 +10,13 @@ export class FocusError extends Error {
 	}
 }
 
+// Gated on DEBUG_FOCUS so happy-path focus logs only run when diagnosing
+// tap-to-focus locally. Error-path console.log calls below stay unconditional
+// so failed taps are always visible.
+const debugFocus = (msg: string): void => {
+	if (process.env.DEBUG_FOCUS) console.log(msg);
+};
+
 // Diagnostic: capture Terminal/macOS state. Used before and after the focus
 // AppleScript so we can spot taps where the script "succeeded" but nothing
 // actually moved. Returns a short string like "Terminal/dev/ttys020"
@@ -170,7 +177,7 @@ export async function focusPane(pane: string): Promise<void> {
 	}
 
 	const tty = await clientTtyForSession(session);
-	console.log(`[focus] pane=${pane} session=${session} tty=${tty ?? '<none>'}`);
+	debugFocus(`[focus] pane=${pane} session=${session} tty=${tty ?? '<none>'}`);
 
 	// const pre = await captureTerminalState();
 	// console.log(`[focus] state pre=${pre}`);
@@ -187,7 +194,7 @@ export async function focusPane(pane: string): Promise<void> {
 		if (tty) {
 			const result = parseActivateResult(so);
 			applyActivateResult(ttyToTab, tty, result);
-			console.log(`[focus] activate tty=${tty} result=${so || '<empty>'} cached=${cached ? 'y' : 'n'}`);
+			debugFocus(`[focus] activate tty=${tty} result=${so || '<empty>'} cached=${cached ? 'y' : 'n'}`);
 		}
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
