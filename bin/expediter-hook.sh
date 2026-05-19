@@ -43,10 +43,22 @@ sys.stdout.write(json.dumps(data))
 ' "$EVENT" 2>/dev/null) || PAYLOAD=""
 
 if [ -n "$PAYLOAD" ]; then
-	curl -s -o /dev/null -m 2 \
+	# /api/hooks/event is loopback-trusted at the gate (see hooks.server.ts), so
+	# we don't fetch or send the daemon's session token from here. Capture the
+	# HTTP status into a variable so a DEBUG_HOOK-gated warning can surface
+	# daemon-down (000) or future-tightening (403) failures without surfacing as
+	# a Claude Code hook error in the user's terminal.
+	# curl -w '%{http_code}' prints "000" on connection failure (and still
+	# exits non-zero), so a `|| echo 000` fallback would concatenate "000000".
+	# Just let the assignment swallow curl's exit status — STATUS will be the
+	# "000" curl emits if the daemon is unreachable.
+	STATUS=$(curl -s -o /dev/null -m 2 -w '%{http_code}' \
 		-X POST "http://localhost:${PORT}/api/hooks/event" \
 		-H 'Content-Type: application/json' \
-		-d "$PAYLOAD" || true
+		-d "$PAYLOAD" 2>/dev/null)
+	if [ -n "${DEBUG_HOOK:-}" ] && [[ "$STATUS" != 2* ]]; then
+		echo "[hook] daemon returned HTTP $STATUS for /api/hooks/event" >&2
+	fi
 fi
 
 exit 0
