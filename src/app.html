@@ -9,6 +9,23 @@
 		<meta name="apple-mobile-web-app-title" content="Expediter" />
 		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 		<link rel="apple-touch-icon" href="/icon-192.png" />
+		<script>
+			// Grab the per-session token from the URL fragment (#<token>), stash it
+			// in sessionStorage, and clear the address bar. Runs synchronously before
+			// SvelteKit hydration so any Svelte component reading sessionStorage sees
+			// the token already in place. Plain <script> — no async/defer/module —
+			// for that same reason. The try/catch keeps a missing sessionStorage
+			// (some private-mode contexts) from crashing the page render.
+			try {
+				var h = location.hash;
+				if (h && h.length > 1) {
+					sessionStorage.setItem('expediter-token', h.slice(1));
+					history.replaceState(null, '', location.pathname);
+				}
+			} catch (e) {
+				/* sessionStorage unavailable — page will fall back to "Scan QR" message */
+			}
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

@@ -8,7 +8,7 @@ afterEach(() => {
 test('getServerToken returns a non-empty string', () => {
 	const token = getServerToken();
 	expect(typeof token).toBe('string');
-	expect(token.length).toBeGreaterThan(0);
+	expect(token.length > 0).toBe(true);
 });
 
 test('repeated calls return the same string within a process', () => {
@@ -21,7 +21,7 @@ test('repeated calls return the same string within a process', () => {
 
 test('returned string is 22 base64url characters (16 random bytes)', () => {
 	const token = getServerToken();
-	expect(token).toMatch(/^[A-Za-z0-9_-]{22}$/);
+	expect(/^[A-Za-z0-9_-]{22}$/.test(token)).toBe(true);
 });
 
 test('__setTokenForTesting injects a known value', () => {
@@ -35,5 +35,5 @@ test('__setTokenForTesting(null) clears cache; next call mints fresh', () => {
 	__setTokenForTesting(null);
 	const minted = getServerToken();
 	expect(minted).not.toBe('first-value-22-chars-x');
-	expect(minted).toMatch(/^[A-Za-z0-9_-]{22}$/);
+	expect(/^[A-Za-z0-9_-]{22}$/.test(minted)).toBe(true);
 });

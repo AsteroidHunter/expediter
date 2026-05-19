@@ -3,6 +3,7 @@
 	import { fly } from 'svelte/transition';
 	import { flip } from 'svelte/animate';
 	import { browser } from '$app/environment';
+	import { getClientToken, clearClientToken } from '$lib/clientToken';
 
 	type EventType = 'Stop' | 'PermissionRequest' | 'Notification';
 	// `title` may be empty string before the async topic refresh has run;
@@ -21,6 +22,9 @@
 	let connected = $state(false);
 	let focusing = $state<string | null>(null);
 	let mockMode = false;
+	// Reactive: cleared when /api/ping returns 403 (token died, daemon restarted).
+	// Initial value is read from sessionStorage on the browser; null on the server.
+	let clientToken = $state<string | null>(browser ? getClientToken() : null);
 
 	const mockLoaders = import.meta.glob<{ getMockTickets: () => Ticket[] }>(
 		'../../internal/fixtures/mocktickets.ts'
@@ -32,7 +36,26 @@
 	let visibilityListener: (() => void) | null = null;
 	let pageshowListener: (() => void) | null = null;
 
-	function openStream(): void {
+	// Background probe to detect a dead token (daemon restarted while we slept).
+	// 403 means our sessionStorage value is stale — clear it so the empty-state
+	// branch flips to "Scan the QR code...". 200 or any error means "token is
+	// still good (or we can't tell) — let EventSource auto-reconnect handle the
+	// transient case."
+	async function probeToken(): Promise<'valid' | 'dead' | 'unknown'> {
+		if (!clientToken) return 'dead';
+		try {
+			const res = await fetch('/api/ping', {
+				headers: { 'x-expediter-token': clientToken },
+				signal: AbortSignal.timeout(2000)
+			});
+			if (res.status === 403) return 'dead';
+			return 'valid';
+		} catch {
+			return 'unknown';
+		}
+	}
+
+	async function openStream(): Promise<void> {
 		if (!browser) return;
 		if (mockMode) return;
 		if (eventSource) {
@@ -43,12 +66,45 @@
 			}
 			eventSource = null;
 		}
-		eventSource = new EventSource('/api/stream');
+		if (!clientToken) {
+			connected = false;
+			return;
+		}
+		const status = await probeToken();
+		if (status === 'dead') {
+			clearClientToken();
+			clientToken = null;
+			connected = false;
+			return;
+		}
+		// status === 'valid' or 'unknown' — open the EventSource. For 'unknown'
+		// (network blip), EventSource's retry loop will handle reconnection.
+		eventSource = new EventSource(
+			`/api/stream?t=${encodeURIComponent(clientToken)}`
+		);
 		eventSource.onopen = () => {
 			connected = true;
 		};
 		eventSource.onerror = () => {
 			connected = false;
+			// Fire-and-forget re-probe to catch the daemon-restart case where the
+			// SSE was working until the daemon went away.
+			if (clientToken) {
+				void probeToken().then((s) => {
+					if (s === 'dead') {
+						clearClientToken();
+						clientToken = null;
+						if (eventSource) {
+							try {
+								eventSource.close();
+							} catch {
+								/* already closed */
+							}
+							eventSource = null;
+						}
+					}
+				});
+			}
 		};
 		eventSource.onmessage = (e: MessageEvent) => {
 			try {
@@ -93,11 +149,19 @@
 	}
 
 	async function focusSession(ticket: Ticket): Promise<void> {
+		if (!clientToken) {
+			// No token in sessionStorage — the empty-state branch should be visible
+			// anyway, but if the user somehow taps a stale ticket without one, no-op.
+			return;
+		}
 		focusing = ticket.session_id;
 		try {
 			await fetch('/api/focus', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: {
+					'Content-Type': 'application/json',
+					'x-expediter-token': clientToken
+				},
 				body: JSON.stringify({ pane: ticket.tmux_pane })
 			});
 		} catch {
@@ -205,7 +269,11 @@
 		></span>
 	</header>
 
-	{#if tickets.length === 0}
+	{#if !clientToken}
+		<div class="empty empty-no-token" aria-live="polite">
+			<span class="empty-label">Scan the QR code in your terminal to connect</span>
+		</div>
+	{:else if tickets.length === 0}
 		<div class="empty" aria-live="polite">
 			<span class="dot"></span>
 			<span class="empty-label">all clear</span>
