@@ -1,4 +1,4 @@
-![Expediter banner](docs/assets/expediterv0_banner.webp)
+![Expediter banner](docs/assets/expediterv0_banner_260519.webp)
 
 ## Install
 
