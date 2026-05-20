@@ -153,14 +153,18 @@ log "Building..."
 # --- 4. Config file --------------------------------------------------------
 
 mkdir -p "$HOME/.config/expediter"
-cat > "$HOME/.config/expediter/config" <<EOF
+# Quoted heredoc <<'EOF' so the backticks around `export` in the comment text
+# below aren't run as command substitutions (an unquoted heredoc would execute
+# `export` and splat the shell's exported environment into the config file).
+# $REPO needs interpolation, so it's appended via printf after the heredoc.
+cat > "$HOME/.config/expediter/config" <<'EOF'
 # expediter config — written by install.sh
 # If you move the cloned repo, update EXPEDITER_HOME below (or re-run install.sh).
 # The `export` is load-bearing: the shims source this file and exec bun, which
 # is a child process — without `export`, EXPEDITER_HOME would be a shell var and
 # would not propagate to bun's environment, causing bin/expediter.mjs to abort.
-export EXPEDITER_HOME="$REPO"
 EOF
+printf 'export EXPEDITER_HOME="%s"\n' "$REPO" >> "$HOME/.config/expediter/config"
 log "Wrote $HOME/.config/expediter/config"
 
 # --- 5. Shims --------------------------------------------------------------
