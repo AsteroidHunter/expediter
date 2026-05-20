@@ -10,10 +10,12 @@ export type Ticket = {
 	title: string;
 	event_type: EventType;
 	created_at: number;
-	// True after a clear event (UserPromptSubmit / PostToolUse / PostToolUseFailure
-	// / manual permission decline) — ticket sinks into the gray tier of the dock
-	// but is not deleted. Cleared back to false on the next upsert (reactivation).
-	inactive: boolean;
+	// True while Claude is processing — set on UserPromptSubmit / PostToolUse /
+	// PostToolUseFailure. Renders the ticket in the green "working" visual
+	// (depressed + shimmer) and sorts it into the lower tier of the dock.
+	// Cleared back to false on the next upsert (a fresh Stop / PermissionRequest /
+	// Notification reactivates the ticket) or by resolveDeclineIfMatch.
+	working: boolean;
 };
 
 type SessionTopic = {
@@ -36,10 +38,11 @@ function getOrCreateTopic(session_id: string): SessionTopic {
 }
 
 function snapshot(): Ticket[] {
-	// Two-tier sort: active tickets first, inactive second; within each tier,
-	// newest created_at first.
+	// Two-tier sort: idle tickets first (needing user attention), working tickets
+	// second (Claude is processing, no action required); within each tier, newest
+	// created_at first.
 	return Array.from(store.values()).sort((a, b) => {
-		if (a.inactive !== b.inactive) return a.inactive ? 1 : -1;
+		if (a.working !== b.working) return a.working ? 1 : -1;
 		return b.created_at - a.created_at;
 	});
 }
@@ -60,19 +63,19 @@ const EVENT_PRIORITY: Record<EventType, number> = {
 	Notification: 0
 };
 
-export function upsert(ticket: Omit<Ticket, 'inactive'>): void {
+export function upsert(ticket: Omit<Ticket, 'working'>): void {
 	const existing = store.get(ticket.session_id);
 	// EVENT_PRIORITY guards against same-cycle Notification clobbering a
-	// PermissionRequest. Once a ticket is inactive the prior cycle is over, so
+	// PermissionRequest. Once a ticket is working the prior cycle is over, so
 	// reactivation bypasses the priority check and the new event_type wins.
 	if (
 		existing &&
-		!existing.inactive &&
+		!existing.working &&
 		EVENT_PRIORITY[ticket.event_type] < EVENT_PRIORITY[existing.event_type]
 	) {
 		return;
 	}
-	store.set(ticket.session_id, { ...ticket, inactive: false });
+	store.set(ticket.session_id, { ...ticket, working: false });
 	notify();
 }
 
@@ -95,24 +98,44 @@ export function removeIfMatch(session_id: string, created_at: number): boolean {
 	return true;
 }
 
-// Soft-remove counterpart of remove(): flips the ticket to inactive instead of
-// deleting it, and bumps created_at so the inactive tier sorts most-recently-
-// handled first. Returns true if a ticket existed for this session.
-export function markInactive(session_id: string): boolean {
+// Flip the ticket into the working state instead of deleting it, and bump
+// created_at so the working tier sorts most-recently-processing first. Returns
+// true if a ticket existed for this session.
+export function markWorking(session_id: string): boolean {
 	const existing = store.get(session_id);
 	if (!existing) return false;
-	store.set(session_id, { ...existing, inactive: true, created_at: Date.now() });
+	store.set(session_id, { ...existing, working: true, created_at: Date.now() });
 	notify();
 	return true;
 }
 
-// Conditional soft-remove: mirror of removeIfMatch for the perpetual model.
-// Used by the decline watcher to sink a declined permission ticket only if it
-// is still the same ticket the watcher captured.
-export function markInactiveIfMatch(session_id: string, created_at: number): boolean {
+// Conditional markWorking: mirror of removeIfMatch for the perpetual model.
+// Currently unused — retained as the symmetric partner of markWorking in case a
+// future async observer needs a created_at-guarded transition. Safe to drop if
+// it never gains a caller.
+export function markWorkingIfMatch(session_id: string, created_at: number): boolean {
 	const existing = store.get(session_id);
 	if (!existing || existing.created_at !== created_at) return false;
-	store.set(session_id, { ...existing, inactive: true, created_at: Date.now() });
+	store.set(session_id, { ...existing, working: true, created_at: Date.now() });
+	notify();
+	return true;
+}
+
+// Decline resolution: a manually-declined PermissionRequest lifts back to a
+// Stop-yellow resting state (event_type='Stop', working=false) rather than
+// sticking in the red/working visual. Bumps created_at so the resolved ticket
+// sorts to the top of the idle tier, like a fresh Stop would. Guarded by
+// created_at so a stale watcher fire (after the ticket has been superseded by
+// a newer event for the same session_id) no-ops instead of clobbering.
+export function resolveDeclineIfMatch(session_id: string, created_at: number): boolean {
+	const existing = store.get(session_id);
+	if (!existing || existing.created_at !== created_at) return false;
+	store.set(session_id, {
+		...existing,
+		event_type: 'Stop',
+		working: false,
+		created_at: Date.now()
+	});
 	notify();
 	return true;
 }
