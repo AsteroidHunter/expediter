@@ -276,7 +276,7 @@
 	{:else if tickets.length === 0}
 		<div class="empty" aria-live="polite">
 			<span class="dot"></span>
-			<span class="empty-label">all clear</span>
+			<span class="empty-label">You have zero tickets!</span>
 		</div>
 	{:else}
 		<ul class="queue">
@@ -425,6 +425,8 @@
 		font-size: 13px;
 		letter-spacing: 0.18em;
 		text-transform: uppercase;
+		text-align: center;
+		padding: 0 24px;
 	}
 
 	.queue {
