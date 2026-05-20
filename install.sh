@@ -156,7 +156,10 @@ mkdir -p "$HOME/.config/expediter"
 cat > "$HOME/.config/expediter/config" <<EOF
 # expediter config — written by install.sh
 # If you move the cloned repo, update EXPEDITER_HOME below (or re-run install.sh).
-EXPEDITER_HOME="$REPO"
+# The `export` is load-bearing: the shims source this file and exec bun, which
+# is a child process — without `export`, EXPEDITER_HOME would be a shell var and
+# would not propagate to bun's environment, causing bin/expediter.mjs to abort.
+export EXPEDITER_HOME="$REPO"
 EOF
 log "Wrote $HOME/.config/expediter/config"
 
@@ -175,6 +178,9 @@ if [ ! -f "$config" ]; then
 fi
 # shellcheck disable=SC1090
 . "$config"
+# Re-export defensively in case the user edited the config and dropped `export`.
+# The mjs reads process.env.EXPEDITER_HOME and bails if it's not in env.
+export EXPEDITER_HOME
 if [ -z "${EXPEDITER_HOME:-}" ] || [ ! -d "$EXPEDITER_HOME" ]; then
 	echo "expediter: cannot find the Expediter repo at ${EXPEDITER_HOME:-<unset>}"
 	echo "The folder may have been moved or renamed."
@@ -195,6 +201,8 @@ if [ ! -f "$config" ]; then
 fi
 # shellcheck disable=SC1090
 . "$config"
+# Re-export defensively — claudex.sh and any child process needs it in env.
+export EXPEDITER_HOME
 if [ -z "${EXPEDITER_HOME:-}" ] || [ ! -d "$EXPEDITER_HOME" ]; then
 	echo "claudex: cannot find the Expediter repo at ${EXPEDITER_HOME:-<unset>}"
 	echo "The folder may have been moved or renamed."
