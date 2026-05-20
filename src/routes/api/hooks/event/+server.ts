@@ -2,8 +2,8 @@ import { json, type RequestHandler } from '@sveltejs/kit';
 import {
 	upsert,
 	remove,
-	markInactive,
-	markInactiveIfMatch,
+	markWorking,
+	resolveDeclineIfMatch,
 	incrementCounter,
 	getCachedTitle,
 	setCachedTitle,
@@ -23,6 +23,20 @@ const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	PermissionRequest: 'PermissionRequest',
 	Notification: 'Notification'
 };
+
+// Tracks the cancel handle for each session_id's active decline watcher so we
+// can stop it the moment the PR is approved or superseded by any other event.
+// Without this the watcher leaks for DEFAULT_TIMEOUT_MS (1h, see
+// declineWatcher.ts) every time a PR is approved rather than declined.
+const activeDeclineWatchers = new Map<string, () => void>();
+
+function cancelActiveDeclineWatcher(session_id: string): void {
+	const cancel = activeDeclineWatchers.get(session_id);
+	if (cancel) {
+		cancel();
+		activeDeclineWatchers.delete(session_id);
+	}
+}
 
 const CLEAR_EVENTS = new Set([
 	'UserPromptSubmit',
@@ -84,6 +98,12 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'missing hook_event_name or session_id' }, { status: 400 });
 	}
 
+	// Any subsequent event for this session supersedes a still-running decline
+	// watcher from a prior PermissionRequest — approve, decline-detected, fresh
+	// PR, Stop, Notification, or SessionEnd. Cancel before branching so each
+	// branch can start fresh; the PR branch below will register a new watcher.
+	cancelActiveDeclineWatcher(session_id);
+
 	if (CLEAR_EVENTS.has(hook_event_name)) {
 		if (hook_event_name === 'UserPromptSubmit') {
 			// Increment the counter (drives the every-N cadence) and kick off the
@@ -101,15 +121,15 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 		// SessionEnd is the only terminal clear: the Claude session is genuinely
 		// over, so hard-delete the ticket and its topic state. The other clear
-		// events represent "handled, not gone" — sink the ticket into the inactive
-		// tier of the dock instead.
+		// events represent "Claude is processing" — flip the ticket into the
+		// working tier of the dock instead.
 		if (hook_event_name === 'SessionEnd') {
 			deleteSessionTopic(session_id);
 			remove(session_id);
 			return json({ ok: true, action: 'cleared' });
 		}
-		markInactive(session_id);
-		return json({ ok: true, action: 'marked_inactive' });
+		markWorking(session_id);
+		return json({ ok: true, action: 'marked_working' });
 	}
 
 	const eventType = SUMMARIZE_EVENTS[hook_event_name];
@@ -140,19 +160,23 @@ export const POST: RequestHandler = async ({ request }) => {
 	// Claude Code emits no hook event when the user manually declines or
 	// interrupts a permission prompt, so a PermissionRequest ticket would
 	// otherwise sit on screen until the next UserPromptSubmit happens to clear
-	// it. Tail the transcript JSONL for the rejection tool_result line and
-	// soft-clear the ticket (mark inactive) the moment it appears. The
-	// created_at guard makes a late watcher no-op if the ticket was already
-	// cleared/replaced by a newer event for the same session_id.
+	// it. Tail the transcript JSONL for the rejection tool_result line and lift
+	// the ticket back to Stop+yellow the moment it appears. The created_at
+	// guard makes a late watcher no-op if the ticket was already cleared or
+	// replaced by a newer event for the same session_id. The cancel handle is
+	// stored so an approved (not declined) PR doesn't leak the watcher — the
+	// next event for this session cancels via cancelActiveDeclineWatcher above.
 	if (eventType === 'PermissionRequest' && transcript_path) {
-		watchForDecline({
+		const cancel = watchForDecline({
 			transcriptPath: transcript_path,
 			sessionId: session_id,
 			createdAt: created_at,
 			onDecline: () => {
-				markInactiveIfMatch(session_id, created_at);
+				resolveDeclineIfMatch(session_id, created_at);
+				activeDeclineWatchers.delete(session_id);
 			}
 		});
+		activeDeclineWatchers.set(session_id, cancel);
 	}
 
 	return json({ ok: true, action: 'upserted' });
