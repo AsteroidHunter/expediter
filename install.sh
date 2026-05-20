@@ -193,13 +193,18 @@ prompt_keypress() {
 # --- 0. preflight ----------------------------------------------------------
 
 if [ "$(uname -s)" != "Darwin" ]; then
-	err "Expediter currently supports macOS only."
+	err "The expediter runs on macOS only. Linux and Windows support are not yet available. Sorry!"
 	exit 1
 fi
 
-log "Expediter installer"
-log "Repo: $REPO"
-log ""
+banner "installer"
+printf '\n'
+dev_note
+prompt_keypress "yn" "Ready to begin installation? (y / n) "
+if [ "$REPLY" != "y" ]; then
+	printf 'Leaving so soon? Bon voyage 🚢\n'
+	exit 0
+fi
 
 # --- 1. Claude Code --------------------------------------------------------
 
