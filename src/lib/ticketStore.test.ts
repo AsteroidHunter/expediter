@@ -11,8 +11,9 @@ import {
 	list,
 	remove,
 	removeIfMatch,
-	markInactive,
-	markInactiveIfMatch,
+	markWorking,
+	markWorkingIfMatch,
+	resolveDeclineIfMatch,
 	subscribe,
 	type Ticket
 } from './ticketStore';
@@ -211,7 +212,7 @@ test('removeIfMatch notifies subscribers only when it actually removes', () => {
 	unsub();
 });
 
-test('upsert defaults inactive to false on the stored ticket', () => {
+test('upsert defaults working to false on the stored ticket', () => {
 	const id = nextId();
 	upsert({
 		session_id: id,
@@ -221,11 +222,11 @@ test('upsert defaults inactive to false on the stored ticket', () => {
 		event_type: 'Stop',
 		created_at: Date.now()
 	});
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(false);
+	expect(list().find((t) => t.session_id === id)?.working).toBe(false);
 	remove(id);
 });
 
-test('markInactive flips an active ticket and returns true', () => {
+test('markWorking flips an idle ticket and returns true', () => {
 	const id = nextId();
 	upsert({
 		session_id: id,
@@ -235,12 +236,12 @@ test('markInactive flips an active ticket and returns true', () => {
 		event_type: 'Stop',
 		created_at: Date.now()
 	});
-	expect(markInactive(id)).toBe(true);
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	expect(markWorking(id)).toBe(true);
+	expect(list().find((t) => t.session_id === id)?.working).toBe(true);
 	remove(id);
 });
 
-test('markInactive bumps created_at so the inactive tier sorts most-recent-first', () => {
+test('markWorking bumps created_at so the working tier sorts most-recent-first', () => {
 	const id = nextId();
 	const original = Date.now() - 10_000;
 	upsert({
@@ -252,22 +253,22 @@ test('markInactive bumps created_at so the inactive tier sorts most-recent-first
 		created_at: original
 	});
 	const beforeCall = Date.now();
-	markInactive(id);
+	markWorking(id);
 	const after = list().find((t) => t.session_id === id);
 	expect(after?.created_at).toBeGreaterThanOrEqual(beforeCall);
 	remove(id);
 });
 
-test('markInactive returns false and does not notify on unknown session', () => {
+test('markWorking returns false and does not notify on unknown session', () => {
 	const snapshots: Ticket[][] = [];
 	const unsub = subscribe((snap) => snapshots.push(snap));
 	const before = snapshots.length;
-	expect(markInactive(nextId())).toBe(false);
+	expect(markWorking(nextId())).toBe(false);
 	expect(snapshots.length).toBe(before);
 	unsub();
 });
 
-test('markInactiveIfMatch sinks the ticket when created_at matches', () => {
+test('markWorkingIfMatch flips the ticket when created_at matches', () => {
 	const id = nextId();
 	const created_at = Date.now();
 	upsert({
@@ -278,12 +279,12 @@ test('markInactiveIfMatch sinks the ticket when created_at matches', () => {
 		event_type: 'PermissionRequest',
 		created_at
 	});
-	expect(markInactiveIfMatch(id, created_at)).toBe(true);
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	expect(markWorkingIfMatch(id, created_at)).toBe(true);
+	expect(list().find((t) => t.session_id === id)?.working).toBe(true);
 	remove(id);
 });
 
-test('markInactiveIfMatch returns false and leaves the ticket active on mismatch', () => {
+test('markWorkingIfMatch returns false and leaves the ticket idle on mismatch', () => {
 	const id = nextId();
 	const created_at = Date.now();
 	upsert({
@@ -294,16 +295,59 @@ test('markInactiveIfMatch returns false and leaves the ticket active on mismatch
 		event_type: 'PermissionRequest',
 		created_at
 	});
-	expect(markInactiveIfMatch(id, created_at - 1)).toBe(false);
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(false);
+	expect(markWorkingIfMatch(id, created_at - 1)).toBe(false);
+	expect(list().find((t) => t.session_id === id)?.working).toBe(false);
 	remove(id);
 });
 
-test('markInactiveIfMatch returns false on unknown session', () => {
-	expect(markInactiveIfMatch(nextId(), 0)).toBe(false);
+test('markWorkingIfMatch returns false on unknown session', () => {
+	expect(markWorkingIfMatch(nextId(), 0)).toBe(false);
 });
 
-test('upsert reactivates an inactive ticket: inactive cleared, event_type overrides priority', () => {
+test('resolveDeclineIfMatch lifts a PermissionRequest to Stop+idle when created_at matches', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at
+	});
+	const beforeCall = Date.now();
+	expect(resolveDeclineIfMatch(id, created_at)).toBe(true);
+	const t = list().find((t) => t.session_id === id);
+	expect(t?.event_type).toBe('Stop');
+	expect(t?.working).toBe(false);
+	expect(t?.created_at).toBeGreaterThanOrEqual(beforeCall);
+	remove(id);
+});
+
+test('resolveDeclineIfMatch returns false and leaves the ticket alone on mismatch', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at
+	});
+	expect(resolveDeclineIfMatch(id, created_at - 1)).toBe(false);
+	const t = list().find((t) => t.session_id === id);
+	expect(t?.event_type).toBe('PermissionRequest');
+	expect(t?.working).toBe(false);
+	expect(t?.created_at).toBe(created_at);
+	remove(id);
+});
+
+test('resolveDeclineIfMatch returns false on unknown session', () => {
+	expect(resolveDeclineIfMatch(nextId(), 0)).toBe(false);
+});
+
+test('upsert reactivates a working ticket: working cleared, event_type overrides priority', () => {
 	const id = nextId();
 	upsert({
 		session_id: id,
@@ -313,12 +357,12 @@ test('upsert reactivates an inactive ticket: inactive cleared, event_type overri
 		event_type: 'PermissionRequest',
 		created_at: Date.now()
 	});
-	markInactive(id);
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	markWorking(id);
+	expect(list().find((t) => t.session_id === id)?.working).toBe(true);
 
-	// Notification has lower priority than PermissionRequest. On an active
-	// ticket it would be discarded; on an inactive one (reactivation path) it
-	// must win and the ticket goes back to active.
+	// Notification has lower priority than PermissionRequest. On an idle ticket
+	// it would be discarded; on a working one (reactivation path) it must win
+	// and the ticket lifts back to idle.
 	upsert({
 		session_id: id,
 		tmux_pane: '%1',
@@ -329,7 +373,7 @@ test('upsert reactivates an inactive ticket: inactive cleared, event_type overri
 	});
 
 	const t = list().find((t) => t.session_id === id);
-	expect(t?.inactive).toBe(false);
+	expect(t?.working).toBe(false);
 	expect(t?.event_type).toBe('Notification');
 	remove(id);
 });
@@ -356,13 +400,13 @@ test('upsert on an active ticket still honors EVENT_PRIORITY', () => {
 	remove(id);
 });
 
-test('list() places all active tickets before any inactive tickets', () => {
-	const active = nextId();
-	const inactive = nextId();
-	// Stage inactive ticket with a more recent created_at than the active one
+test('list() places all idle tickets before any working tickets', () => {
+	const idle = nextId();
+	const working = nextId();
+	// Stage working ticket with a more recent created_at than the idle one
 	// to confirm tier dominates raw recency.
 	upsert({
-		session_id: active,
+		session_id: idle,
 		tmux_pane: '%1',
 		cwd: '',
 		title: '',
@@ -370,23 +414,23 @@ test('list() places all active tickets before any inactive tickets', () => {
 		created_at: Date.now() - 5_000
 	});
 	upsert({
-		session_id: inactive,
+		session_id: working,
 		tmux_pane: '%2',
 		cwd: '',
 		title: '',
 		event_type: 'Stop',
 		created_at: Date.now()
 	});
-	markInactive(inactive);
+	markWorking(working);
 
-	const ours = list().filter((t) => t.session_id === active || t.session_id === inactive);
-	expect(ours.map((t) => t.session_id)).toEqual([active, inactive]);
+	const ours = list().filter((t) => t.session_id === idle || t.session_id === working);
+	expect(ours.map((t) => t.session_id)).toEqual([idle, working]);
 
-	remove(active);
-	remove(inactive);
+	remove(idle);
+	remove(working);
 });
 
-test('list() sorts within the active tier by created_at desc', () => {
+test('list() sorts within the idle tier by created_at desc', () => {
 	const older = nextId();
 	const newer = nextId();
 	upsert({

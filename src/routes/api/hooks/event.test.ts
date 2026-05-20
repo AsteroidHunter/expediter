@@ -136,7 +136,7 @@ test('SessionEnd clears the per-session topic state and removes any ticket', asy
 	expect(getCachedTitle(id)).toBe('');
 });
 
-test('UserPromptSubmit marks an existing ticket inactive instead of removing it', async () => {
+test('UserPromptSubmit marks an existing ticket working instead of removing it', async () => {
 	const id = nextId();
 	await callHandler({
 		hook_event_name: 'Stop',
@@ -144,19 +144,19 @@ test('UserPromptSubmit marks an existing ticket inactive instead of removing it'
 		tmux_pane: '%1',
 		cwd: '/tmp/proj'
 	});
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(false);
+	expect(list().find((t) => t.session_id === id)?.working).toBe(false);
 
 	const result = await callHandler({ hook_event_name: 'UserPromptSubmit', session_id: id });
-	expect((result.body as { action?: string }).action).toBe('marked_inactive');
+	expect((result.body as { action?: string }).action).toBe('marked_working');
 
 	const t = list().find((t) => t.session_id === id);
 	expect(t).toBeDefined();
-	expect(t?.inactive).toBe(true);
+	expect(t?.working).toBe(true);
 	remove(id);
 	deleteSessionTopic(id);
 });
 
-test('PostToolUse marks an existing ticket inactive', async () => {
+test('PostToolUse marks an existing ticket working', async () => {
 	const id = nextId();
 	await callHandler({
 		hook_event_name: 'Stop',
@@ -165,12 +165,12 @@ test('PostToolUse marks an existing ticket inactive', async () => {
 		cwd: '/tmp/proj'
 	});
 	const result = await callHandler({ hook_event_name: 'PostToolUse', session_id: id });
-	expect((result.body as { action?: string }).action).toBe('marked_inactive');
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	expect((result.body as { action?: string }).action).toBe('marked_working');
+	expect(list().find((t) => t.session_id === id)?.working).toBe(true);
 	remove(id);
 });
 
-test('PostToolUseFailure marks an existing ticket inactive', async () => {
+test('PostToolUseFailure marks an existing ticket working', async () => {
 	const id = nextId();
 	await callHandler({
 		hook_event_name: 'Stop',
@@ -179,12 +179,12 @@ test('PostToolUseFailure marks an existing ticket inactive', async () => {
 		cwd: '/tmp/proj'
 	});
 	const result = await callHandler({ hook_event_name: 'PostToolUseFailure', session_id: id });
-	expect((result.body as { action?: string }).action).toBe('marked_inactive');
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	expect((result.body as { action?: string }).action).toBe('marked_working');
+	expect(list().find((t) => t.session_id === id)?.working).toBe(true);
 	remove(id);
 });
 
-test('A Stop after UserPromptSubmit reactivates the inactive ticket', async () => {
+test('A Stop after UserPromptSubmit lifts the working ticket back to idle', async () => {
 	const id = nextId();
 	await callHandler({
 		hook_event_name: 'Stop',
@@ -193,7 +193,7 @@ test('A Stop after UserPromptSubmit reactivates the inactive ticket', async () =
 		cwd: '/tmp/proj'
 	});
 	await callHandler({ hook_event_name: 'UserPromptSubmit', session_id: id });
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(true);
+	expect(list().find((t) => t.session_id === id)?.working).toBe(true);
 
 	await callHandler({
 		hook_event_name: 'Stop',
@@ -202,7 +202,7 @@ test('A Stop after UserPromptSubmit reactivates the inactive ticket', async () =
 		cwd: '/tmp/proj'
 	});
 	const t = list().find((t) => t.session_id === id);
-	expect(t?.inactive).toBe(false);
+	expect(t?.working).toBe(false);
 	expect(t?.event_type).toBe('Stop');
 	remove(id);
 	deleteSessionTopic(id);
@@ -246,11 +246,12 @@ test('invalid JSON body returns 400', async () => {
 });
 
 // Integration: PermissionRequest kicks off the decline watcher, and a denial
-// line appended to the real transcript file sinks the ticket into the inactive
-// tier (perpetual model: handled, not gone). The transcript path must live
-// under ~/.claude/ to pass the watcher's containment check. Cleanup runs after
-// the assertions so the watcher's cancel (on detection) lands before unlink.
-test('PermissionRequest + appended denial line marks the ticket inactive via the watcher', async () => {
+// line appended to the real transcript file lifts the ticket back to a
+// Stop+idle resting state via resolveDeclineIfMatch (declined permission is
+// resolved, not still working). The transcript path must live under ~/.claude/
+// to pass the watcher's containment check. Cleanup runs after the assertions
+// so the watcher's cancel (on detection) lands before unlink.
+test('PermissionRequest + appended denial line lifts the ticket to Stop+idle via the watcher', async () => {
 	const tempDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
 	const tempFile = path.join(tempDir, 'transcript.jsonl');
 	writeFileSync(tempFile, '');
@@ -264,7 +265,7 @@ test('PermissionRequest + appended denial line marks the ticket inactive via the
 		transcript_path: tempFile
 	});
 	expect(result.status).toBe(200);
-	expect(list().find((t) => t.session_id === id)?.inactive).toBe(false);
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('PermissionRequest');
 
 	// Give the watcher's async start block time to capture the starting offset
 	// and attach fs.watch before we append.
@@ -287,13 +288,71 @@ test('PermissionRequest + appended denial line marks the ticket inactive via the
 
 	const start = Date.now();
 	while (Date.now() - start < 700) {
-		if (list().find((t) => t.session_id === id)?.inactive === true) break;
+		if (list().find((t) => t.session_id === id)?.event_type === 'Stop') break;
 		await new Promise((r) => setTimeout(r, 20));
 	}
 
 	const t = list().find((t) => t.session_id === id);
 	expect(t).toBeDefined();
-	expect(t?.inactive).toBe(true);
+	expect(t?.event_type).toBe('Stop');
+	expect(t?.working).toBe(false);
+
+	rmSync(tempDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// A subsequent event for the same session_id must cancel the decline watcher.
+// Otherwise an approved (not declined) PermissionRequest leaks a 1h watcher.
+// We verify this by posting a PR + a follow-up event, then appending a denial
+// line — the cancelled watcher should not fire, so the ticket's event_type
+// stays at whatever the follow-up set it to instead of being lifted to Stop.
+test('A subsequent event cancels the decline watcher (approve case)', async () => {
+	const tempDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const tempFile = path.join(tempDir, 'transcript.jsonl');
+	writeFileSync(tempFile, '');
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'PermissionRequest',
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		transcript_path: tempFile
+	});
+
+	// Wait for the watcher to attach before superseding it.
+	await new Promise((r) => setTimeout(r, 80));
+
+	// Approve-then-process is signalled by PostToolUse — this should cancel the
+	// PR's decline watcher.
+	const followUp = await callHandler({ hook_event_name: 'PostToolUse', session_id: id });
+	expect((followUp.body as { action?: string }).action).toBe('marked_working');
+
+	// Now append a denial line that the (cancelled) watcher would otherwise
+	// detect. After waiting, the ticket must still be in the post-follow-up
+	// state — not lifted to Stop by a stale watcher.
+	appendFileSync(
+		tempFile,
+		JSON.stringify({
+			type: 'user',
+			message: {
+				content: [
+					{
+						type: 'tool_result',
+						is_error: true,
+						content: "The user doesn't want to proceed with this tool use."
+					}
+				]
+			}
+		}) + '\n'
+	);
+	await new Promise((r) => setTimeout(r, 250));
+
+	const t = list().find((t) => t.session_id === id);
+	expect(t).toBeDefined();
+	expect(t?.event_type).toBe('PermissionRequest');
+	expect(t?.working).toBe(true);
 
 	rmSync(tempDir, { recursive: true, force: true });
 	remove(id);
