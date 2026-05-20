@@ -109,16 +109,34 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 	// and snaps focus to whichever tab Terminal considers the default,
 	// rather than the one we just selected. Inner try/end blocks skip
 	// Terminal windows that don't expose tabs (Settings, etc.).
+	//
+	// Activation timing matters: `set frontmost of <window-expr> to true`
+	// issued immediately after `activate` is silently dropped while Terminal
+	// is mid-activation from background — the script returns successfully
+	// but the z-stack isn't touched, so the first tap lands on whichever
+	// window was previously frontmost. Binding `set w to window wi` first
+	// adds an Apple Event roundtrip that lets activation settle before the
+	// set lands; the reference form (window id N, window wi, or w) is not
+	// the cause. The miss branch already uses this pattern and works; the
+	// cached branch must mirror it.
 	const escaped = tty.replace(/"/g, '\\"');
 	const cachedBranch = cached
 		? `
-	try
-		if tty of tab ${cached.tabIndex} of window id ${cached.windowId} is targetTTY then
-			set selected of tab ${cached.tabIndex} of window id ${cached.windowId} to true
-			set frontmost of window id ${cached.windowId} to true
-			return "hit"
-		end if
-	end try`
+	repeat with wi from 1 to (count of windows)
+		try
+			if id of window wi is ${cached.windowId} then
+				set w to window wi
+				try
+					if tty of tab ${cached.tabIndex} of w is targetTTY then
+						set selected of tab ${cached.tabIndex} of w to true
+						set frontmost of w to true
+						return "hit"
+					end if
+				end try
+				exit repeat
+			end if
+		end try
+	end repeat`
 		: '';
 	return `
 tell application "Terminal"

@@ -26,15 +26,24 @@ test('raiseTerminalScript with tty and no cache emits enumeration branch only', 
 	expect(script).not.toContain('return "hit"');
 });
 
-test('raiseTerminalScript with cache emits direct-address branch with indices', () => {
+test('raiseTerminalScript with cache resolves id to a bound window before setting frontmost', () => {
 	const cached: TabLocation = { windowId: 128573, tabIndex: 2 };
 	const script = raiseTerminalScript('/dev/ttys003', cached);
-	expect(script).toContain('tab 2 of window id 128573');
-	expect(script).toContain('set selected of tab 2 of window id 128573 to true');
-	expect(script).toContain('set frontmost of window id 128573 to true');
+	// Cached branch looks up the window by id, binds it to `w`, then operates
+	// on `w`. The bind adds an Apple Event roundtrip that lets Terminal's
+	// activation transition settle — without it, `set frontmost` issued
+	// immediately after `activate` is silently dropped from background.
+	expect(script).toContain('if id of window wi is 128573 then');
+	expect(script).toContain('set w to window wi');
+	expect(script).toContain('if tty of tab 2 of w is targetTTY then');
+	expect(script).toContain('set selected of tab 2 of w to true');
+	expect(script).toContain('set frontmost of w to true');
 	expect(script).toContain('return "hit"');
+	// Must NOT issue `set frontmost` against the unbound window expression
+	// from the cached branch — the bound form is what survives activation.
+	expect(script).not.toContain('set frontmost of window id 128573 to true');
+	expect(script).not.toContain('set frontmost of window wi to true');
 	// Enumeration fallback must still be present so a stale cache misses gracefully.
-	expect(script).toContain('repeat with wi from 1 to (count of windows)');
 	expect(script).toContain('return "miss:" & wid & ":" & ti');
 });
 
