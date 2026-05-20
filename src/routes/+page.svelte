@@ -20,6 +20,12 @@
 
 	let tickets = $state<Ticket[]>([]);
 	let connected = $state(false);
+	// Sticky: flips true on the first successful onopen and never resets. Without
+	// it, isDisconnected would flash on every page load and every wake-from-
+	// background, because `connected` starts false and openStream reopens the
+	// EventSource on visibilitychange / pageshow before onopen has had a chance
+	// to fire again.
+	let everConnected = $state(false);
 	let focusing = $state<string | null>(null);
 	let mockMode = false;
 	// Reactive: cleared when /api/ping returns 403 (token died, daemon restarted).
@@ -84,6 +90,7 @@
 		);
 		eventSource.onopen = () => {
 			connected = true;
+			everConnected = true;
 		};
 		eventSource.onerror = () => {
 			connected = false;
@@ -206,6 +213,12 @@
 		return '';
 	}
 
+	// True only after we successfully connected at least once AND have since lost
+	// the SSE — i.e. the daemon went away or the network dropped. The
+	// everConnected guard prevents a false "disconnected" flash on initial load
+	// and on background-wake reconnects.
+	const isDisconnected = $derived(!!clientToken && !connected && everConnected);
+
 	function formatAge(createdAt: number, now: number): string {
 		const seconds = Math.max(0, Math.floor((now - createdAt) / 1000));
 		if (seconds < 5) return 'now';
@@ -284,17 +297,23 @@
 		></span>
 	</header>
 
+	{#if isDisconnected}
+		<div class="banner-disconnected" role="status" aria-live="polite">disconnected</div>
+	{/if}
+
 	{#if !clientToken}
 		<div class="empty empty-no-token" aria-live="polite">
 			<span class="empty-label">Scan the QR code in your terminal to connect</span>
 		</div>
-	{:else if tickets.length === 0}
+	{:else if tickets.length === 0 && !isDisconnected}
 		<div class="empty" aria-live="polite">
 			<span class="dot"></span>
 			<span class="empty-label">You have zero tickets!</span>
 		</div>
+	{:else if tickets.length === 0}
+		<div class="empty" aria-live="polite"></div>
 	{:else}
-		<ul class="queue">
+		<ul class="queue" class:disconnected={isDisconnected}>
 			{#each tickets as ticket (ticket.session_id)}
 				<li
 					class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
@@ -407,6 +426,17 @@
 		border-color: #5b8a3a;
 		box-shadow: 0 0 0 4px rgba(91, 138, 58, 0.12);
 	}
+	/* Shown when isDisconnected: the SSE dropped after a successful connect.
+	   Restrained — the dimmed ticket list is the louder signal; this is just a
+	   word so the user isn't left guessing. */
+	.banner-disconnected {
+		text-align: center;
+		font-size: 11px;
+		letter-spacing: 0.22em;
+		text-transform: uppercase;
+		color: rgba(42, 31, 21, 0.5);
+		padding: 4px 0;
+	}
 	.conn.on::before {
 		background: #5b8a3a;
 		animation: led-breathe 2.4s ease-in-out infinite;
@@ -451,6 +481,14 @@
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
+	}
+	/* While disconnected, tickets render as stale snapshots — translucent and
+	   non-tappable so a tap doesn't queue a /api/focus against a dead daemon.
+	   The list itself is opacity-faded; pointer-events: none cascades down to
+	   the buttons inside. */
+	.queue.disconnected {
+		opacity: 0.5;
+		pointer-events: none;
 	}
 
 	.ticket {
