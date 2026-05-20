@@ -42,6 +42,29 @@ SETTINGS="$HOME/.claude/settings.json"
 TMUX_CONF="$HOME/.tmux.conf"
 INSTALL_LOG="$HOME/.expediter-install.log"
 
+# --- flags -----------------------------------------------------------------
+# Default is quiet: one spinner line during the work, then a final success
+# message. Pass --verbose / -v to see the full per-phase output (banner,
+# section headers, ✓/⊘ status lines) that this script used to print
+# unconditionally.
+
+VERBOSE=0
+for arg in "$@"; do
+	case "$arg" in
+		--verbose|-v) VERBOSE=1 ;;
+		--help|-h)
+			cat <<EOF
+Usage: ./uninstall.sh [--verbose|-v] [--help|-h]
+
+  --verbose, -v  Show the full per-phase output (banner, sections, status lines).
+                 Default is a single spinner plus the final message.
+  --help, -h     Show this message and exit.
+EOF
+			exit 0
+			;;
+	esac
+done
+
 # --- helpers ---------------------------------------------------------------
 
 err() { printf '%s\n' "$*" >&2; }
@@ -164,20 +187,24 @@ if [ "$(uname -s)" != "Darwin" ]; then
 	exit 1
 fi
 
-banner "uninstaller"
-printf '\n'
+if [ "$VERBOSE" = 1 ]; then
+	banner "uninstaller"
+	printf '\n'
+fi
 
 # --- 1. Daemon check -------------------------------------------------------
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
-section "1. Daemon check"
-printf 'Making sure the expediter daemon is not currently running.\n\n'
+if [ "$VERBOSE" = 1 ]; then
+	section "1. Daemon check"
+	printf 'Making sure the expediter daemon is not currently running.\n\n'
 
-# Static one-frame flash — port-probing curl is instant.
-if [ -t 1 ]; then
-	printf '%s%s%s Checking port %s ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET" "$PORT"
-	sleep 0.2
-	printf '\r\033[K'
+	# Static one-frame flash — port-probing curl is instant.
+	if [ -t 1 ]; then
+		printf '%s%s%s Checking port %s ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET" "$PORT"
+		sleep 0.2
+		printf '\r\033[K'
+	fi
 fi
 
 # curl -w '%{http_code}' prints "000" on connection failure. Any 3-digit code
@@ -191,18 +218,43 @@ if [[ "$STATUS" =~ ^[1-5][0-9]{2}$ ]]; then
 	printf 'Stop the daemon first (Ctrl-C in the terminal running `expediter`, or kill the bun process), then re-run this script.\n'
 	exit 1
 fi
-printf '%s✓%s Port %s is free.\n' "$GREEN" "$RESET" "$PORT"
+[ "$VERBOSE" = 1 ] && printf '%s✓%s Port %s is free.\n' "$GREEN" "$RESET" "$PORT"
 
 # --- 2. Confirmation -------------------------------------------------------
 
-printf '\nThis will remove the expediter shims, the config file, the hook entries\n'
-printf 'from your claude code settings, the source-file line from your tmux conf,\n'
-printf 'and the install log. It will NOT touch the cloned repo, claude code,\n'
-printf 'homebrew, tmux, bun, your PATH, or any install-time backups.\n\n'
+if [ "$VERBOSE" = 1 ]; then
+	printf '\nThis will remove the expediter shims, the config file, the hook entries\n'
+	printf 'from your claude code settings, the source-file line from your tmux conf,\n'
+	printf 'and the install log. It will NOT touch the cloned repo, claude code,\n'
+	printf 'homebrew, tmux, bun, your PATH, or any install-time backups.\n\n'
+else
+	printf 'This will uninstall expediter. '
+fi
 prompt_keypress "yn" "Continue? (y / n) "
 if [ "$REPLY" != "y" ]; then
 	printf '\nCancelled.\n'
 	exit 0
+fi
+
+# In quiet mode, kick off a background spinner showing "Uninstalling
+# expediter..." and route the per-step section output to /dev/null. Stderr
+# stays connected so any failure (e.g. invalid settings.json) is still seen.
+SPINNER_PID=""
+if [ "$VERBOSE" = 0 ]; then
+	if [ -t 1 ]; then
+		(
+			i=0
+			n=${#SPIN_FRAMES[@]}
+			while true; do
+				printf '\r%s%s%s Uninstalling expediter...' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET"
+				sleep 0.08
+				i=$((i+1))
+			done
+		) &
+		SPINNER_PID=$!
+	fi
+	exec 3>&1
+	exec >/dev/null
 fi
 
 # --- 3. Shims --------------------------------------------------------------
@@ -402,6 +454,17 @@ else
 fi
 
 # --- done ------------------------------------------------------------------
+
+# Tear down the quiet-mode spinner and restore the original stdout before
+# printing the final message so the success line is visible.
+if [ "$VERBOSE" = 0 ]; then
+	exec 1>&3
+	if [ -n "$SPINNER_PID" ]; then
+		kill "$SPINNER_PID" 2>/dev/null
+		wait "$SPINNER_PID" 2>/dev/null
+	fi
+	printf '\r\033[K'
+fi
 
 printf '\n%s✦%s Expediter is gone.\n\n' "$GREEN" "$RESET"
 printf 'Bon voyage 🚢\n'
