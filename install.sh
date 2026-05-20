@@ -25,19 +25,7 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 
 # --- helpers ---------------------------------------------------------------
 
-log() { printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
-
-# prompt_yn "Question? [y/n]"  — defaults to yes on empty input.
-prompt_yn() {
-	local q="$1" reply
-	printf '%s ' "$q"
-	read -r reply
-	case "${reply:-y}" in
-		y|Y|yes|YES) return 0 ;;
-		*) return 1 ;;
-	esac
-}
 
 run_quiet() {
 	if ! "$@" >>"$LOG" 2>&1; then
@@ -47,126 +35,286 @@ run_quiet() {
 	fi
 }
 
+# --- presentation helpers --------------------------------------------------
+# ANSI color only when stdout is a TTY (keeps logs/redirects clean).
+
+if [ -t 1 ]; then
+	BOLD=$'\033[1m'
+	DIM=$'\033[2m'
+	GREEN=$'\033[38;2;0;114;0m'
+	RESET=$'\033[0m'
+else
+	BOLD='' DIM='' GREEN='' RESET=''
+fi
+
+# Per-phase spinner frame sets. See the wiki plan's _openqs-tradeoffs and
+# _strings files for the per-phase mapping rationale.
+SPIN_HEAVY=(⣾ ⣽ ⣻ ⢿ ⡿ ⣟ ⣯ ⣷)
+SPIN_CIRCLE=(◐ ◓ ◑ ◒)
+SPIN_CLASSIC=('|' '/' '-' '\')
+
+# Active spinner frame set. Reassigned at the start of each phase that uses
+# the spinner, e.g. SPIN_FRAMES=("${SPIN_HEAVY[@]}").
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+
+# banner <subtitle> — print the gradient EXPEDITER ASCII followed by a
+# right-aligned subtitle. Gradient is computed in inline python3 because
+# UTF-8-aware per-char iteration in bash is awkward (each █/╔ is 3 bytes).
+# Brand-green #007200 on the left fades to (180, 240, 180) on the right.
+banner() {
+	local subtitle="${1:-}"
+	local use_color=0
+	[ -t 1 ] && use_color=1
+	python3 - "$subtitle" "$use_color" <<'PY'
+import sys
+subtitle = sys.argv[1] if len(sys.argv) > 1 else ""
+use_color = (sys.argv[2] == "1") if len(sys.argv) > 2 else False
+ROWS = [
+    "███████╗██╗  ██╗██████╗ ███████╗██████╗ ██╗████████╗███████╗██████╗",
+    "██╔════╝╚██╗██╔╝██╔══██╗██╔════╝██╔══██╗██║╚══██╔══╝██╔════╝██╔══██╗",
+    "█████╗   ╚███╔╝ ██████╔╝█████╗  ██║  ██║██║   ██║   █████╗  ██████╔╝",
+    "██╔══╝   ██╔██╗ ██╔═══╝ ██╔══╝  ██║  ██║██║   ██║   ██╔══╝  ██╔══██╗",
+    "███████╗██╔╝ ██╗██║     ███████╗██████╔╝██║   ██║   ███████╗██║  ██║",
+    "╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝╚═════╝╚═╝   ╚═╝   ╚═══════╝╚═╝  ╚═╝",
+]
+START = (0, 114, 0)
+END = (180, 240, 180)
+width = max(len(r) for r in ROWS)
+for row in ROWS:
+    out = []
+    for i, ch in enumerate(row):
+        if ch == " " or not use_color:
+            out.append(ch)
+            continue
+        t = i / max(width - 1, 1)
+        r = int(START[0] + t * (END[0] - START[0]))
+        g = int(START[1] + t * (END[1] - START[1]))
+        b = int(START[2] + t * (END[2] - START[2]))
+        out.append(f"\x1b[38;2;{r};{g};{b}m{ch}")
+    if use_color:
+        out.append("\x1b[0m")
+    print("".join(out))
+if subtitle:
+    pad = max(width - len(subtitle), 0)
+    print(" " * pad + subtitle)
+PY
+}
+
+# section <title> — print a bold numbered header followed by a `─` underline
+# matching the title's character length, then a blank line.
+section() {
+	local title="$1"
+	printf '\n%s%s%s\n' "$BOLD" "$title" "$RESET"
+	local len=${#title} i=0 underline=""
+	while [ "$i" -lt "$len" ]; do
+		underline="${underline}─"
+		i=$((i+1))
+	done
+	printf '%s\n\n' "$underline"
+}
+
+# spinner <running-msg> <success-msg> <command...> — animates the active frame
+# set on the current line while <command> runs in the background, then
+# overwrites the line with `✓ <success-msg>`. On non-zero exit, prints
+# `⚠ <running-msg> failed. See <log> for details.` and exits 1.
+# Honors TTY-vs-not: no animation when stdout is redirected, but command
+# still runs and the ✓/⚠ outcome is still printed.
+spinner() {
+	local running="$1"
+	local success="$2"
+	shift 2
+	local code=0
+	if [ -t 1 ]; then
+		"$@" >>"$LOG" 2>&1 &
+		local pid=$!
+		local i=0 n=${#SPIN_FRAMES[@]}
+		while kill -0 "$pid" 2>/dev/null; do
+			printf '\r%s%s%s %s' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET" "$running"
+			i=$((i+1))
+			sleep 0.08
+		done
+		wait "$pid" || code=$?
+		printf '\r\033[K'
+	else
+		"$@" >>"$LOG" 2>&1 || code=$?
+	fi
+	if [ "$code" -eq 0 ]; then
+		printf '%s✓%s %s\n' "$GREEN" "$RESET" "$success"
+	else
+		printf '⚠ %s failed. See %s for details.\n' "$running" "$LOG" >&2
+		exit 1
+	fi
+}
+
+# dev_note — print the developer's note: ☼ glyph + bold "Note from developer:"
+# header + body paragraph. Body is locked verbatim against the wiki plan's
+# _strings file.
+dev_note() {
+	printf '%s☼%s %sNote from developer:%s\n\n' "$RESET" "$RESET" "$BOLD" "$RESET"
+	printf 'Hi, thanks for trying the expediter!\n\n'
+	printf 'I have been using it while developing the expediter (so meta, I know)\n'
+	printf 'and I feel it has helped me better stay on top of all my active claude\n'
+	printf 'code sessions. I am eager to hear what you make of it. Questions and\n'
+	printf 'feedback are welcome! You can reach me here: hi@givemeanudge.com or\n'
+	printf '@akashbert on X\n\n'
+}
+
+# prompt_keypress <valid-chars> <prompt-text>
+# Reads single chars (no Enter required) until one matches a char in
+# <valid-chars>. Echoes only matched chars; ignores invalid keypresses
+# (including Enter). Stores the matched character in REPLY.
+prompt_keypress() {
+	local valid="$1"
+	local prompt="$2"
+	printf '%s' "$prompt"
+	local ch
+	while true; do
+		read -s -n 1 -r ch || true
+		if [ -n "$ch" ] && [[ "$valid" == *"$ch"* ]]; then
+			printf '%s\n' "$ch"
+			REPLY="$ch"
+			return 0
+		fi
+	done
+}
+
 # --- 0. preflight ----------------------------------------------------------
 
 if [ "$(uname -s)" != "Darwin" ]; then
-	err "Expediter currently supports macOS only."
+	err "The expediter runs on macOS only. Linux and Windows support are not yet available. Sorry!"
 	exit 1
 fi
 
-log "Expediter installer"
-log "Repo: $REPO"
-log ""
+banner "installer"
+printf '\n'
+dev_note
+prompt_keypress "yn" "Ready to begin installation? (y / n) "
+if [ "$REPLY" != "y" ]; then
+	printf 'Leaving so soon? Bon voyage 🚢\n'
+	exit 0
+fi
 
-# --- 1. Claude Code --------------------------------------------------------
+# --- 1. Claude Code check --------------------------------------------------
+
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+section "1. Claude Code check"
+printf 'The expediter currently only works with claude code.\n\n'
+
+# The `command -v` check is instant; the spinner helper expects a long-running
+# backgrounded command. Show a brief static spinner frame instead for visual
+# consistency with the longer-running phases below, then resolve.
+if [ -t 1 ]; then
+	printf '%s%s%s Checking if you have claude code installed ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
+	sleep 0.2
+	printf '\r\033[K'
+fi
 
 if command -v claude >/dev/null 2>&1; then
-	log "Claude Code detected."
+	printf '%s✓%s Claude code detected!\n' "$GREEN" "$RESET"
 else
-	log "Claude Code is not installed."
-	log ""
-	log "(Required — Expediter bridges Claude Code hook events into a local daemon.)"
-	log ""
-	if prompt_yn "Install Claude Code now? [y/n]"; then
-		log "Installing Claude Code..."
-		run_quiet bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+	printf 'Seems like you don'\''t have claude code installed.\n\n'
+	prompt_keypress "yn" "Would you like to install it? (y / n) "
+	if [ "$REPLY" = "y" ]; then
+		printf '\nHanding off to the official claude code installer ...\n\n'
+		# Inherited stdio: Claude Code's TUI takes over the terminal. The
+		# binary opens /dev/tty for input, so the curl|bash pipeline's
+		# exhausted stdin does not block keyboard input. See the
+		# stdout-redaction decision in the wiki plan for the mechanical detail.
+		bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
 		# Native installer drops the binary at ~/.local/bin/claude.
 		export PATH="$HOME/.local/bin:$PATH"
 		if ! command -v claude >/dev/null 2>&1; then
-			err "Claude Code install completed but `claude` is still not on PATH."
-			err "Open a new terminal and re-run this script."
+			err ""
+			err "⚠ Claude code install completed but \`claude\` is still not on PATH."
+			err "  Open a new terminal and re-run this script."
 			exit 1
 		fi
-		log "Claude Code installed."
+		printf '%s✓%s Claude code installed!\n' "$GREEN" "$RESET"
 	else
-		log ""
-		log "Stopping. Install Claude Code manually, then re-run this script:"
-		log "  https://docs.claude.com/en/docs/claude-code/setup"
+		printf '\nIf you wish to use the expediter, please install claude code. You can do so manually here:\n'
+		printf '  https://docs.claude.com/en/docs/claude-code/setup\n'
 		exit 1
 	fi
 fi
 
-# --- 2. System tools (tmux, brew, bun) -------------------------------------
+# --- 2. Tmux check ---------------------------------------------------------
 
-NEED_BREW=0; NEED_TMUX=0; NEED_BUN=0
-command -v brew >/dev/null 2>&1 || NEED_BREW=1
-command -v tmux >/dev/null 2>&1 || NEED_TMUX=1
-command -v bun  >/dev/null 2>&1 || NEED_BUN=1
+SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
+section "2. Tmux check"
+printf 'The expediter uses tmux to keep track of claude code sessions.\n\n'
 
-if [ "$NEED_TMUX" = 0 ] && [ "$NEED_BREW" = 0 ] && [ "$NEED_BUN" = 0 ]; then
-	log "tmux, Homebrew, Bun detected."
+if [ -t 1 ]; then
+	printf '%s%s%s Checking if you have tmux installed ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
+	sleep 0.2
+	printf '\r\033[K'
+fi
+
+if command -v tmux >/dev/null 2>&1; then
+	printf '%s✓%s tmux detected!\n' "$GREEN" "$RESET"
 else
-	log ""
-	if [ "$NEED_TMUX" = 1 ]; then
-		log "tmux is not installed."
-	else
-		log "tmux detected, but other tools are missing."
-	fi
-	log ""
-	log "(also installs Homebrew and Bun automatically if they're not already on your system — both are standard developer tools)"
-	log ""
-	if prompt_yn "Install missing tools? [y/n]"; then
-		# Homebrew first — needed for tmux. The official installer prompts for
-		# sudo (unavoidable) and may trigger an Xcode CLT install on a fresh Mac.
-		if [ "$NEED_BREW" = 1 ]; then
-			log "Installing Homebrew (this can take a few minutes; you may be prompted for your Mac password)..."
+	printf 'Uh oh, no tmux on this machine.\n\n'
+	prompt_keypress "yn" "Would you like to install tmux via brew? (y / n) "
+	if [ "$REPLY" = "y" ]; then
+		printf '\n'
+		if command -v brew >/dev/null 2>&1; then
+			printf '%s✓%s Brew detected! Marching on ...\n\n' "$GREEN" "$RESET"
+			spinner "Installing tmux ..." "tmux installed." brew install tmux
+		else
+			# Foreground brew install — sudo prompts go to /dev/tty and would
+			# compete with a spinner animation. Print a single static spinner
+			# frame, run the install in foreground (run_quiet captures
+			# stdout/stderr; sudo still surfaces via /dev/tty), then print the
+			# transition line, then animate the tmux install (no sudo needed).
+			printf '%s%s%s Installing brew first ...\n' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
 			run_quiet bash -c '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-			# Make brew available in the current shell. On Apple Silicon brew
-			# lives at /opt/homebrew; on Intel at /usr/local.
 			if [ -x /opt/homebrew/bin/brew ]; then
 				eval "$(/opt/homebrew/bin/brew shellenv)"
 			elif [ -x /usr/local/bin/brew ]; then
 				eval "$(/usr/local/bin/brew shellenv)"
 			fi
-			log "Homebrew installed."
-		fi
-		if [ "$NEED_TMUX" = 1 ]; then
-			log "Installing tmux..."
-			run_quiet brew install tmux
-			log "tmux installed."
-		fi
-		if [ "$NEED_BUN" = 1 ]; then
-			log "Installing Bun..."
-			run_quiet bash -c 'curl -fsSL https://bun.sh/install | bash'
-			# Bun installer drops the binary at ~/.bun/bin/bun and patches the
-			# user's shell rc, but the current shell needs PATH updated.
-			export BUN_INSTALL="$HOME/.bun"
-			export PATH="$BUN_INSTALL/bin:$PATH"
-			log "Bun installed."
+			printf '%s✓%s Now tmux ...\n\n' "$GREEN" "$RESET"
+			spinner "Installing tmux ..." "tmux installed!" brew install tmux
 		fi
 	else
-		log ""
-		log "Stopping. Install the missing tools manually and re-run this script."
+		printf '\nIf you wish to use the expediter, please install tmux. You can grab homebrew at https://brew.sh and then run `brew install tmux`.\n'
 		exit 1
 	fi
 fi
 
 # --- 3. Build --------------------------------------------------------------
 
-log ""
-log "Installing dependencies..."
-( cd "$REPO" && run_quiet bun install )
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+section "3. Build"
+printf 'Installing dependencies and building the app.\n\n'
 
-log "Building..."
-( cd "$REPO" && run_quiet bun run build )
+# Silent: install Bun if missing. The user already consented at the Ready
+# prompt; Bun is a build-time prerequisite they don't need to think about.
+if ! command -v bun >/dev/null 2>&1; then
+	run_quiet bash -c 'curl -fsSL https://bun.sh/install | bash'
+	export BUN_INSTALL="$HOME/.bun"
+	export PATH="$BUN_INSTALL/bin:$PATH"
+fi
 
-# --- 4. Config file --------------------------------------------------------
+# Visible: spinner-wrapped bun install + bun run build. The spinner helper
+# aborts with `⚠ <running> failed. See <log> for details.` on non-zero exit.
+spinner "Installing dependencies ..." "Dependencies installed." bash -c "cd '$REPO' && bun install"
+spinner "Building ..." "App built." bash -c "cd '$REPO' && bun run build"
 
+# Silent: write the config file. Quoted heredoc <<'EOF' so the backticks
+# around `export` in the comment text aren't run as command substitutions.
+# $REPO needs interpolation, so it's appended via printf after the heredoc.
 mkdir -p "$HOME/.config/expediter"
-cat > "$HOME/.config/expediter/config" <<EOF
+cat > "$HOME/.config/expediter/config" <<'EOF'
 # expediter config — written by install.sh
 # If you move the cloned repo, update EXPEDITER_HOME below (or re-run install.sh).
 # The `export` is load-bearing: the shims source this file and exec bun, which
 # is a child process — without `export`, EXPEDITER_HOME would be a shell var and
 # would not propagate to bun's environment, causing bin/expediter.mjs to abort.
-export EXPEDITER_HOME="$REPO"
 EOF
-log "Wrote $HOME/.config/expediter/config"
+printf 'export EXPEDITER_HOME="%s"\n' "$REPO" >> "$HOME/.config/expediter/config"
 
-# --- 5. Shims --------------------------------------------------------------
-
+# Silent: write the two shims.
 mkdir -p "$HOME/.local/bin"
-
 cat > "$HOME/.local/bin/expediter" <<'EOF'
 #!/usr/bin/env bash
 # expediter shim — installed by install.sh. Reads ~/.config/expediter/config
@@ -213,44 +361,45 @@ exec "$EXPEDITER_HOME/bin/claudex.sh" "$@"
 EOF
 chmod +x "$HOME/.local/bin/claudex"
 
-log "Installed shims: ~/.local/bin/expediter, ~/.local/bin/claudex"
+# Status-bar helpers — small bash scripts referenced by expediter.tmux.conf for
+# `status-right` (cc-clock) and the `pane-border-format` (cc-dates). Copied
+# straight from the repo so users can edit them later without re-running
+# install.sh. cc-dates silently no-ops if `jq` isn't installed.
+for helper in cc-clock cc-dates; do
+	cp "$REPO/bin/$helper" "$HOME/.local/bin/$helper"
+	chmod +x "$HOME/.local/bin/$helper"
+done
 
-# --- 6. PATH ---------------------------------------------------------------
-
+# Silent: PATH check. Only surface a line at the end of this phase if we
+# actually appended to the user's shell rc (rare; Claude Code's installer
+# typically already puts ~/.local/bin on PATH).
+PATH_APPENDED=0
+PATH_RC=""
 case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
 	*)
 		# zsh is the macOS default; fall back to ~/.bashrc only if no zshrc exists.
-		SHELL_RC="$HOME/.zshrc"
-		if [ ! -f "$SHELL_RC" ] && [ -f "$HOME/.bashrc" ]; then
-			SHELL_RC="$HOME/.bashrc"
+		PATH_RC="$HOME/.zshrc"
+		if [ ! -f "$PATH_RC" ] && [ -f "$HOME/.bashrc" ]; then
+			PATH_RC="$HOME/.bashrc"
 		fi
-		printf '\n# Added by Expediter installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$SHELL_RC"
-		log "Added ~/.local/bin to PATH in $SHELL_RC."
-		log "Open a new terminal (or run: source $SHELL_RC) before using expediter/claudex."
+		printf '\n# Added by Expediter installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$PATH_RC"
+		PATH_APPENDED=1
 		;;
 esac
 
-# --- 7. Claude Code hooks --------------------------------------------------
-
-log ""
-if prompt_yn "Add Expediter hooks to ~/.claude/settings.json? (backup saved next to it) [y/n]"; then
-	mkdir -p "$HOME/.claude"
-	SETTINGS="$HOME/.claude/settings.json"
-	HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
-
-	# Back up existing settings (if any). Skipped if the file doesn't exist.
-	if [ -f "$SETTINGS" ]; then
-		BACKUP="$SETTINGS.expediter-bak.$(date +%Y%m%d-%H%M%S)"
-		cp "$SETTINGS" "$BACKUP"
-		log "Backed up existing settings to $BACKUP"
-	fi
-
-	# Merge with python3 (always present on macOS). For each of the 7 event
-	# names, append a new matcher block running our hook script — but skip if
-	# any existing matcher block already references this exact hook path
-	# (idempotency: re-running install.sh shouldn't duplicate entries).
-	python3 - "$SETTINGS" "$HOOK_SCRIPT" <<'PY'
+# Silent: merge hooks into ~/.claude/settings.json. Auto-merged without a
+# y/n prompt — see the silent-hooks decision in the wiki plan. Timestamped
+# backup taken first if settings.json already exists. python3's merge output
+# is captured into the install log; non-zero exit surfaces a friendly error.
+mkdir -p "$HOME/.claude"
+SETTINGS="$HOME/.claude/settings.json"
+HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
+if [ -f "$SETTINGS" ]; then
+	BACKUP="$SETTINGS.expediter-bak.$(date +%Y%m%d-%H%M%S)"
+	cp "$SETTINGS" "$BACKUP"
+fi
+if ! python3 - "$SETTINGS" "$HOOK_SCRIPT" >>"$LOG" 2>&1 <<'PY'
 import json, os, sys
 
 settings_path, hook_script = sys.argv[1], sys.argv[2]
@@ -271,7 +420,7 @@ if os.path.exists(settings_path):
             data = json.load(f)
         except json.JSONDecodeError as e:
             sys.stderr.write(f"settings.json is not valid JSON: {e}\n")
-            sys.stderr.write("Refusing to overwrite. Fix it and re-run install.sh, or merge manually from docs/hooks-config-example.json.\n")
+            sys.stderr.write("Refusing to overwrite. Fix it manually and re-run install.sh.\n")
             sys.exit(1)
 else:
     data = {}
@@ -317,38 +466,63 @@ with open(settings_path, "w") as f:
 
 print(f"Hooks merged: {added} added, {skipped} already present.")
 PY
+then
+	err ""
+	err "⚠ Failed to merge hooks into ~/.claude/settings.json. See $LOG for details."
+	exit 1
 fi
 
-# --- 8. tmux conf ----------------------------------------------------------
+# Conditional surfacing: only emits a line if PATH was actually appended.
+if [ "$PATH_APPENDED" = 1 ]; then
+	printf '\n  Note: ~/.local/bin was added to your PATH. Open a new terminal or run `source %s` before using `expediter` or `claudex`.\n' "$PATH_RC"
+fi
 
-log ""
-if prompt_yn "Apply Expediter tmux styling? (your existing conf will be backed up) [y/n]"; then
-	TMUX_CONF="$HOME/.tmux.conf"
-	SOURCE_LINE="source-file \"$REPO/expediter.tmux.conf\""
+# --- 4. Tmux setup ---------------------------------------------------------
 
-	if [ -f "$TMUX_CONF" ]; then
-		if grep -Fq "$REPO/expediter.tmux.conf" "$TMUX_CONF"; then
-			log "tmux conf already sources expediter.tmux.conf — skipping."
-		else
-			BACKUP="$TMUX_CONF.expediter-bak.$(date +%Y%m%d-%H%M%S)"
-			cp "$TMUX_CONF" "$BACKUP"
-			log "Backed up existing $TMUX_CONF to $BACKUP"
-			printf '\n# Added by Expediter installer\n%s\n' "$SOURCE_LINE" >> "$TMUX_CONF"
-			log "Appended source-file line to $TMUX_CONF"
+# polish_tmux — apply the expediter tmux styling. Sourced from ~/.tmux.conf
+# (or created if no .tmux.conf exists). Idempotent: if .tmux.conf already
+# sources us, no change. Backs up before modifying.
+polish_tmux() {
+	local conf="$HOME/.tmux.conf"
+	local source_line="source-file \"$REPO/expediter.tmux.conf\""
+	if [ -f "$conf" ]; then
+		if grep -Fq "$REPO/expediter.tmux.conf" "$conf"; then
+			return 0  # already sources us, idempotent no-op
 		fi
+		local backup="$conf.expediter-bak.$(date +%Y%m%d-%H%M%S)"
+		cp "$conf" "$backup"
+		printf '\n# Added by Expediter installer\n%s\n' "$source_line" >> "$conf"
 	else
-		printf '# Created by Expediter installer\n%s\n' "$SOURCE_LINE" > "$TMUX_CONF"
-		log "Created $TMUX_CONF sourcing expediter.tmux.conf"
+		printf '# Created by Expediter installer\n%s\n' "$source_line" > "$conf"
 	fi
-fi
+}
+
+SPIN_FRAMES=("${SPIN_CLASSIC[@]}")
+section "4. Tmux setup"
+printf 'Do you already have a preferred tmux set up?\n\n'
+printf '  y - yes / don'\''t mess with my tmux\n'
+printf '  u - no, give me an upgrade\n'
+printf '  w - what is a tmux?\n\n'
+
+prompt_keypress "yuw" "answer: "
+
+case "$REPLY" in
+	y)
+		printf '\n%s⊘%s Skipped.\n' "$DIM" "$RESET"
+		;;
+	w)
+		printf '\ntmux is an open-source terminal session manager. Think of it as the software that allows the terminal to have richer visual layouts like tabs and panes. It has been the de-facto terminal add-on since the 2010s.\n\n'
+		spinner "Polishing tmux ..." "tmux polished!" polish_tmux
+		;;
+	u)
+		printf '\n'
+		spinner "Polishing tmux ..." "tmux polished!" polish_tmux
+		;;
+esac
 
 # --- done ------------------------------------------------------------------
 
-log ""
-log "Done."
-log ""
-log "Quick start:"
-log "  expediter         — start the daemon and print URL + QR code"
-log "  claudex           — open tmux with claude + expediter side-by-side"
-log ""
-log "Install log: $LOG"
+printf '\n%s✦%s Expediter is ready!\n\n' "$GREEN" "$RESET"
+printf 'Few ways to use expediter:\n\n'
+printf 'expediter   start the daemon and print the QR for linking your phone\n'
+printf 'claudex     open tmux with claude + expediter side-by-side\n'

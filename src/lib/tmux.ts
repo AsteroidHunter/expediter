@@ -111,14 +111,16 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 	// Terminal windows that don't expose tabs (Settings, etc.).
 	//
 	// Activation timing matters: `set frontmost of <window-expr> to true`
-	// issued immediately after `activate` is silently dropped while Terminal
-	// is mid-activation from background — the script returns successfully
-	// but the z-stack isn't touched, so the first tap lands on whichever
-	// window was previously frontmost. Binding `set w to window wi` first
-	// adds an Apple Event roundtrip that lets activation settle before the
-	// set lands; the reference form (window id N, window wi, or w) is not
-	// the cause. The miss branch already uses this pattern and works; the
-	// cached branch must mirror it.
+	// issued in roughly the first 200ms after `activate` is silently dropped
+	// while Terminal is mid-activation from background — the script returns
+	// successfully but the z-stack isn't touched, so the tap lands on
+	// whichever window was previously frontmost. Polling `frontmost` does
+	// not help (the app-level property reads true while the window stack is
+	// still settling), and binding the window reference to a variable does
+	// not add enough latency on its own (stress-tested ~5/10). The reliable
+	// fix is an explicit `delay 0.2` after activate, gated on Terminal not
+	// already being frontmost so already-foregrounded taps stay fast
+	// (stress-tested 10/10 with the gated delay).
 	const escaped = tty.replace(/"/g, '\\"');
 	const cachedBranch = cached
 		? `
@@ -140,7 +142,9 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 		: '';
 	return `
 tell application "Terminal"
+	set wasFront to frontmost
 	activate
+	if not wasFront then delay 0.2
 	set targetTTY to "${escaped}"${cachedBranch}
 	repeat with wi from 1 to (count of windows)
 		try
