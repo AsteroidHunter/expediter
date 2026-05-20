@@ -293,30 +293,29 @@ else
 	fi
 fi
 
-# Bun silently installed if missing. This will move into the Build phase
-# (plan-Phase 5); kept here in the interim so the script remains functional.
+# --- 3. Build --------------------------------------------------------------
+
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+section "3. Build"
+printf 'Installing dependencies and building the app.\n\n'
+
+# Silent: install Bun if missing. The user already consented at the Ready
+# prompt; Bun is a build-time prerequisite they don't need to think about.
 if ! command -v bun >/dev/null 2>&1; then
 	run_quiet bash -c 'curl -fsSL https://bun.sh/install | bash'
 	export BUN_INSTALL="$HOME/.bun"
 	export PATH="$BUN_INSTALL/bin:$PATH"
 fi
 
-# --- 3. Build --------------------------------------------------------------
+# Visible: spinner-wrapped bun install + bun run build. The spinner helper
+# aborts with `⚠ <running> failed. See <log> for details.` on non-zero exit.
+spinner "Installing dependencies ..." "Dependencies installed." bash -c "cd '$REPO' && bun install"
+spinner "Building ..." "App built." bash -c "cd '$REPO' && bun run build"
 
-log ""
-log "Installing dependencies..."
-( cd "$REPO" && run_quiet bun install )
-
-log "Building..."
-( cd "$REPO" && run_quiet bun run build )
-
-# --- 4. Config file --------------------------------------------------------
-
-mkdir -p "$HOME/.config/expediter"
-# Quoted heredoc <<'EOF' so the backticks around `export` in the comment text
-# below aren't run as command substitutions (an unquoted heredoc would execute
-# `export` and splat the shell's exported environment into the config file).
+# Silent: write the config file. Quoted heredoc <<'EOF' so the backticks
+# around `export` in the comment text aren't run as command substitutions.
 # $REPO needs interpolation, so it's appended via printf after the heredoc.
+mkdir -p "$HOME/.config/expediter"
 cat > "$HOME/.config/expediter/config" <<'EOF'
 # expediter config — written by install.sh
 # If you move the cloned repo, update EXPEDITER_HOME below (or re-run install.sh).
@@ -325,12 +324,9 @@ cat > "$HOME/.config/expediter/config" <<'EOF'
 # would not propagate to bun's environment, causing bin/expediter.mjs to abort.
 EOF
 printf 'export EXPEDITER_HOME="%s"\n' "$REPO" >> "$HOME/.config/expediter/config"
-log "Wrote $HOME/.config/expediter/config"
 
-# --- 5. Shims --------------------------------------------------------------
-
+# Silent: write the two shims.
 mkdir -p "$HOME/.local/bin"
-
 cat > "$HOME/.local/bin/expediter" <<'EOF'
 #!/usr/bin/env bash
 # expediter shim — installed by install.sh. Reads ~/.config/expediter/config
@@ -377,44 +373,36 @@ exec "$EXPEDITER_HOME/bin/claudex.sh" "$@"
 EOF
 chmod +x "$HOME/.local/bin/claudex"
 
-log "Installed shims: ~/.local/bin/expediter, ~/.local/bin/claudex"
-
-# --- 6. PATH ---------------------------------------------------------------
-
+# Silent: PATH check. Only surface a line at the end of this phase if we
+# actually appended to the user's shell rc (rare; Claude Code's installer
+# typically already puts ~/.local/bin on PATH).
+PATH_APPENDED=0
+PATH_RC=""
 case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
 	*)
 		# zsh is the macOS default; fall back to ~/.bashrc only if no zshrc exists.
-		SHELL_RC="$HOME/.zshrc"
-		if [ ! -f "$SHELL_RC" ] && [ -f "$HOME/.bashrc" ]; then
-			SHELL_RC="$HOME/.bashrc"
+		PATH_RC="$HOME/.zshrc"
+		if [ ! -f "$PATH_RC" ] && [ -f "$HOME/.bashrc" ]; then
+			PATH_RC="$HOME/.bashrc"
 		fi
-		printf '\n# Added by Expediter installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$SHELL_RC"
-		log "Added ~/.local/bin to PATH in $SHELL_RC."
-		log "Open a new terminal (or run: source $SHELL_RC) before using expediter/claudex."
+		printf '\n# Added by Expediter installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$PATH_RC"
+		PATH_APPENDED=1
 		;;
 esac
 
-# --- 7. Claude Code hooks --------------------------------------------------
-
-log ""
-if prompt_yn "Add Expediter hooks to ~/.claude/settings.json? (backup saved next to it) [y/n]"; then
-	mkdir -p "$HOME/.claude"
-	SETTINGS="$HOME/.claude/settings.json"
-	HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
-
-	# Back up existing settings (if any). Skipped if the file doesn't exist.
-	if [ -f "$SETTINGS" ]; then
-		BACKUP="$SETTINGS.expediter-bak.$(date +%Y%m%d-%H%M%S)"
-		cp "$SETTINGS" "$BACKUP"
-		log "Backed up existing settings to $BACKUP"
-	fi
-
-	# Merge with python3 (always present on macOS). For each of the 7 event
-	# names, append a new matcher block running our hook script — but skip if
-	# any existing matcher block already references this exact hook path
-	# (idempotency: re-running install.sh shouldn't duplicate entries).
-	python3 - "$SETTINGS" "$HOOK_SCRIPT" <<'PY'
+# Silent: merge hooks into ~/.claude/settings.json. Auto-merged without a
+# y/n prompt — see the silent-hooks decision in the wiki plan. Timestamped
+# backup taken first if settings.json already exists. python3's merge output
+# is captured into the install log; non-zero exit surfaces a friendly error.
+mkdir -p "$HOME/.claude"
+SETTINGS="$HOME/.claude/settings.json"
+HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
+if [ -f "$SETTINGS" ]; then
+	BACKUP="$SETTINGS.expediter-bak.$(date +%Y%m%d-%H%M%S)"
+	cp "$SETTINGS" "$BACKUP"
+fi
+if ! python3 - "$SETTINGS" "$HOOK_SCRIPT" >>"$LOG" 2>&1 <<'PY'
 import json, os, sys
 
 settings_path, hook_script = sys.argv[1], sys.argv[2]
@@ -435,7 +423,7 @@ if os.path.exists(settings_path):
             data = json.load(f)
         except json.JSONDecodeError as e:
             sys.stderr.write(f"settings.json is not valid JSON: {e}\n")
-            sys.stderr.write("Refusing to overwrite. Fix it and re-run install.sh, or merge manually from docs/hooks-config-example.json.\n")
+            sys.stderr.write("Refusing to overwrite. Fix it manually and re-run install.sh.\n")
             sys.exit(1)
 else:
     data = {}
@@ -481,6 +469,15 @@ with open(settings_path, "w") as f:
 
 print(f"Hooks merged: {added} added, {skipped} already present.")
 PY
+then
+	err ""
+	err "⚠ Failed to merge hooks into ~/.claude/settings.json. See $LOG for details."
+	exit 1
+fi
+
+# Conditional surfacing: only emits a line if PATH was actually appended.
+if [ "$PATH_APPENDED" = 1 ]; then
+	printf '\n  Note: ~/.local/bin was added to your PATH. Open a new terminal or run `source %s` before using `expediter` or `claudex`.\n' "$PATH_RC"
 fi
 
 # --- 8. tmux conf ----------------------------------------------------------
