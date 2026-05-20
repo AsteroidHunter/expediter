@@ -206,30 +206,45 @@ if [ "$REPLY" != "y" ]; then
 	exit 0
 fi
 
-# --- 1. Claude Code --------------------------------------------------------
+# --- 1. Claude Code check --------------------------------------------------
+
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+section "1. Claude Code check"
+printf 'The expediter currently only works with claude code.\n\n'
+
+# The `command -v` check is instant; the spinner helper expects a long-running
+# backgrounded command. Show a brief static spinner frame instead for visual
+# consistency with the longer-running phases below, then resolve.
+if [ -t 1 ]; then
+	printf '%s%s%s Checking if you have claude code installed ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
+	sleep 0.2
+	printf '\r\033[K'
+fi
 
 if command -v claude >/dev/null 2>&1; then
-	log "Claude Code detected."
+	printf '%s✓%s Claude code detected!\n' "$GREEN" "$RESET"
 else
-	log "Claude Code is not installed."
-	log ""
-	log "(Required — Expediter bridges Claude Code hook events into a local daemon.)"
-	log ""
-	if prompt_yn "Install Claude Code now? [y/n]"; then
-		log "Installing Claude Code..."
-		run_quiet bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+	printf 'Seems like you don'\''t have claude code installed.\n\n'
+	prompt_keypress "yn" "Would you like to install it? (y / n) "
+	if [ "$REPLY" = "y" ]; then
+		printf '\nHanding off to the official claude code installer ...\n\n'
+		# Inherited stdio: Claude Code's TUI takes over the terminal. The
+		# binary opens /dev/tty for input, so the curl|bash pipeline's
+		# exhausted stdin does not block keyboard input. See the
+		# stdout-redaction decision in the wiki plan for the mechanical detail.
+		bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
 		# Native installer drops the binary at ~/.local/bin/claude.
 		export PATH="$HOME/.local/bin:$PATH"
 		if ! command -v claude >/dev/null 2>&1; then
-			err "Claude Code install completed but `claude` is still not on PATH."
-			err "Open a new terminal and re-run this script."
+			err ""
+			err "⚠ Claude code install completed but \`claude\` is still not on PATH."
+			err "  Open a new terminal and re-run this script."
 			exit 1
 		fi
-		log "Claude Code installed."
+		printf '%s✓%s Claude code installed!\n' "$GREEN" "$RESET"
 	else
-		log ""
-		log "Stopping. Install Claude Code manually, then re-run this script:"
-		log "  https://docs.claude.com/en/docs/claude-code/setup"
+		printf '\nIf you wish to use the expediter, please install claude code. You can do so manually here:\n'
+		printf '  https://docs.claude.com/en/docs/claude-code/setup\n'
 		exit 1
 	fi
 fi
