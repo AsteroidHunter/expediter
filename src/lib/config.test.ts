@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getRefreshInterval } from './config';
+import { getRefreshInterval, getTitleSource } from './config';
 
 let tmpDir: string;
 let configFile: string;
@@ -75,4 +75,48 @@ test('returns the new value when the file is rewritten between calls (no caching
 
 	writeFileSync(configFile, JSON.stringify({ title_refresh_every: 11 }), 'utf8');
 	expect(getRefreshInterval(configFile)).toBe(11);
+});
+
+test('getTitleSource returns default "chat-title" when the file does not exist', () => {
+	expect(getTitleSource(configFile)).toBe('chat-title');
+});
+
+test('getTitleSource returns "chat-title" when set explicitly', () => {
+	writeFileSync(configFile, JSON.stringify({ title_source: 'chat-title' }), 'utf8');
+	expect(getTitleSource(configFile)).toBe('chat-title');
+});
+
+test('getTitleSource returns "haiku" when set explicitly', () => {
+	writeFileSync(configFile, JSON.stringify({ title_source: 'haiku' }), 'utf8');
+	expect(getTitleSource(configFile)).toBe('haiku');
+});
+
+test('getTitleSource returns default "chat-title" when JSON is malformed', () => {
+	writeFileSync(configFile, '{title_source: "haiku"', 'utf8');
+	expect(getTitleSource(configFile)).toBe('chat-title');
+});
+
+test('getTitleSource returns default "chat-title" when value is an unknown string', () => {
+	writeFileSync(configFile, JSON.stringify({ title_source: 'gemini' }), 'utf8');
+	expect(getTitleSource(configFile)).toBe('chat-title');
+});
+
+test('getTitleSource returns default "chat-title" when value is not a string', () => {
+	writeFileSync(configFile, JSON.stringify({ title_source: 42 }), 'utf8');
+	expect(getTitleSource(configFile)).toBe('chat-title');
+});
+
+test('getTitleSource returns default "chat-title" when JSON is not an object', () => {
+	writeFileSync(configFile, JSON.stringify(['haiku']), 'utf8');
+	expect(getTitleSource(configFile)).toBe('chat-title');
+});
+
+test('getTitleSource and getRefreshInterval coexist in the same config file', () => {
+	writeFileSync(
+		configFile,
+		JSON.stringify({ title_source: 'haiku', title_refresh_every: 9 }),
+		'utf8'
+	);
+	expect(getTitleSource(configFile)).toBe('haiku');
+	expect(getRefreshInterval(configFile)).toBe(9);
 });

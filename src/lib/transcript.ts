@@ -10,6 +10,9 @@ type TranscriptLine = {
 	// User messages often carry a plain string here; assistant messages carry
 	// the structured content-block array.
 	message?: { content?: ContentBlock[] | string };
+	// Present on `type: 'custom-title'` lines — written by Claude's auto-titler
+	// and by /rename. The last such line in the JSONL is the current title.
+	customTitle?: string;
 };
 
 function isTextBlock(b: ContentBlock): b is TextBlock {
@@ -91,4 +94,43 @@ export async function recentTranscriptText(
 	if (entries.length === 0) return null;
 	const joined = entries.join('\n\n');
 	return joined.length > maxChars ? joined.slice(joined.length - maxChars) : joined;
+}
+
+// Scans the JSONL backward for the most recent `type: 'custom-title'` line and
+// returns its `customTitle` field. Both Claude's auto-titler and /rename write
+// the same line type, so the most recent one is canonical. Returns null when
+// the file is missing, the title is empty, or no `custom-title` lines exist
+// (e.g. brand-new session before Claude has written one).
+export async function latestCustomTitle(transcriptPath: string): Promise<string | null> {
+	const resolved = path.resolve(transcriptPath);
+	if (resolved !== TRANSCRIPT_ROOT && !resolved.startsWith(TRANSCRIPT_ROOT + path.sep)) {
+		console.warn(`[transcript] rejected path outside root: ${resolved}`);
+		return null;
+	}
+
+	let raw: string;
+	try {
+		raw = await readFile(resolved, 'utf8');
+	} catch {
+		return null;
+	}
+
+	const lines = raw.split('\n');
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i];
+		if (!line) continue;
+		let parsed: TranscriptLine;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (parsed.type !== 'custom-title') continue;
+		const title = parsed.customTitle;
+		if (typeof title !== 'string') continue;
+		const trimmed = title.trim();
+		if (!trimmed) continue;
+		return trimmed;
+	}
+	return null;
 }
