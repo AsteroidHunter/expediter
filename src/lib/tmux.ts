@@ -109,16 +109,32 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 	// and snaps focus to whichever tab Terminal considers the default,
 	// rather than the one we just selected. Inner try/end blocks skip
 	// Terminal windows that don't expose tabs (Settings, etc.).
+	//
+	// Window reference form matters: `set frontmost of window id N to true`
+	// silently fails to reorder windows when Terminal is being activated from
+	// background (the property change is accepted but the z-stack is not
+	// touched). `set frontmost of window <index> to true` does reorder. So
+	// the cached branch resolves the saved window id to its current index by
+	// iterating once over windows (cheap — no tab enumeration), validates
+	// the cached tab still has the expected tty, then operates via the index
+	// form. Falls through to the miss branch on any mismatch.
 	const escaped = tty.replace(/"/g, '\\"');
 	const cachedBranch = cached
 		? `
-	try
-		if tty of tab ${cached.tabIndex} of window id ${cached.windowId} is targetTTY then
-			set selected of tab ${cached.tabIndex} of window id ${cached.windowId} to true
-			set frontmost of window id ${cached.windowId} to true
-			return "hit"
-		end if
-	end try`
+	repeat with wi from 1 to (count of windows)
+		try
+			if id of window wi is ${cached.windowId} then
+				try
+					if tty of tab ${cached.tabIndex} of window wi is targetTTY then
+						set selected of tab ${cached.tabIndex} of window wi to true
+						set frontmost of window wi to true
+						return "hit"
+					end if
+				end try
+				exit repeat
+			end if
+		end try
+	end repeat`
 		: '';
 	return `
 tell application "Terminal"

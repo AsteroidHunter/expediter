@@ -26,15 +26,20 @@ test('raiseTerminalScript with tty and no cache emits enumeration branch only', 
 	expect(script).not.toContain('return "hit"');
 });
 
-test('raiseTerminalScript with cache emits direct-address branch with indices', () => {
+test('raiseTerminalScript with cache resolves id to index before setting frontmost', () => {
 	const cached: TabLocation = { windowId: 128573, tabIndex: 2 };
 	const script = raiseTerminalScript('/dev/ttys003', cached);
-	expect(script).toContain('tab 2 of window id 128573');
-	expect(script).toContain('set selected of tab 2 of window id 128573 to true');
-	expect(script).toContain('set frontmost of window id 128573 to true');
+	// Cached branch looks up the window by id but operates via the index form,
+	// because `set frontmost of window id N` silently fails to reorder when
+	// Terminal is activated from background.
+	expect(script).toContain('if id of window wi is 128573 then');
+	expect(script).toContain('if tty of tab 2 of window wi is targetTTY then');
+	expect(script).toContain('set selected of tab 2 of window wi to true');
+	expect(script).toContain('set frontmost of window wi to true');
 	expect(script).toContain('return "hit"');
+	// Must NOT use the broken window-id reference for frontmost-setting.
+	expect(script).not.toContain('set frontmost of window id 128573 to true');
 	// Enumeration fallback must still be present so a stale cache misses gracefully.
-	expect(script).toContain('repeat with wi from 1 to (count of windows)');
 	expect(script).toContain('return "miss:" & wid & ":" & ti');
 });
 
