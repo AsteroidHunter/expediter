@@ -47,6 +47,149 @@ run_quiet() {
 	fi
 }
 
+# --- presentation helpers --------------------------------------------------
+# ANSI color only when stdout is a TTY (keeps logs/redirects clean).
+
+if [ -t 1 ]; then
+	BOLD=$'\033[1m'
+	DIM=$'\033[2m'
+	GREEN=$'\033[38;2;0;114;0m'
+	RESET=$'\033[0m'
+else
+	BOLD='' DIM='' GREEN='' RESET=''
+fi
+
+# Per-phase spinner frame sets. See the wiki plan's _openqs-tradeoffs and
+# _strings files for the per-phase mapping rationale.
+SPIN_HEAVY=(⣾ ⣽ ⣻ ⢿ ⡿ ⣟ ⣯ ⣷)
+SPIN_CIRCLE=(◐ ◓ ◑ ◒)
+SPIN_CLASSIC=('|' '/' '-' '\')
+
+# Active spinner frame set. Reassigned at the start of each phase that uses
+# the spinner, e.g. SPIN_FRAMES=("${SPIN_HEAVY[@]}").
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+
+# banner <subtitle> — print the gradient EXPEDITER ASCII followed by a
+# right-aligned subtitle. Gradient is computed in inline python3 because
+# UTF-8-aware per-char iteration in bash is awkward (each █/╔ is 3 bytes).
+# Brand-green #007200 on the left fades to (180, 240, 180) on the right.
+banner() {
+	local subtitle="${1:-}"
+	local use_color=0
+	[ -t 1 ] && use_color=1
+	python3 - "$subtitle" "$use_color" <<'PY'
+import sys
+subtitle = sys.argv[1] if len(sys.argv) > 1 else ""
+use_color = (sys.argv[2] == "1") if len(sys.argv) > 2 else False
+ROWS = [
+    "███████╗██╗  ██╗██████╗ ███████╗██████╗ ██╗████████╗███████╗██████╗",
+    "██╔════╝╚██╗██╔╝██╔══██╗██╔════╝██╔══██╗██║╚══██╔══╝██╔════╝██╔══██╗",
+    "█████╗   ╚███╔╝ ██████╔╝█████╗  ██║  ██║██║   ██║   █████╗  ██████╔╝",
+    "██╔══╝   ██╔██╗ ██╔═══╝ ██╔══╝  ██║  ██║██║   ██║   ██╔══╝  ██╔══██╗",
+    "███████╗██╔╝ ██╗██║     ███████╗██████╔╝██║   ██║   ███████╗██║  ██║",
+    "╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝╚═════╝╚═╝   ╚═╝   ╚═══════╝╚═╝  ╚═╝",
+]
+START = (0, 114, 0)
+END = (180, 240, 180)
+width = max(len(r) for r in ROWS)
+for row in ROWS:
+    out = []
+    for i, ch in enumerate(row):
+        if ch == " " or not use_color:
+            out.append(ch)
+            continue
+        t = i / max(width - 1, 1)
+        r = int(START[0] + t * (END[0] - START[0]))
+        g = int(START[1] + t * (END[1] - START[1]))
+        b = int(START[2] + t * (END[2] - START[2]))
+        out.append(f"\x1b[38;2;{r};{g};{b}m{ch}")
+    if use_color:
+        out.append("\x1b[0m")
+    print("".join(out))
+if subtitle:
+    pad = max(width - len(subtitle), 0)
+    print(" " * pad + subtitle)
+PY
+}
+
+# section <title> — print a bold numbered header followed by a `─` underline
+# matching the title's character length, then a blank line.
+section() {
+	local title="$1"
+	printf '\n%s%s%s\n' "$BOLD" "$title" "$RESET"
+	local len=${#title} i=0 underline=""
+	while [ "$i" -lt "$len" ]; do
+		underline="${underline}─"
+		i=$((i+1))
+	done
+	printf '%s\n\n' "$underline"
+}
+
+# spinner <running-msg> <success-msg> <command...> — animates the active frame
+# set on the current line while <command> runs in the background, then
+# overwrites the line with `✓ <success-msg>`. On non-zero exit, prints
+# `⚠ <running-msg> failed. See <log> for details.` and exits 1.
+# Honors TTY-vs-not: no animation when stdout is redirected, but command
+# still runs and the ✓/⚠ outcome is still printed.
+spinner() {
+	local running="$1"
+	local success="$2"
+	shift 2
+	local code=0
+	if [ -t 1 ]; then
+		"$@" >>"$LOG" 2>&1 &
+		local pid=$!
+		local i=0 n=${#SPIN_FRAMES[@]}
+		while kill -0 "$pid" 2>/dev/null; do
+			printf '\r%s%s%s %s' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET" "$running"
+			i=$((i+1))
+			sleep 0.08
+		done
+		wait "$pid" || code=$?
+		printf '\r\033[K'
+	else
+		"$@" >>"$LOG" 2>&1 || code=$?
+	fi
+	if [ "$code" -eq 0 ]; then
+		printf '%s✓%s %s\n' "$GREEN" "$RESET" "$success"
+	else
+		printf '⚠ %s failed. See %s for details.\n' "$running" "$LOG" >&2
+		exit 1
+	fi
+}
+
+# dev_note — print the developer's note: ☼ glyph + bold "Note from developer:"
+# header + body paragraph. Body is locked verbatim against the wiki plan's
+# _strings file.
+dev_note() {
+	printf '%s☼%s %sNote from developer:%s\n\n' "$RESET" "$RESET" "$BOLD" "$RESET"
+	printf 'Hi, thanks for trying the expediter!\n\n'
+	printf 'I have been using it while developing the expediter (so meta, I know)\n'
+	printf 'and I feel it has helped me better stay on top of all my active claude\n'
+	printf 'code sessions. I am eager to hear what you make of it. Questions and\n'
+	printf 'feedback are welcome! You can reach me here: hi@givemeanudge.com or\n'
+	printf '@akashbert on X\n\n'
+}
+
+# prompt_keypress <valid-chars> <prompt-text>
+# Reads single chars (no Enter required) until one matches a char in
+# <valid-chars>. Echoes only matched chars; ignores invalid keypresses
+# (including Enter). Stores the matched character in REPLY.
+prompt_keypress() {
+	local valid="$1"
+	local prompt="$2"
+	printf '%s' "$prompt"
+	local ch
+	while true; do
+		read -s -n 1 -r ch || true
+		if [ -n "$ch" ] && [[ "$valid" == *"$ch"* ]]; then
+			printf '%s\n' "$ch"
+			REPLY="$ch"
+			return 0
+		fi
+	done
+}
+
 # --- 0. preflight ----------------------------------------------------------
 
 if [ "$(uname -s)" != "Darwin" ]; then
