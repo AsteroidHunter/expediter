@@ -24,6 +24,12 @@ test('raiseTerminalScript with tty and no cache emits enumeration branch only', 
 	expect(script).toContain('return "miss:" & wid & ":" & ti');
 	expect(script).toContain('return "notfound"');
 	expect(script).not.toContain('return "hit"');
+	// Activation-transition guard: capture frontmost before activate and
+	// gate a 200ms settle delay on Terminal not already being foregrounded.
+	// Without this delay, `set frontmost` issued during activation is
+	// silently dropped and the wrong window lands frontmost.
+	expect(script).toContain('set wasFront to frontmost');
+	expect(script).toContain('if not wasFront then delay 0.2');
 });
 
 test('raiseTerminalScript with cache resolves id to a bound window before setting frontmost', () => {
@@ -39,6 +45,11 @@ test('raiseTerminalScript with cache resolves id to a bound window before settin
 	expect(script).toContain('set selected of tab 2 of w to true');
 	expect(script).toContain('set frontmost of w to true');
 	expect(script).toContain('return "hit"');
+	// Activation-transition guard must apply to cached taps too — the
+	// cached branch is what runs on the second+ tap to a tty, and a
+	// background-to-foreground transition still races without the delay.
+	expect(script).toContain('set wasFront to frontmost');
+	expect(script).toContain('if not wasFront then delay 0.2');
 	// Must NOT issue `set frontmost` against the unbound window expression
 	// from the cached branch — the bound form is what survives activation.
 	expect(script).not.toContain('set frontmost of window id 128573 to true');
