@@ -110,24 +110,26 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 	// rather than the one we just selected. Inner try/end blocks skip
 	// Terminal windows that don't expose tabs (Settings, etc.).
 	//
-	// Window reference form matters: `set frontmost of window id N to true`
-	// silently fails to reorder windows when Terminal is being activated from
-	// background (the property change is accepted but the z-stack is not
-	// touched). `set frontmost of window <index> to true` does reorder. So
-	// the cached branch resolves the saved window id to its current index by
-	// iterating once over windows (cheap — no tab enumeration), validates
-	// the cached tab still has the expected tty, then operates via the index
-	// form. Falls through to the miss branch on any mismatch.
+	// Activation timing matters: `set frontmost of <window-expr> to true`
+	// issued immediately after `activate` is silently dropped while Terminal
+	// is mid-activation from background — the script returns successfully
+	// but the z-stack isn't touched, so the first tap lands on whichever
+	// window was previously frontmost. Binding `set w to window wi` first
+	// adds an Apple Event roundtrip that lets activation settle before the
+	// set lands; the reference form (window id N, window wi, or w) is not
+	// the cause. The miss branch already uses this pattern and works; the
+	// cached branch must mirror it.
 	const escaped = tty.replace(/"/g, '\\"');
 	const cachedBranch = cached
 		? `
 	repeat with wi from 1 to (count of windows)
 		try
 			if id of window wi is ${cached.windowId} then
+				set w to window wi
 				try
-					if tty of tab ${cached.tabIndex} of window wi is targetTTY then
-						set selected of tab ${cached.tabIndex} of window wi to true
-						set frontmost of window wi to true
+					if tty of tab ${cached.tabIndex} of w is targetTTY then
+						set selected of tab ${cached.tabIndex} of w to true
+						set frontmost of w to true
 						return "hit"
 					end if
 				end try
