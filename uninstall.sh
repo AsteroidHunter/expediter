@@ -187,10 +187,8 @@ if [ "$(uname -s)" != "Darwin" ]; then
 	exit 1
 fi
 
-if [ "$VERBOSE" = 1 ]; then
-	banner "uninstaller"
-	printf '\n'
-fi
+banner "uninstaller"
+printf '\n'
 
 # --- 1. Daemon check -------------------------------------------------------
 
@@ -227,10 +225,11 @@ if [ "$VERBOSE" = 1 ]; then
 	printf 'from your claude code settings, the source-file line from your tmux conf,\n'
 	printf 'and the install log. It will NOT touch the cloned repo, claude code,\n'
 	printf 'homebrew, tmux, bun, your PATH, or any install-time backups.\n\n'
+	prompt_keypress "yn" "Continue? (y / n) "
 else
-	printf 'This will uninstall expediter. '
+	printf 'Are you sure you want to uninstall expediter? '
+	prompt_keypress "yn" "(y / n) "
 fi
-prompt_keypress "yn" "Continue? (y / n) "
 if [ "$REPLY" != "y" ]; then
 	printf '\nCancelled.\n'
 	exit 0
