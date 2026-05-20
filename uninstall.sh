@@ -44,31 +44,141 @@ INSTALL_LOG="$HOME/.expediter-install.log"
 
 # --- helpers ---------------------------------------------------------------
 
-log() { printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
 
-# prompt_yn "Question? [y/N]"  — defaults to NO on empty input (destructive op).
-prompt_yn() {
-	local q="$1" reply
-	printf '%s ' "$q"
-	read -r reply
-	case "${reply:-n}" in
-		y|Y|yes|YES) return 0 ;;
-		*) return 1 ;;
-	esac
+# --- presentation helpers --------------------------------------------------
+# Mirror install.sh's presentation layer. Inlined (~80 lines duplicated) so
+# the uninstall script stays self-contained.
+
+if [ -t 1 ]; then
+	BOLD=$'\033[1m'
+	DIM=$'\033[2m'
+	GREEN=$'\033[38;2;0;114;0m'
+	RESET=$'\033[0m'
+else
+	BOLD='' DIM='' GREEN='' RESET=''
+fi
+
+# Per-phase spinner frame sets, same as install.sh.
+SPIN_HEAVY=(⣾ ⣽ ⣻ ⢿ ⡿ ⣟ ⣯ ⣷)
+SPIN_CIRCLE=(◐ ◓ ◑ ◒)
+SPIN_CLASSIC=('|' '/' '-' '\')
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+
+banner() {
+	local subtitle="${1:-}"
+	local use_color=0
+	[ -t 1 ] && use_color=1
+	python3 - "$subtitle" "$use_color" <<'PY'
+import sys
+subtitle = sys.argv[1] if len(sys.argv) > 1 else ""
+use_color = (sys.argv[2] == "1") if len(sys.argv) > 2 else False
+ROWS = [
+    "███████╗██╗  ██╗██████╗ ███████╗██████╗ ██╗████████╗███████╗██████╗",
+    "██╔════╝╚██╗██╔╝██╔══██╗██╔════╝██╔══██╗██║╚══██╔══╝██╔════╝██╔══██╗",
+    "█████╗   ╚███╔╝ ██████╔╝█████╗  ██║  ██║██║   ██║   █████╗  ██████╔╝",
+    "██╔══╝   ██╔██╗ ██╔═══╝ ██╔══╝  ██║  ██║██║   ██║   ██╔══╝  ██╔══██╗",
+    "███████╗██╔╝ ██╗██║     ███████╗██████╔╝██║   ██║   ███████╗██║  ██║",
+    "╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝╚═════╝╚═╝   ╚═╝   ╚═══════╝╚═╝  ╚═╝",
+]
+START = (0, 114, 0)
+END = (180, 240, 180)
+width = max(len(r) for r in ROWS)
+for row in ROWS:
+    out = []
+    for i, ch in enumerate(row):
+        if ch == " " or not use_color:
+            out.append(ch)
+            continue
+        t = i / max(width - 1, 1)
+        r = int(START[0] + t * (END[0] - START[0]))
+        g = int(START[1] + t * (END[1] - START[1]))
+        b = int(START[2] + t * (END[2] - START[2]))
+        out.append(f"\x1b[38;2;{r};{g};{b}m{ch}")
+    if use_color:
+        out.append("\x1b[0m")
+    print("".join(out))
+if subtitle:
+    pad = max(width - len(subtitle), 0)
+    print(" " * pad + subtitle)
+PY
+}
+
+section() {
+	local title="$1"
+	printf '\n%s%s%s\n' "$BOLD" "$title" "$RESET"
+	local len=${#title} i=0 underline=""
+	while [ "$i" -lt "$len" ]; do
+		underline="${underline}─"
+		i=$((i+1))
+	done
+	printf '%s\n\n' "$underline"
+}
+
+spinner() {
+	local running="$1"
+	local success="$2"
+	shift 2
+	local code=0
+	if [ -t 1 ]; then
+		"$@" &
+		local pid=$!
+		local i=0 n=${#SPIN_FRAMES[@]}
+		while kill -0 "$pid" 2>/dev/null; do
+			printf '\r%s%s%s %s' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET" "$running"
+			i=$((i+1))
+			sleep 0.08
+		done
+		wait "$pid" || code=$?
+		printf '\r\033[K'
+	else
+		"$@" || code=$?
+	fi
+	if [ "$code" -eq 0 ]; then
+		printf '%s✓%s %s\n' "$GREEN" "$RESET" "$success"
+	else
+		printf '⚠ %s failed.\n' "$running" >&2
+		exit 1
+	fi
+}
+
+prompt_keypress() {
+	local valid="$1"
+	local prompt="$2"
+	printf '%s' "$prompt"
+	local ch
+	while true; do
+		read -s -n 1 -r ch || true
+		if [ -n "$ch" ] && [[ "$valid" == *"$ch"* ]]; then
+			printf '%s\n' "$ch"
+			REPLY="$ch"
+			return 0
+		fi
+	done
 }
 
 # --- 0. preflight ----------------------------------------------------------
 
 if [ "$(uname -s)" != "Darwin" ]; then
-	err "Expediter uninstaller currently supports macOS only."
+	err "The expediter uninstaller runs on macOS only. Sorry!"
 	exit 1
 fi
 
-log "Expediter uninstaller"
-log ""
+banner "uninstaller"
+printf '\n'
 
-# --- 1. Daemon-running check -----------------------------------------------
+# --- 1. Daemon check -------------------------------------------------------
+
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+section "1. Daemon check"
+printf 'Making sure the expediter daemon is not currently running.\n\n'
+
+# Static one-frame flash — port-probing curl is instant.
+if [ -t 1 ]; then
+	printf '%s%s%s Checking port %s ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET" "$PORT"
+	sleep 0.2
+	printf '\r\033[K'
+fi
 
 # curl -w '%{http_code}' prints "000" on connection failure. Any 3-digit code
 # starting with 1-5 means *something* answered HTTP on the port (almost
@@ -77,77 +187,80 @@ log ""
 # user's `expediter` foreground process would be surprising.
 STATUS=$(curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:${PORT}/" 2>/dev/null || echo 000)
 if [[ "$STATUS" =~ ^[1-5][0-9]{2}$ ]]; then
-	err "Something is listening on http://127.0.0.1:${PORT}/ — likely the Expediter daemon."
-	err ""
-	err "Stop it first (Ctrl-C in the terminal running \`expediter\`, or kill"
-	err "the bun process), then re-run this script."
+	printf '%s⚠%s Something is listening on http://127.0.0.1:%s/ — likely the expediter daemon.\n\n' "$RESET" "$RESET" "$PORT"
+	printf 'Stop the daemon first (Ctrl-C in the terminal running `expediter`, or kill the bun process), then re-run this script.\n'
 	exit 1
 fi
+printf '%s✓%s Port %s is free.\n' "$GREEN" "$RESET" "$PORT"
 
 # --- 2. Confirmation -------------------------------------------------------
 
-log "This will:"
-log "  - remove ~/.local/bin/expediter and ~/.local/bin/claudex"
-log "  - remove ~/.config/expediter/"
-log "  - remove Expediter's hook entries from ~/.claude/settings.json (if present)"
-log "  - remove Expediter's source-file line from ~/.tmux.conf (if present)"
-log "  - remove ~/.expediter-install.log"
-log ""
-log "It will NOT touch:"
-log "  - the cloned Expediter repo"
-log "  - Claude Code, Homebrew, tmux, or Bun"
-log "  - the PATH entry for ~/.local/bin in your shell rc (it's shared)"
-log "  - any *.expediter-bak.<timestamp> files left by install.sh"
-log ""
-
-if ! prompt_yn "Continue? [y/N]"; then
-	log "Cancelled."
+printf '\nThis will remove the expediter shims, the config file, the hook entries\n'
+printf 'from your claude code settings, the source-file line from your tmux conf,\n'
+printf 'and the install log. It will NOT touch the cloned repo, claude code,\n'
+printf 'homebrew, tmux, bun, your PATH, or any install-time backups.\n\n'
+prompt_keypress "yn" "Continue? (y / n) "
+if [ "$REPLY" != "y" ]; then
+	printf '\nCancelled.\n'
 	exit 0
 fi
 
 # --- 3. Shims --------------------------------------------------------------
 
-log ""
+section "2. Shims"
+printf 'Removing the expediter and claudex commands from ~/.local/bin/.\n\n'
+
 removed_shims=0
 for shim in "$SHIM_EXPEDITER" "$SHIM_CLAUDEX"; do
 	if [ -f "$shim" ] || [ -L "$shim" ]; then
 		rm -f "$shim"
-		log "Removed $shim"
 		removed_shims=$((removed_shims + 1))
 	fi
 done
 if [ "$removed_shims" = 0 ]; then
-	log "No shims to remove."
+	printf '%s⊘%s No shims to remove.\n' "$DIM" "$RESET"
+else
+	printf '%s✓%s Removed %d shim(s).\n' "$GREEN" "$RESET" "$removed_shims"
 fi
 
-# --- 4. Config file + dir --------------------------------------------------
+# --- 4. Config -------------------------------------------------------------
 
+section "3. Config"
+printf 'Removing ~/.config/expediter/.\n\n'
+
+removed_config=0
 if [ -f "$CONFIG_FILE" ]; then
 	rm -f "$CONFIG_FILE"
-	log "Removed $CONFIG_FILE"
+	removed_config=1
 fi
 if [ -d "$CONFIG_DIR" ]; then
 	# rmdir refuses non-empty dirs, so a user file we never created stays put.
 	if rmdir "$CONFIG_DIR" 2>/dev/null; then
-		log "Removed $CONFIG_DIR"
-	else
-		log "Kept $CONFIG_DIR — directory is not empty."
+		removed_config=1
 	fi
 fi
+if [ "$removed_config" = 1 ]; then
+	printf '%s✓%s Removed config file and directory.\n' "$GREEN" "$RESET"
+else
+	printf '%s⊘%s Config already gone.\n' "$DIM" "$RESET"
+fi
 
-# --- 5. Hooks in ~/.claude/settings.json -----------------------------------
+# --- 5. Hooks --------------------------------------------------------------
 
-if [ -f "$SETTINGS" ]; then
-	if grep -Fq "expediter-hook.sh" "$SETTINGS"; then
-		BACKUP="$SETTINGS.expediter-uninstall-bak.$TIMESTAMP"
-		cp "$SETTINGS" "$BACKUP"
-		log "Backed up $SETTINGS to $BACKUP"
+section "4. Hooks"
+printf 'Removing expediter hook entries from ~/.claude/settings.json.\n'
+printf 'A timestamped backup of settings.json is saved first.\n\n'
 
-		# Mirror install.sh's safety checks: refuse to touch the file if it's
-		# not valid JSON or not the expected shape. Walk hooks.<EventName>
-		# block arrays, drop any matcher block whose `command` references our
-		# hook script, and trim empty event keys / empty hooks dict.
-		python3 - "$SETTINGS" <<'PY'
+if [ -f "$SETTINGS" ] && grep -Fq "expediter-hook.sh" "$SETTINGS"; then
+	BACKUP="$SETTINGS.expediter-uninstall-bak.$TIMESTAMP"
+	cp "$SETTINGS" "$BACKUP"
+	printf '%s✓%s Backed up settings.json → %s\n' "$GREEN" "$RESET" "$BACKUP"
+
+	# Refuse to touch the file if it's not valid JSON or not the expected
+	# shape. Walk hooks.<EventName> block arrays, drop any matcher block whose
+	# `command` references our hook script, trim empty event keys / empty
+	# hooks dict. Prints the removed-block count to stdout for the caller.
+	count=$(python3 - "$SETTINGS" <<'PY'
 import json, sys
 
 settings_path = sys.argv[1]
@@ -166,7 +279,7 @@ if not isinstance(data, dict):
 
 hooks = data.get("hooks")
 if not isinstance(hooks, dict):
-    print("No hooks block; nothing to remove.")
+    print(0)
     sys.exit(0)
 
 removed = 0
@@ -205,32 +318,34 @@ with open(settings_path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 
-print(f"Removed {removed} Expediter hook block(s) from settings.json.")
+print(removed)
 PY
-	else
-		log "No Expediter entries in $SETTINGS — skipping."
-	fi
+)
+	printf '%s✓%s Removed %s expediter hook block(s) from settings.json.\n' "$GREEN" "$RESET" "$count"
 else
-	log "No $SETTINGS — skipping hooks step."
+	printf '%s⊘%s No expediter entries in settings.json (or settings.json absent).\n' "$DIM" "$RESET"
 fi
 
 # --- 6. tmux.conf ----------------------------------------------------------
 
-if [ -f "$TMUX_CONF" ]; then
-	if grep -Fq "expediter.tmux.conf" "$TMUX_CONF"; then
-		BACKUP="$TMUX_CONF.expediter-uninstall-bak.$TIMESTAMP"
-		cp "$TMUX_CONF" "$BACKUP"
-		log "Backed up $TMUX_CONF to $BACKUP"
+section "5. Tmux config"
+printf 'Removing the source-file line for expediter.tmux.conf from ~/.tmux.conf.\n'
+printf 'A timestamped backup is saved first.\n\n'
 
-		# install.sh writes one of two shapes:
-		#   - file-created-from-scratch: "# Created by Expediter installer\n
-		#     source-file ...\n" (2 lines, the only content).
-		#   - appended to existing:      "\n# Added by Expediter installer\n
-		#     source-file ...\n".
-		# Splice the source-file line and the preceding "# Added/Created by..."
-		# comment (and a blank line above the comment, if install.sh appended
-		# one). If the file ends up empty after the splice, delete it.
-		python3 - "$TMUX_CONF" <<'PY'
+if [ -f "$TMUX_CONF" ] && grep -Fq "expediter.tmux.conf" "$TMUX_CONF"; then
+	BACKUP="$TMUX_CONF.expediter-uninstall-bak.$TIMESTAMP"
+	cp "$TMUX_CONF" "$BACKUP"
+	printf '%s✓%s Backed up ~/.tmux.conf → %s\n' "$GREEN" "$RESET" "$BACKUP"
+
+	# install.sh writes one of two shapes:
+	#   - file-created-from-scratch: "# Created by Expediter installer\n
+	#     source-file ...\n" (2 lines, the only content).
+	#   - appended to existing:      "\n# Added by Expediter installer\n
+	#     source-file ...\n".
+	# Splice the source-file line and the preceding "# Added/Created by..."
+	# comment (and a blank line above the comment, if install.sh appended
+	# one). If the file ends up empty after the splice, delete it.
+	deleted_file=$(python3 - "$TMUX_CONF" <<'PY'
 import sys
 from pathlib import Path
 
@@ -241,55 +356,52 @@ new_lines = []
 removed = 0
 for line in lines:
     if "expediter.tmux.conf" in line and "source-file" in line:
-        # Drop the immediately preceding Expediter installer comment, if any.
         if new_lines and (
             new_lines[-1].strip().startswith("# Added by Expediter installer")
             or new_lines[-1].strip().startswith("# Created by Expediter installer")
         ):
             new_lines.pop()
-        # Drop a single blank line above the comment (install.sh appends one).
         if new_lines and new_lines[-1].strip() == "":
             new_lines.pop()
         removed += 1
         continue
     new_lines.append(line)
 
-# Strip trailing blank lines so a previously-tidy file stays tidy.
 while new_lines and new_lines[-1].strip() == "":
     new_lines.pop()
 
 if not new_lines:
     conf_path.unlink()
-    print(f"~/.tmux.conf contained only Expediter's lines — deleted the file ({removed} line(s) removed).")
+    print(f"deleted:{removed}")
 else:
     conf_path.write_text("\n".join(new_lines) + "\n")
-    print(f"Removed {removed} Expediter source-file line(s) from ~/.tmux.conf.")
+    print(f"kept:{removed}")
 PY
+)
+	if [[ "$deleted_file" == deleted:* ]]; then
+		count="${deleted_file#deleted:}"
+		printf '%s✓%s ~/.tmux.conf had only our lines; deleted the file (%s expediter line(s) removed).\n' "$GREEN" "$RESET" "$count"
 	else
-		log "No Expediter entries in $TMUX_CONF — skipping."
+		count="${deleted_file#kept:}"
+		printf '%s✓%s Removed %s expediter source-file line(s) from ~/.tmux.conf.\n' "$GREEN" "$RESET" "$count"
 	fi
 else
-	log "No $TMUX_CONF — skipping tmux step."
+	printf '%s⊘%s No expediter entries in ~/.tmux.conf (or no .tmux.conf).\n' "$DIM" "$RESET"
 fi
 
 # --- 7. Install log --------------------------------------------------------
 
+section "6. Install log"
+printf 'Removing ~/.expediter-install.log.\n\n'
+
 if [ -f "$INSTALL_LOG" ]; then
 	rm -f "$INSTALL_LOG"
-	log "Removed $INSTALL_LOG"
+	printf '%s✓%s Removed install log.\n' "$GREEN" "$RESET"
+else
+	printf '%s⊘%s Install log already gone.\n' "$DIM" "$RESET"
 fi
 
 # --- done ------------------------------------------------------------------
 
-log ""
-log "Done."
-log ""
-log "If you also want to remove things this script did not touch:"
-log "  - The cloned Expediter repo:    rm -rf <path-to-clone>"
-log "  - Claude Code:                  https://docs.claude.com/en/docs/claude-code/setup"
-log "  - Homebrew / tmux / Bun:        each has its own uninstall path"
-log "  - PWA on your phone:            remove the home-screen icon and clear"
-log "                                  Safari site data for the LAN URL"
-log "  - Once you've confirmed nothing is broken, the *.expediter-bak.* and"
-log "    *.expediter-uninstall-bak.* files next to settings.json and tmux.conf"
-log "    can be deleted too."
+printf '\n%s✦%s Expediter is gone.\n\n' "$GREEN" "$RESET"
+printf 'Bon voyage 🚢\n'
