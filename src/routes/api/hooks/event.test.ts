@@ -12,6 +12,7 @@ import {
 	remove,
 	shouldRefresh
 } from '$lib/ticketStore';
+import { whimsicalName } from '$lib/whimsicalName';
 
 // Unique session_id per test so module-level state doesn't leak.
 let testCounter = 0;
@@ -86,7 +87,9 @@ test('Stop with a cached title upserts a ticket carrying that title', async () =
 	deleteSessionTopic(id);
 });
 
-test('Stop with no cached title upserts a ticket with title === ""', async () => {
+// Chat-title is the default title_source; with no cached title the upsert path
+// falls back to a deterministic whimsical name so the ticket never renders blank.
+test('Stop with no cached title falls back to a deterministic whimsical name (chat-title default)', async () => {
 	const id = nextId();
 	const result = await callHandler({
 		hook_event_name: 'Stop',
@@ -96,8 +99,26 @@ test('Stop with no cached title upserts a ticket with title === ""', async () =>
 	});
 	expect(result.status).toBe(200);
 	const ticket = list().find((t) => t.session_id === id);
-	expect(ticket?.title).toBe('');
+	expect(ticket?.title).toBe(whimsicalName(id));
 	remove(id);
+});
+
+// A real cached title (mimicking either a custom-title pulled from JSONL or a
+// haiku summary) wins over the whimsical fallback.
+test('A real cached title wins over the whimsical fallback', async () => {
+	const id = nextId();
+	setCachedTitle(id, 'rename auth module');
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj'
+	});
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.title).toBe('rename auth module');
+	expect(ticket?.title).not.toBe(whimsicalName(id));
+	remove(id);
+	deleteSessionTopic(id);
 });
 
 test('PermissionRequest carries the cached title and the right event_type', async () => {

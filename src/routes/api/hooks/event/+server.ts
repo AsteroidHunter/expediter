@@ -14,9 +14,10 @@ import {
 	type EventType
 } from '$lib/ticketStore';
 import { summarize } from '$lib/summarize';
-import { recentTranscriptText } from '$lib/transcript';
-import { getRefreshInterval } from '$lib/config';
+import { recentTranscriptText, latestCustomTitle } from '$lib/transcript';
+import { getRefreshInterval, getTitleSource } from '$lib/config';
 import { watchForDecline } from '$lib/declineWatcher';
+import { whimsicalName } from '$lib/whimsicalName';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -56,33 +57,36 @@ type HookPayload = {
 // Fire-and-forget topic refresh. Caller never awaits. The try/finally pair
 // guarantees `refreshInFlight` is cleared even if summarize or transcript-read
 // throws, so a hang or error doesn't leave the session permanently un-refreshable.
+// Branches on getTitleSource(): chat-title mode reads the JSONL for the latest
+// custom-title line and skips the LLM call entirely; haiku mode runs the
+// original summarize path.
 async function maybeRefreshTopic(session_id: string, transcript_path: string): Promise<void> {
-	// const t0 = Date.now();
-	// const sid = session_id.slice(0, 8);
-	// const log = (msg: string): void => {
-	// 	console.log(`[trace:refresh sid=${sid} T+${Date.now() - t0}ms] ${msg}`);
-	// };
-	// log(`enter; transcript_path=${transcript_path}`);
 	markRefreshStart(session_id);
 	try {
-		// log('reading transcript');
-		const text = await recentTranscriptText(transcript_path).catch(() => null);
-		// log(`transcript read; text=${text === null ? 'null' : `len=${text.length}`}`);
-		if (!text) return;
-		// log('calling summarize');
-		const title = await summarize(text);
-		// log(`summarize returned; title=${title === null ? 'null' : `"${title}"`}`);
-		if (title) {
-			setCachedTitle(session_id, title);
-			// log('setCachedTitle called');
+		if (getTitleSource() === 'chat-title') {
+			const title = await latestCustomTitle(transcript_path).catch(() => null);
+			if (title) setCachedTitle(session_id, title);
+			return;
 		}
+		const text = await recentTranscriptText(transcript_path).catch(() => null);
+		if (!text) return;
+		const title = await summarize(text);
+		if (title) setCachedTitle(session_id, title);
 	} catch (err) {
-		// log(`caught: ${err}`);
 		console.warn('[refresh]', err);
 	} finally {
 		markRefreshEnd(session_id);
-		// log('markRefreshEnd; done');
 	}
+}
+
+// Returns the cached title if one exists, else a deterministic whimsical name
+// (chat-title mode only — haiku mode leaves the title empty so the existing
+// SSE live-patch fills it in when summarize resolves).
+function resolveDisplayTitle(session_id: string): string {
+	const cached = getCachedTitle(session_id);
+	if (cached) return cached;
+	if (getTitleSource() === 'chat-title') return whimsicalName(session_id);
+	return '';
 }
 
 export const POST: RequestHandler = async ({ request }) => {
@@ -142,17 +146,16 @@ export const POST: RequestHandler = async ({ request }) => {
 	}
 
 	// Title generation happens on UserPromptSubmit (see CLEAR_EVENTS branch above);
-	// by the time we land here the cache is typically populated and getCachedTitle
-	// below returns a non-empty string. If the UserPromptSubmit-side refresh failed
-	// or hasn't completed yet, the ticket will still upsert with title="" and the
-	// SSE live-patch in setCachedTitle will fill it in once the in-flight refresh
-	// resolves.
+	// by the time we land here the cache is typically populated. In chat-title
+	// mode an empty cache resolves to a deterministic whimsical name so the
+	// ticket never shows blank; once a real title arrives the SSE live-patch in
+	// setCachedTitle replaces it.
 	const created_at = Date.now();
 	upsert({
 		session_id,
 		tmux_pane,
 		cwd: cwd ?? '',
-		title: getCachedTitle(session_id),
+		title: resolveDisplayTitle(session_id),
 		event_type: eventType,
 		created_at
 	});
