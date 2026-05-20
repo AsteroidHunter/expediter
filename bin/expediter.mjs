@@ -148,15 +148,58 @@ if (await isDaemonUp()) {
 
 // Start the SvelteKit/adapter-node server in the foreground. Inherit stdio so
 // the user sees its logs and Ctrl-C terminates it cleanly.
+//
+// svelte.config.js sets `envPrefix: 'EXPEDITER_'`, so adapter-node reads
+// EXPEDITER_PORT / EXPEDITER_HOST (not PORT / HOST). Pass the prefixed names.
+// adapter-node's build/env.js validates EXPEDITER_* env vars strictly against a
+// closed allowlist (SOCKET_PATH, HOST, PORT, ORIGIN, XFF_DEPTH,
+// ADDRESS_HEADER, PROTOCOL_HEADER, HOST_HEADER, PORT_HEADER, BODY_SIZE_LIMIT,
+// SHUTDOWN_TIMEOUT, IDLE_TIMEOUT, KEEP_ALIVE_TIMEOUT, HEADERS_TIMEOUT) and
+// throws at startup for anything else. EXPEDITER_HOME is launcher-only — the
+// daemon doesn't need it — so strip it (and any other future launcher-only
+// EXPEDITER_* var) before spawning.
+// EXPEDITER_SHUTDOWN_TIMEOUT is in seconds (adapter-node default: 30). The
+// default tries to drain SSE connections cleanly, which makes Ctrl-C feel
+// unresponsive when a phone has an open stream. 1s is the lowest non-zero
+// value and is plenty for our (single-user) daemon.
+const daemonEnv = {
+	...process.env,
+	EXPEDITER_PORT: PORT,
+	EXPEDITER_HOST: '0.0.0.0',
+	EXPEDITER_SHUTDOWN_TIMEOUT: '1'
+};
+delete daemonEnv.EXPEDITER_HOME;
 console.log('Starting Expediter daemon...');
 const child = spawn('bun', [`${HOME}/build/index.js`], {
 	stdio: ['ignore', 'inherit', 'inherit'],
-	env: { ...process.env, PORT, HOST: '0.0.0.0' }
+	env: daemonEnv
 });
 
 child.on('exit', (code) => process.exit(code ?? 0));
-process.on('SIGINT', () => child.kill('SIGINT'));
-process.on('SIGTERM', () => child.kill('SIGTERM'));
+
+// Ctrl-C handling: send SIGTERM, then SIGKILL after 500ms if the child
+// hasn't exited. Bun's HTTP server (under adapter-node) doesn't actually
+// release SSE response streams on server.closeAllConnections(), so the
+// graceful path hangs whenever a phone has an open /api/stream. The 500ms
+// silent escalation makes the user experience the same whether the phone
+// is connected or not. A second Ctrl-C skips the wait entirely.
+let killing = false;
+function forwardSignal(sig) {
+	if (killing) {
+		child.kill('SIGKILL');
+		process.exit(130);
+	}
+	killing = true;
+	console.error('\nexpediter: shutting down...');
+	child.kill(sig);
+	setTimeout(() => {
+		if (child.exitCode === null && child.signalCode === null) {
+			child.kill('SIGKILL');
+		}
+	}, 500).unref();
+}
+process.on('SIGINT', () => forwardSignal('SIGTERM'));
+process.on('SIGTERM', () => forwardSignal('SIGTERM'));
 
 if (await waitForDaemon()) {
 	await printAccess();
