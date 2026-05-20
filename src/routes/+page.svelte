@@ -27,6 +27,12 @@
 	// to fire again.
 	let everConnected = $state(false);
 	let focusing = $state<string | null>(null);
+	// In-memory only; lost on page reload. Marks the most recently tapped ticket
+	// so the user has a visual "this is the session I jumped into" cue. Goes
+	// stale if the user switches sessions inside the terminal directly — that's
+	// accepted for v0; proper "currently focused pane" tracking would need
+	// AppleScript polling on the server.
+	let lastTapped = $state<string | null>(null);
 	let mockMode = false;
 	// Reactive: cleared when /api/ping returns 403 (token died, daemon restarted).
 	// Initial value is read from sessionStorage on the browser; null on the server.
@@ -162,6 +168,7 @@
 			return;
 		}
 		focusing = ticket.session_id;
+		lastTapped = ticket.session_id;
 		try {
 			await fetch('/api/focus', {
 				method: 'POST',
@@ -319,6 +326,7 @@
 					class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
 					class:pressing={focusing === ticket.session_id}
 					class:working={ticket.working}
+					class:tapped={lastTapped === ticket.session_id}
 					animate:flip={{ duration: 220 }}
 					in:fly={{ y: -8, duration: 180 }}
 					out:fly={{ y: 8, duration: 140 }}
@@ -530,6 +538,17 @@
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
+	}
+	/* "Tapped" marker: the most recently tapped ticket gets a stronger drop
+	   shadow so the user can see at a glance which session they jumped into.
+	   Pure box-shadow + z-index (no transform) so it composes cleanly with
+	   pressing/working/stale, which all use their own properties. Persists
+	   until another ticket is tapped or the page reloads. */
+	.ticket.tapped {
+		box-shadow:
+			0 2px 0 rgba(80, 60, 30, 0.08),
+			0 8px 24px rgba(80, 60, 30, 0.18);
+		z-index: 1;
 	}
 	/* Stale tiers for idle Stop/Notification tickets. Step desaturation at 2 / 4 /
 	   8 / 16 minutes; filter applies to the whole ticket including text + border
