@@ -36,6 +36,8 @@ PORT="${EXPEDITER_PORT:-5179}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 SHIM_EXPEDITER="$HOME/.local/bin/expediter"
 SHIM_CLAUDEX="$HOME/.local/bin/claudex"
+CC_CLOCK="$HOME/.local/bin/cc-clock"
+CC_DATES="$HOME/.local/bin/cc-dates"
 CONFIG_DIR="$HOME/.config/expediter"
 CONFIG_FILE="$CONFIG_DIR/config"
 SETTINGS="$HOME/.claude/settings.json"
@@ -262,7 +264,7 @@ section "2. Shims"
 printf 'Removing the expediter and claudex commands from ~/.local/bin/.\n\n'
 
 removed_shims=0
-for shim in "$SHIM_EXPEDITER" "$SHIM_CLAUDEX"; do
+for shim in "$SHIM_EXPEDITER" "$SHIM_CLAUDEX" "$CC_CLOCK" "$CC_DATES"; do
 	if [ -f "$shim" ] || [ -L "$shim" ]; then
 		rm -f "$shim"
 		removed_shims=$((removed_shims + 1))

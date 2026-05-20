@@ -361,6 +361,15 @@ exec "$EXPEDITER_HOME/bin/claudex.sh" "$@"
 EOF
 chmod +x "$HOME/.local/bin/claudex"
 
+# Status-bar helpers — small bash scripts referenced by expediter.tmux.conf for
+# `status-right` (cc-clock) and the `pane-border-format` (cc-dates). Copied
+# straight from the repo so users can edit them later without re-running
+# install.sh. cc-dates silently no-ops if `jq` isn't installed.
+for helper in cc-clock cc-dates; do
+	cp "$REPO/bin/$helper" "$HOME/.local/bin/$helper"
+	chmod +x "$HOME/.local/bin/$helper"
+done
+
 # Silent: PATH check. Only surface a line at the end of this phase if we
 # actually appended to the user's shell rc (rare; Claude Code's installer
 # typically already puts ~/.local/bin on PATH).

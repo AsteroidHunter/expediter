@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# cc-clock — prints "HH:MM AM/PM | Month day{st/nd/rd/th}, YYYY"
+# Example: "11:42 PM | May 17th, 2026"
+#
+# Designed for the tmux status bar. Installed by Expediter's install.sh into
+# ~/.local/bin/ alongside the expediter and claudex shims; referenced from
+# expediter.tmux.conf via "#(cc-clock)".
+
+day=$(date +%-d)
+case $day in
+	11|12|13) suffix=th ;;
+	*)
+		case $((day % 10)) in
+			1) suffix=st ;;
+			2) suffix=nd ;;
+			3) suffix=rd ;;
+			*) suffix=th ;;
+		esac ;;
+esac
+
+printf '%s | %s %d%s, %s' \
+	"$(date +'%-I:%M %p')" \
+	"$(date +%B)" \
+	"$day" \
+	"$suffix" \
+	"$(date +%Y)"

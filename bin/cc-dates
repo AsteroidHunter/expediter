@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# cc-dates <pane_pid>
+# Prints " · MM-DD → MM-DD" for the claude session running as a descendant
+# of pane_pid. Prints nothing if no claude session is found or if jq is not
+# installed, so it can drop into a tmux pane-border-format without leaving
+# a dangling separator on non-claude panes or on systems without jq.
+#
+# Installed by Expediter's install.sh into ~/.local/bin/; referenced from
+# expediter.tmux.conf via "#(cc-dates #{pane_pid})".
+
+set -uo pipefail
+
+# Silent fallback: cc-dates is opt-in eye candy, not a hard dependency.
+command -v jq >/dev/null 2>&1 || exit 0
+
+pane_pid="${1:-}"
+[ -z "$pane_pid" ] && exit 0
+
+# Find a claude descendant of $1 by walking the process tree from ps.
+# pgrep -P is unreliable for login shells (-zsh) on macOS BSD, so use ps.
+find_claude_pid() {
+	ps -e -o pid=,ppid=,comm= | awk -v root="$1" '
+		{ ppid[$1] = $2; comm[$1] = $3 }
+		END {
+			for (p in comm) {
+				cur = p
+				for (i = 0; i < 20 && cur != root && cur != "1" && cur != ""; i++) {
+					cur = ppid[cur]
+				}
+				if (cur == root) {
+					n = split(comm[p], parts, "/")
+					name = parts[n]
+					if (name == "claude" || name == "claude.exe") { print p; exit }
+				}
+			}
+		}
+	'
+}
+
+claude_pid=$(find_claude_pid "$pane_pid") || exit 0
+[ -z "$claude_pid" ] && exit 0
+
+pid_file="$HOME/.claude/sessions/${claude_pid}.json"
+[ -f "$pid_file" ] || exit 0
+
+started=$(jq -r '.startedAt // 0' "$pid_file")
+updated=$(jq -r '.updatedAt // 0' "$pid_file")
+
+(( started == 0 || updated == 0 )) && exit 0
+
+s=$((started / 1000))
+u=$((updated / 1000))
+
+cd=$(date -r "$s" +%m-%d 2>/dev/null) || exit 0
+ud=$(date -r "$u" +%m-%d 2>/dev/null) || exit 0
+
+printf ' · %s → %s' "$cd" "$ud"
