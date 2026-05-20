@@ -15,7 +15,7 @@
 		title: string;
 		event_type: EventType;
 		created_at: number;
-		inactive: boolean;
+		working: boolean;
 	};
 
 	let tickets = $state<Ticket[]>([]);
@@ -284,12 +284,17 @@
 				<li
 					class="ticket {typeClass(ticket.event_type)}"
 					class:pressing={focusing === ticket.session_id}
-					class:inactive={ticket.inactive}
+					class:working={ticket.working}
 					animate:flip={{ duration: 220 }}
 					in:fly={{ y: -8, duration: 180 }}
 					out:fly={{ y: 8, duration: 140 }}
 				>
 					<button type="button" onclick={() => focusSession(ticket)}>
+						{#if ticket.working}
+							<div class="shimmer" aria-hidden="true">
+								<div class="shimmer-stripe"></div>
+							</div>
+						{/if}
 						<div class="stub">
 							<span class="project">{projectLabel(ticket.cwd)}</span>
 							<span class="type">{typeLabel(ticket.event_type)}</span>
@@ -448,7 +453,11 @@
 		box-shadow:
 			0 1px 0 rgba(80, 60, 30, 0.04),
 			0 2px 10px rgba(80, 60, 30, 0.06);
-		transition: transform 120ms ease;
+		transition:
+			transform 120ms ease,
+			background-color 150ms ease,
+			border-color 150ms ease,
+			color 150ms ease;
 	}
 	.ticket.type-permission {
 		--bg: #f9d5cc;
@@ -467,13 +476,48 @@
 	.ticket.pressing {
 		transform: scale(0.985);
 	}
-	/* Handled tickets sink into the inactive tier of the dock. Opacity + a
-	   saturation cut reads as "you've dealt with this" without changing the
-	   shape, so the existing flip animation still moves the ticket cleanly
-	   between tiers. */
-	.ticket.inactive {
-		opacity: 0.55;
-		filter: saturate(0.4);
+	/* "Working" state: Claude is processing (UserPromptSubmit / PostToolUse /
+	   PostToolUseFailure). The ticket depresses (scale 0.985) and renders in a
+	   pastel-green palette that overrides the event_type tint, so an approved
+	   PermissionRequest stops reading as red while Claude finishes the tool.
+	   A white shimmer stripe sweeps left→right behind the stub/body text (the
+	   text and the perforation notches paint on top via z-index / tree order),
+	   keeping the perforated silhouette intact. Flips back automatically on
+	   the next Stop / PermissionRequest / Notification, since upsert clears
+	   the working flag. */
+	.ticket.working {
+		transform: scale(0.985);
+		--bg: #d4e6c8;
+		--border: #a8c890;
+		--title: #1f3a1f;
+		--muted: #6b8a55;
+		--accent: #3a5e2a;
+	}
+	.shimmer {
+		position: absolute;
+		inset: 0;
+		overflow: hidden;
+		pointer-events: none;
+	}
+	.shimmer-stripe {
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(
+			90deg,
+			transparent 0%,
+			rgba(255, 255, 255, 0.55) 50%,
+			transparent 100%
+		);
+		animation: ticket-working-shimmer 1.6s linear infinite;
+		will-change: transform;
+	}
+	@keyframes ticket-working-shimmer {
+		0% {
+			transform: translateX(-100%);
+		}
+		100% {
+			transform: translateX(100%);
+		}
 	}
 
 	.ticket button {
@@ -489,6 +533,8 @@
 	}
 
 	.stub {
+		position: relative;
+		z-index: 1;
 		display: flex;
 		justify-content: space-between;
 		align-items: baseline;
@@ -556,6 +602,8 @@
 	}
 
 	.body {
+		position: relative;
+		z-index: 1;
 		padding: 14px 18px 18px;
 	}
 
