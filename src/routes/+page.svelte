@@ -191,6 +191,21 @@
 		return 'STOP';
 	}
 
+	// Idle Stop/Notification tickets desaturate in step jumps as they age, so a
+	// glanceable signal of "how stale is this thing" is built into the dock.
+	// PermissionRequest never fades (load-bearing red attention); working state
+	// owns its own pastel-green visual and skips fading too.
+	function staleClass(ticket: Ticket, now: number): string {
+		if (ticket.working) return '';
+		if (ticket.event_type === 'PermissionRequest') return '';
+		const ageMin = (now - ticket.created_at) / 60_000;
+		if (ageMin >= 16) return 'stale-4';
+		if (ageMin >= 8) return 'stale-3';
+		if (ageMin >= 4) return 'stale-2';
+		if (ageMin >= 2) return 'stale-1';
+		return '';
+	}
+
 	function formatAge(createdAt: number, now: number): string {
 		const seconds = Math.max(0, Math.floor((now - createdAt) / 1000));
 		if (seconds < 5) return 'now';
@@ -282,7 +297,7 @@
 		<ul class="queue">
 			{#each tickets as ticket (ticket.session_id)}
 				<li
-					class="ticket {typeClass(ticket.event_type)}"
+					class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
 					class:pressing={focusing === ticket.session_id}
 					class:working={ticket.working}
 					animate:flip={{ duration: 220 }}
@@ -355,7 +370,7 @@
 		display: flex;
 		align-items: baseline;
 		gap: 7px;
-		font-size: 14px;
+		font-size: 18px;
 		letter-spacing: 0.01em;
 		color: #2a1f15;
 	}
@@ -363,7 +378,7 @@
 		font-weight: 600;
 	}
 	.brand-version {
-		font-size: 11px;
+		font-size: 14px;
 		font-weight: 500;
 		color: rgba(42, 31, 21, 0.38);
 		letter-spacing: 0.04em;
@@ -371,8 +386,8 @@
 
 	.conn {
 		position: relative;
-		width: 11px;
-		height: 11px;
+		width: 14px;
+		height: 14px;
 		border: 1px solid #c9bd9a;
 		border-radius: 50%;
 		box-sizing: border-box;
@@ -390,7 +405,7 @@
 	}
 	.conn.on {
 		border-color: #5b8a3a;
-		box-shadow: 0 0 0 3px rgba(91, 138, 58, 0.12);
+		box-shadow: 0 0 0 4px rgba(91, 138, 58, 0.12);
 	}
 	.conn.on::before {
 		background: #5b8a3a;
@@ -477,6 +492,23 @@
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
+	}
+	/* Stale tiers for idle Stop/Notification tickets. Step desaturation at 2 / 4 /
+	   8 / 16 minutes; filter applies to the whole ticket including text + border
+	   so the entire palette ages together. Placed before .ticket.working so the
+	   working pastel-green wins if both classes ever co-applied (the helper
+	   skips stale on working/permission tickets, so this is defensive). */
+	.ticket.stale-1 {
+		filter: saturate(0.75);
+	}
+	.ticket.stale-2 {
+		filter: saturate(0.5);
+	}
+	.ticket.stale-3 {
+		filter: saturate(0.25);
+	}
+	.ticket.stale-4 {
+		filter: saturate(0);
 	}
 	/* "Working" state: Claude is processing (UserPromptSubmit / PostToolUse /
 	   PostToolUseFailure). The ticket depresses (scale 0.985) and renders in a
