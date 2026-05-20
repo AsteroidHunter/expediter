@@ -166,14 +166,25 @@ export async function focusPane(pane: string): Promise<void> {
 		throw new FocusError(`pane '${pane}' resolved to empty session`);
 	}
 
-	// select-pane (not select-window) so two Claude sessions sharing one tmux
-	// window land on the exact pane the ticket came from instead of whichever
-	// pane was last active. select-pane also makes the parent window active,
-	// so no separate select-window call is needed.
+	// select-window switches the session's current window to the one containing
+	// the pane; select-pane then picks the exact pane within that window. Both
+	// are needed: select-pane alone doesn't change the active window (so taps
+	// across windows wouldn't switch), and select-window alone falls back to
+	// whichever pane was last active (wrong when two Claude panes share a
+	// window). Chained in one tmux invocation via ';' to avoid a second process
+	// spawn.
 	try {
-		await execFileAsync('tmux', ['select-pane', '-t', pane]);
+		await execFileAsync('tmux', [
+			'select-window',
+			'-t',
+			pane,
+			';',
+			'select-pane',
+			'-t',
+			pane
+		]);
 	} catch {
-		throw new FocusError(`tmux select-pane failed for '${pane}'`);
+		throw new FocusError(`tmux select-window/select-pane failed for '${pane}'`);
 	}
 
 	const tty = await clientTtyForSession(session);
