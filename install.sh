@@ -249,59 +249,56 @@ else
 	fi
 fi
 
-# --- 2. System tools (tmux, brew, bun) -------------------------------------
+# --- 2. Tmux check ---------------------------------------------------------
 
-NEED_BREW=0; NEED_TMUX=0; NEED_BUN=0
-command -v brew >/dev/null 2>&1 || NEED_BREW=1
-command -v tmux >/dev/null 2>&1 || NEED_TMUX=1
-command -v bun  >/dev/null 2>&1 || NEED_BUN=1
+SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
+section "2. Tmux check"
+printf 'The expediter uses tmux to keep track of claude code sessions.\n\n'
 
-if [ "$NEED_TMUX" = 0 ] && [ "$NEED_BREW" = 0 ] && [ "$NEED_BUN" = 0 ]; then
-	log "tmux, Homebrew, Bun detected."
+if [ -t 1 ]; then
+	printf '%s%s%s Checking if you have tmux installed ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
+	sleep 0.2
+	printf '\r\033[K'
+fi
+
+if command -v tmux >/dev/null 2>&1; then
+	printf '%s✓%s tmux detected!\n' "$GREEN" "$RESET"
 else
-	log ""
-	if [ "$NEED_TMUX" = 1 ]; then
-		log "tmux is not installed."
-	else
-		log "tmux detected, but other tools are missing."
-	fi
-	log ""
-	log "(also installs Homebrew and Bun automatically if they're not already on your system — both are standard developer tools)"
-	log ""
-	if prompt_yn "Install missing tools? [y/n]"; then
-		# Homebrew first — needed for tmux. The official installer prompts for
-		# sudo (unavoidable) and may trigger an Xcode CLT install on a fresh Mac.
-		if [ "$NEED_BREW" = 1 ]; then
-			log "Installing Homebrew (this can take a few minutes; you may be prompted for your Mac password)..."
+	printf 'Uh oh, no tmux on this machine.\n\n'
+	prompt_keypress "yn" "Would you like to install tmux via brew? (y / n) "
+	if [ "$REPLY" = "y" ]; then
+		printf '\n'
+		if command -v brew >/dev/null 2>&1; then
+			printf '%s✓%s Brew detected! Marching on ...\n\n' "$GREEN" "$RESET"
+			spinner "Installing tmux ..." "tmux installed." brew install tmux
+		else
+			# Foreground brew install — sudo prompts go to /dev/tty and would
+			# compete with a spinner animation. Print a single static spinner
+			# frame, run the install in foreground (run_quiet captures
+			# stdout/stderr; sudo still surfaces via /dev/tty), then print the
+			# transition line, then animate the tmux install (no sudo needed).
+			printf '%s%s%s Installing brew first ...\n' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
 			run_quiet bash -c '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-			# Make brew available in the current shell. On Apple Silicon brew
-			# lives at /opt/homebrew; on Intel at /usr/local.
 			if [ -x /opt/homebrew/bin/brew ]; then
 				eval "$(/opt/homebrew/bin/brew shellenv)"
 			elif [ -x /usr/local/bin/brew ]; then
 				eval "$(/usr/local/bin/brew shellenv)"
 			fi
-			log "Homebrew installed."
-		fi
-		if [ "$NEED_TMUX" = 1 ]; then
-			log "Installing tmux..."
-			run_quiet brew install tmux
-			log "tmux installed."
-		fi
-		if [ "$NEED_BUN" = 1 ]; then
-			log "Installing Bun..."
-			run_quiet bash -c 'curl -fsSL https://bun.sh/install | bash'
-			# Bun installer drops the binary at ~/.bun/bin/bun and patches the
-			# user's shell rc, but the current shell needs PATH updated.
-			export BUN_INSTALL="$HOME/.bun"
-			export PATH="$BUN_INSTALL/bin:$PATH"
-			log "Bun installed."
+			printf '%s✓%s Now tmux ...\n\n' "$GREEN" "$RESET"
+			spinner "Installing tmux ..." "tmux installed!" brew install tmux
 		fi
 	else
-		log ""
-		log "Stopping. Install the missing tools manually and re-run this script."
+		printf '\nIf you wish to use the expediter, please install tmux. You can grab homebrew at https://brew.sh and then run `brew install tmux`.\n'
 		exit 1
 	fi
+fi
+
+# Bun silently installed if missing. This will move into the Build phase
+# (plan-Phase 5); kept here in the interim so the script remains functional.
+if ! command -v bun >/dev/null 2>&1; then
+	run_quiet bash -c 'curl -fsSL https://bun.sh/install | bash'
+	export BUN_INSTALL="$HOME/.bun"
+	export PATH="$BUN_INSTALL/bin:$PATH"
 fi
 
 # --- 3. Build --------------------------------------------------------------
