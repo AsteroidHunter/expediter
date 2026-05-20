@@ -448,9 +448,7 @@
 		box-shadow:
 			0 1px 0 rgba(80, 60, 30, 0.04),
 			0 2px 10px rgba(80, 60, 30, 0.06);
-		transition:
-			transform 120ms ease,
-			filter 160ms ease;
+		transition: transform 120ms ease;
 	}
 	.ticket.type-permission {
 		--bg: #f9d5cc;
@@ -469,38 +467,13 @@
 	.ticket.pressing {
 		transform: scale(0.985);
 	}
-	/* "Working" state: the user has responded and Claude is processing. The
-	   ticket depresses (same scale as the pressing state), darkens slightly,
-	   and a thin translucent shimmer sweeps left→right on a loop. Flips back
-	   automatically on the next Stop / PermissionRequest / Notification, since
-	   upsert clears the inactive flag. overflow: hidden is scoped to the
-	   inactive modifier so the shimmer pseudo doesn't bleed past the ticket
-	   boundary; active tickets keep default overflow. */
+	/* Handled tickets sink into the inactive tier of the dock. Opacity + a
+	   saturation cut reads as "you've dealt with this" without changing the
+	   shape, so the existing flip animation still moves the ticket cleanly
+	   between tiers. */
 	.ticket.inactive {
-		transform: scale(0.985);
-		filter: brightness(0.94);
-		overflow: hidden;
-	}
-	.ticket.inactive::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(
-			90deg,
-			transparent 0%,
-			rgba(255, 255, 255, 0.22) 50%,
-			transparent 100%
-		);
-		pointer-events: none;
-		animation: ticket-working-shimmer 1.6s linear infinite;
-	}
-	@keyframes ticket-working-shimmer {
-		0% {
-			transform: translateX(-100%);
-		}
-		100% {
-			transform: translateX(100%);
-		}
+		opacity: 0.55;
+		filter: saturate(0.4);
 	}
 
 	.ticket button {
