@@ -25,19 +25,7 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 
 # --- helpers ---------------------------------------------------------------
 
-log() { printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
-
-# prompt_yn "Question? [y/n]"  — defaults to yes on empty input.
-prompt_yn() {
-	local q="$1" reply
-	printf '%s ' "$q"
-	read -r reply
-	case "${reply:-y}" in
-		y|Y|yes|YES) return 0 ;;
-		*) return 1 ;;
-	esac
-}
 
 run_quiet() {
 	if ! "$@" >>"$LOG" 2>&1; then
@@ -480,36 +468,52 @@ if [ "$PATH_APPENDED" = 1 ]; then
 	printf '\n  Note: ~/.local/bin was added to your PATH. Open a new terminal or run `source %s` before using `expediter` or `claudex`.\n' "$PATH_RC"
 fi
 
-# --- 8. tmux conf ----------------------------------------------------------
+# --- 4. Tmux setup ---------------------------------------------------------
 
-log ""
-if prompt_yn "Apply Expediter tmux styling? (your existing conf will be backed up) [y/n]"; then
-	TMUX_CONF="$HOME/.tmux.conf"
-	SOURCE_LINE="source-file \"$REPO/expediter.tmux.conf\""
-
-	if [ -f "$TMUX_CONF" ]; then
-		if grep -Fq "$REPO/expediter.tmux.conf" "$TMUX_CONF"; then
-			log "tmux conf already sources expediter.tmux.conf — skipping."
-		else
-			BACKUP="$TMUX_CONF.expediter-bak.$(date +%Y%m%d-%H%M%S)"
-			cp "$TMUX_CONF" "$BACKUP"
-			log "Backed up existing $TMUX_CONF to $BACKUP"
-			printf '\n# Added by Expediter installer\n%s\n' "$SOURCE_LINE" >> "$TMUX_CONF"
-			log "Appended source-file line to $TMUX_CONF"
+# polish_tmux — apply the expediter tmux styling. Sourced from ~/.tmux.conf
+# (or created if no .tmux.conf exists). Idempotent: if .tmux.conf already
+# sources us, no change. Backs up before modifying.
+polish_tmux() {
+	local conf="$HOME/.tmux.conf"
+	local source_line="source-file \"$REPO/expediter.tmux.conf\""
+	if [ -f "$conf" ]; then
+		if grep -Fq "$REPO/expediter.tmux.conf" "$conf"; then
+			return 0  # already sources us, idempotent no-op
 		fi
+		local backup="$conf.expediter-bak.$(date +%Y%m%d-%H%M%S)"
+		cp "$conf" "$backup"
+		printf '\n# Added by Expediter installer\n%s\n' "$source_line" >> "$conf"
 	else
-		printf '# Created by Expediter installer\n%s\n' "$SOURCE_LINE" > "$TMUX_CONF"
-		log "Created $TMUX_CONF sourcing expediter.tmux.conf"
+		printf '# Created by Expediter installer\n%s\n' "$source_line" > "$conf"
 	fi
-fi
+}
+
+SPIN_FRAMES=("${SPIN_CLASSIC[@]}")
+section "4. Tmux setup"
+printf 'Do you already have a preferred tmux set up?\n\n'
+printf '  y - yes / don'\''t mess with my tmux\n'
+printf '  u - no, give me an upgrade\n'
+printf '  w - what is a tmux?\n\n'
+
+prompt_keypress "yuw" "answer: "
+
+case "$REPLY" in
+	y)
+		printf '\n%s⊘%s Skipped.\n' "$DIM" "$RESET"
+		;;
+	w)
+		printf '\ntmux is an open-source terminal session manager. Think of it as the software that allows the terminal to have richer visual layouts like tabs and panes. It has been the de-facto terminal add-on since the 2010s.\n\n'
+		spinner "Polishing tmux ..." "tmux polished!" polish_tmux
+		;;
+	u)
+		printf '\n'
+		spinner "Polishing tmux ..." "tmux polished!" polish_tmux
+		;;
+esac
 
 # --- done ------------------------------------------------------------------
 
-log ""
-log "Done."
-log ""
-log "Quick start:"
-log "  expediter         — start the daemon and print URL + QR code"
-log "  claudex           — open tmux with claude + expediter side-by-side"
-log ""
-log "Install log: $LOG"
+printf '\n%s✦%s Expediter is ready!\n\n' "$GREEN" "$RESET"
+printf 'Few ways to use expediter:\n\n'
+printf 'expediter   start the daemon and print the QR for linking your phone\n'
+printf 'claudex     open tmux with claude + expediter side-by-side\n'
