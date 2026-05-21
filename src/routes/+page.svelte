@@ -183,7 +183,7 @@
 		} finally {
 			setTimeout(() => {
 				if (focusing === ticket.session_id) focusing = null;
-			}, 300);
+			}, 80);
 		}
 	}
 
@@ -298,15 +298,11 @@
 	<header>
 		<div class="brand">
 			<span class="brand-name">Expediter</span>
-			<span class="brand-version">(v0.1)</span>
+			<span class="brand-version">(v0.7)</span>
 		</div>
 		<span class="conn" class:on={connected} aria-label={connected ? 'connected' : 'disconnected'}
 		></span>
 	</header>
-
-	{#if isDisconnected}
-		<div class="banner-disconnected" role="status" aria-live="polite">disconnected</div>
-	{/if}
 
 	{#if !clientToken}
 		<div class="empty empty-no-token" aria-live="polite">
@@ -352,6 +348,12 @@
 				</li>
 			{/each}
 		</ul>
+	{/if}
+
+	{#if isDisconnected}
+		<div class="disconnected-overlay" role="status" aria-live="polite">
+			<span>you are disconnected</span>
+		</div>
 	{/if}
 </main>
 
@@ -434,16 +436,31 @@
 		border-color: #5b8a3a;
 		box-shadow: 0 0 0 4px rgba(91, 138, 58, 0.12);
 	}
-	/* Shown when isDisconnected: the SSE dropped after a successful connect.
-	   Restrained — the dimmed ticket list is the louder signal; this is just a
-	   word so the user isn't left guessing. */
-	.banner-disconnected {
-		text-align: center;
-		font-size: 11px;
+	/* Shown when isDisconnected: a viewport-centered status overlay. The queue
+	   below fades out slowly via the .queue.disconnected transition, leaving
+	   this message as the dominant element. pointer-events: none so the
+	   overlay never intercepts taps. */
+	.disconnected-overlay {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+		z-index: 10;
+		font-size: 14px;
 		letter-spacing: 0.22em;
 		text-transform: uppercase;
-		color: rgba(42, 31, 21, 0.5);
-		padding: 4px 0;
+		color: rgba(42, 31, 21, 0.6);
+		animation: disconnected-fade-in 900ms ease both;
+	}
+	@keyframes disconnected-fade-in {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
 	}
 	.conn.on::before {
 		background: #5b8a3a;
@@ -489,13 +506,15 @@
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
+		transition: opacity 1.2s ease;
 	}
-	/* While disconnected, tickets render as stale snapshots — translucent and
-	   non-tappable so a tap doesn't queue a /api/focus against a dead daemon.
-	   The list itself is opacity-faded; pointer-events: none cascades down to
-	   the buttons inside. */
+	/* When the SSE drops, the ticket list slowly fades to fully transparent and
+	   stops accepting taps. The viewport-centered .disconnected-overlay takes
+	   over as the dominant signal. pointer-events: none cascades down to the
+	   ticket buttons so a tap during the fade-out can't queue /api/focus
+	   against a dead daemon. */
 	.queue.disconnected {
-		opacity: 0.5;
+		opacity: 0;
 		pointer-events: none;
 	}
 
@@ -544,11 +563,8 @@
 	   Pure box-shadow + z-index (no transform) so it composes cleanly with
 	   pressing/working/stale, which all use their own properties. Persists
 	   until another ticket is tapped or the page reloads. */
-	.ticket.tapped {
-		box-shadow:
-			0 2px 0 rgba(80, 60, 30, 0.08),
-			0 8px 24px rgba(80, 60, 30, 0.18);
-		z-index: 1;
+	.ticket.tapped .title {
+		font-weight: 700;
 	}
 	/* Stale tiers for idle Stop/Notification tickets. Step desaturation at 2 / 4 /
 	   8 / 16 minutes; filter applies to the whole ticket including text + border
@@ -621,6 +637,7 @@
 		font: inherit;
 		padding: 0;
 		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.stub {
@@ -674,22 +691,31 @@
 		background-size: 8px 1px;
 		background-repeat: repeat-x;
 	}
+	/* Perforation end-caps. Each cap is a half-disc that sits flush against the
+	   ticket's left or right edge (flat side aligned with the perimeter,
+	   rounded side bulging inward). Cap is offset 1px past the ticket edge so
+	   its background covers the ticket's straight border at the notch height,
+	   then the cap's own curved border continues the perimeter inward around
+	   the cutout. Result reads as a punched notch in the ticket, not a disc
+	   stuck on top of it. Fill is var(--page-bg) so the cutout shows the page
+	   color through. */
 	.perforation::before,
 	.perforation::after {
 		content: '';
 		position: absolute;
 		top: 50%;
-		width: var(--notch-size);
+		width: calc(var(--notch-size) / 2);
 		height: var(--notch-size);
-		border-radius: 50%;
-		background: var(--page-bg);
+		background-color: var(--page-bg);
 		transform: translateY(-50%);
 	}
 	.perforation::before {
-		left: calc(-1 * (var(--notch-offset) + var(--notch-size) / 2));
+		left: calc(-1 * var(--notch-offset) - 1px);
+		border-radius: 0 var(--notch-size) var(--notch-size) 0;
 	}
 	.perforation::after {
-		right: calc(-1 * (var(--notch-offset) + var(--notch-size) / 2));
+		right: calc(-1 * var(--notch-offset) - 1px);
+		border-radius: var(--notch-size) 0 0 var(--notch-size);
 	}
 
 	.body {
