@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# claudex — open a fresh tmux session with `claude` in one window and
-# `expediter` in another, then attach (or switch) to it.
+# claudex — open a fresh tmux session with `expediter` and `claude` in two
+# side-by-side panes, then attach (or switch) to it.
 #
 # Run from anywhere via the ~/.local/bin/claudex shim installed by install.sh.
 # The shim sets EXPEDITER_HOME but this script doesn't need it — it only needs
 # `claude` and `expediter` to be on PATH (which install.sh guarantees).
+#
+# Subcommands:
+#   claudex                 default: expediter (left) + claude (right) panes
+#   claudex uno             newbie onboarding (daemon + QR + 4 numbered steps)
+#   claudex tour sonnet     fresh tmux session with the Sonnet explainer
+#   claudex tour haiku      fresh tmux session with the Haiku haiku-writer
 
 set -u
 
@@ -129,15 +135,23 @@ esac
 # sessions instead of clobbering the first.
 SESSION="claudex-$(date +%s)"
 
-# Create the session detached with the claude window first so it's window 1.
-tmux new-session -d -s "$SESSION" -n claude -c "$PWD" 'claude'
-tmux new-window -t "$SESSION:" -n expediter -c "$PWD" 'expediter'
+# One window split into two side-by-side panes: expediter (QR) on the left,
+# claude on the right. Side-by-side panes are friendlier to first-time users
+# than two windows behind tmux navigation — both processes are visible from
+# the moment they attach, no Ctrl-b n required to find the QR.
+# tmux's -h flag splits "horizontally" by tmux convention, which actually
+# produces panes that sit side-by-side (the new pane is to the right of the
+# original). -v would stack them vertically.
+tmux new-session -d -s "$SESSION" -n main -c "$PWD" 'expediter'
+tmux split-window -t "$SESSION:main" -h -c "$PWD" 'claude'
 
-# Select the claude window so the user lands on it (vs. the expediter logs).
-tmux select-window -t "$SESSION:claude"
+# After the split, pane 0 is expediter (left) and pane 1 is claude (right).
+# Land the user on the claude pane so they can start typing immediately; the
+# QR remains visible to their left.
+tmux select-pane -t "$SESSION:main.1"
 
 # If we're already inside tmux, switch-client; otherwise attach. Either way
-# the user ends up looking at the new session's claude window.
+# the user ends up looking at the new session with both panes visible.
 if [ -n "${TMUX:-}" ]; then
 	tmux switch-client -t "$SESSION"
 else
