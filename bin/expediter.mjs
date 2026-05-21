@@ -17,9 +17,17 @@ const PRINT_URL = process.argv.includes('--print-url');
 const SHOW_HELP = process.argv.includes('--help') || process.argv.includes('-h');
 const TITLE_IDX = process.argv.indexOf('--title');
 const TITLE_VALUE = TITLE_IDX >= 0 ? process.argv[TITLE_IDX + 1] : null;
+// --steps "<s1>|<s2>|..." — opt-in numbered-steps list appended below the QR.
+// Used by `claudex uno` to print newbie-onboarding instructions. Plain
+// `expediter` without --steps never prints steps. Steps are pipe-delimited;
+// each step renders on its own line prefixed with "<n>. " (1-indexed).
+const STEPS_IDX = process.argv.indexOf('--steps');
+const STEPS_RAW = STEPS_IDX !== -1 ? process.argv[STEPS_IDX + 1] : undefined;
 
 if (SHOW_HELP) {
-	console.log('Usage: expediter [--print-url] [--title default|haiku] [--help]');
+	console.log(
+		'Usage: expediter [--print-url] [--title default|haiku] [--steps "<s1>|<s2>|..."] [--help]'
+	);
 	console.log('');
 	console.log('  --print-url            Also print the tethered URL as text (default: QR only).');
 	console.log('                         Use this only if your phone cannot scan the QR — the URL');
@@ -29,6 +37,8 @@ if (SHOW_HELP) {
 	console.log('                         /rename), with a whimsical name as fallback. "haiku" uses');
 	console.log('                         the LLM-generated caveman summary. Writes to');
 	console.log('                         ~/.expediter/config.json.');
+	console.log('  --steps                Pipe-delimited list of numbered steps to print below the QR.');
+	console.log('                         Opt-in; used by `claudex uno` for newbie-onboarding.');
 	console.log('  --help, -h             Show this message.');
 	process.exit(0);
 }
@@ -178,6 +188,13 @@ async function printAccess() {
 		console.log('');
 		console.log('  WARNING: the URL above contains the session token and will stay in');
 		console.log('  your terminal scrollback. Restart the daemon to invalidate it.');
+	}
+	if (STEPS_RAW) {
+		console.log('');
+		const steps = STEPS_RAW.split('|');
+		steps.forEach((step, i) => {
+			console.log(`${i + 1}. ${step}`);
+		});
 	}
 }
 

@@ -523,6 +523,7 @@ esac
 # --- done ------------------------------------------------------------------
 
 printf '\n%s✦%s Expediter is ready!\n\n' "$GREEN" "$RESET"
-printf 'Few ways to use expediter:\n\n'
-printf 'expediter   start the daemon and print the QR for linking your phone\n'
-printf 'claudex     open tmux with claude + expediter side-by-side\n'
+printf '%sFew ways to use expediter:%s\n\n' "$BOLD" "$RESET"
+printf '  %sexpediter%s     start the daemon and print the QR for linking your phone\n' "$BOLD" "$RESET"
+printf '  %sclaudex%s       open tmux with claude + expediter side-by-side\n' "$BOLD" "$RESET"
+printf '  %sclaudex uno%s   new to tmux or Claude Code? start here\n\n' "$BOLD" "$RESET"
