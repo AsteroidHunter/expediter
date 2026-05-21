@@ -6,7 +6,7 @@ Expediter is a companion app that aims to help you more easily access, babysit, 
 
 It seems plausible that the role of many software engineers in the near future will be like that of a head chef. You have several cooks, i.e., agents, pushing out orders constantly. You need to review what these agents are cooking and check if everything looks right.
 
-Most of the time, the permission requests are simple, but sometimes the agents take chaotic steps, and it helps if you're in the loop. Second, **agent minutes are valuable!** An agent stuck on a request or veering onto an unproductive path is costly, especially when executing a long spec.
+Most of the time, the permission requests are simple, but sometimes the agents take chaotic steps, and it helps if you're in the loop. Second, **an agent's work per unit time is really high, so agent minutes are valuable!** An agent stuck on a request or veering onto an unproductive path is costly, especially when executing a long spec because each delay piles up.
 
 My hope is that this simple interface puts you in a loop with your agents. I have been using it personally and **it has helped eliminate the time it takes hopping from agent number one to five to three to four** (I am also someone who always has too many tabs and windows open) + **enabled me to manage more agents than I otherwise would have**.
 
@@ -15,6 +15,8 @@ At the moment, I want to see if the core UX resonates with others. So, give it a
 (Needless to say, I built this because I was unhappy with all the existing agent management interfaces. Claude Code's official remote control feature demands telemetry. The open-source spin-offs are fine but they also try to be a terminal on your phone, which serves a purpose, but not the problem I was facing.
 
 The human-in-the-loop does impose some inherent constraints; there are some who expect humans will be RL-ified from software engineering altogether. Even if that comes to pass, there will still be those who would exercise their agency, orchestrate many talking machines, and find value in building.)
+
+![Expediter simple visual guide](docs/assets/expediter_visual_guide.webp)
 
 ## Install
 
