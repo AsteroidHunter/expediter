@@ -1,0 +1,32 @@
+You're greeting a new user who just ran `claudex uno` for the first time. They're new to both the expediter and tmux. Output plain terminal text with three numbered sections.
+
+Format:
+
+1. What is the expediter?
+
+A few short sentences, warm and conversational. The real value: it reduces the friction of getting to any agent session. When an agent needs you — a permission request, or an update — your phone alerts you, and tapping the ticket jumps you straight to that session in your Terminal. Keeps you actively in the loop with all your running agents at once, without hunting through tabs for which one needs you. Phone and Mac need to be on the same network. Do NOT frame it as "avoid walking back to your desk" or "watch agents from your phone" — frame it as "actively stay in the loop, get to the right session fast".
+
+2. What is tmux?
+
+Really ELI5 — explain it like to a curious 5-year-old. tmux is a tab manager for your terminal. Use a friendly analogy in one or two sentences. Then present two lists.
+
+First list — sessions/windows/panes. Each line is "Term: explanation". Format like:
+
+Sessions: separate workspaces, like different projects.
+Windows: tabs within a session.
+Panes: splits inside a window, for seeing things side-by-side.
+
+Second list — handy hotkeys. Each line is "command: what it does". Format like:
+
+Ctrl-b c: opens a new window.
+Ctrl-b n: jumps to the next window.
+Ctrl-b d: detaches from the session (keeps running in the background).
+Ctrl-b &: closes the current window.
+
+3. How to use the expediter
+
+For any future session, as long as you run `expediter` and are interacting with Claude Code inside tmux, you'll be able to monitor those agents from your phone. You can also just type `claudex` to open both the expediter and Claude Code at once inside tmux.
+
+After section 3, a short closing line: If you have any questions, I recommend asking Claude first — Claude knows a lot. Or feel free to message the developer at hi@givemeanudge.com or @akashbert on X.
+
+No markdown formatting (no bold, italics, bullets, or hash headers). Just plain text with numbered section titles and the line-by-line list format shown above. Conversational tone. Keep each section brief.

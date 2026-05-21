@@ -50,56 +50,7 @@ case "${1:-}" in
 	tour)
 		MODEL="${2:-}"
 		case "$MODEL" in
-			sonnet)
-				# Sonnet explainer prompt — locked verbatim from the
-				# claudex-uno plan's _strings.md (iterated to v5 with the
-				# user). Quoted heredoc <<'END_PROMPT' so backticks around
-				# `expediter` / `claudex` aren't run as command substitutions.
-				# Using `read -r -d ''` instead of `PROMPT=$(cat <<...)`
-				# because bash 3.2 (macOS default) misparses apostrophes
-				# inside heredocs when the heredoc is wrapped in $(),
-				# treating them as opening single-quotes for shell parsing.
-				# `read -r -d ''` reads the heredoc into PROMPT without
-				# wrapping it in command substitution. `|| true` because
-				# read returns non-zero on EOF (expected with -d '').
-				IFS= read -r -d '' PROMPT <<'END_PROMPT' || true
-You're greeting a new user who just ran `claudex uno` for the first time. They're new to both the expediter and tmux. Output plain terminal text with three numbered sections.
-
-Format:
-
-1. What is the expediter?
-
-A few short sentences, warm and conversational. The real value: it reduces the friction of getting to any agent session. When an agent needs you — a permission request, or an update — your phone alerts you, and tapping the ticket jumps you straight to that session in your Terminal. Keeps you actively in the loop with all your running agents at once, without hunting through tabs for which one needs you. Phone and Mac need to be on the same network. Do NOT frame it as "avoid walking back to your desk" or "watch agents from your phone" — frame it as "actively stay in the loop, get to the right session fast".
-
-2. What is tmux?
-
-Really ELI5 — explain it like to a curious 5-year-old. tmux is a tab manager for your terminal. Use a friendly analogy in one or two sentences. Then present two lists.
-
-First list — sessions/windows/panes. Each line is "Term: explanation". Format like:
-
-Sessions: separate workspaces, like different projects.
-Windows: tabs within a session.
-Panes: splits inside a window, for seeing things side-by-side.
-
-Second list — handy hotkeys. Each line is "command: what it does". Format like:
-
-Ctrl-b c: opens a new window.
-Ctrl-b n: jumps to the next window.
-Ctrl-b d: detaches from the session (keeps running in the background).
-Ctrl-b &: closes the current window.
-
-3. How to use the expediter
-
-For any future session, as long as you run `expediter` and are interacting with Claude Code inside tmux, you'll be able to monitor those agents from your phone. You can also just type `claudex` to open both the expediter and Claude Code at once inside tmux.
-
-After section 3, a short closing line: If you have any questions, I recommend asking Claude first — Claude knows a lot. Or feel free to message the developer at hi@givemeanudge.com or @akashbert on X.
-
-No markdown formatting (no bold, italics, bullets, or hash headers). Just plain text with numbered section titles and the line-by-line list format shown above. Conversational tone. Keep each section brief.
-END_PROMPT
-				;;
-			haiku)
-				PROMPT="Write a haiku about a positive, collaborative human-AI future."
-				;;
+			sonnet|haiku) ;;
 			"")
 				echo "claudex tour: missing model. Usage: claudex tour [sonnet|haiku]" >&2
 				exit 1
@@ -109,6 +60,20 @@ END_PROMPT
 				exit 1
 				;;
 		esac
+		# Tour prompts live in $EXPEDITER_HOME/bin/uno_prompts/<model>.txt so
+		# they can be edited without touching shell-quoting in this script.
+		# The shim at ~/.local/bin/claudex sets EXPEDITER_HOME before exec'ing
+		# this file.
+		if [ -z "${EXPEDITER_HOME:-}" ] || [ ! -d "$EXPEDITER_HOME" ]; then
+			echo "claudex tour: EXPEDITER_HOME is not set. Re-run install.sh." >&2
+			exit 1
+		fi
+		PROMPT_TXT="$EXPEDITER_HOME/bin/uno_prompts/$MODEL.txt"
+		if [ ! -f "$PROMPT_TXT" ]; then
+			echo "claudex tour: prompt file not found at $PROMPT_TXT" >&2
+			exit 1
+		fi
+		PROMPT="Read $PROMPT_TXT and respond per its contents."
 		# Shell-escape the prompt for safe consumption by tmux's /bin/sh -c.
 		# printf '%q' produces a re-quoted form that survives one more layer
 		# of shell parsing (tmux runs the new-session command via /bin/sh -c).
@@ -142,7 +107,12 @@ SESSION="claudex-$(date +%s)"
 # tmux's -h flag splits "horizontally" by tmux convention, which actually
 # produces panes that sit side-by-side (the new pane is to the right of the
 # original). -v would stack them vertically.
-tmux new-session -d -s "$SESSION" -n main -c "$PWD" 'expediter'
+#
+# `; exec $SHELL` on the expediter pane keeps it open after expediter exits.
+# When the daemon is already up, `expediter` prints the QR and returns
+# immediately — without this, the pane would close and the user would see
+# only the claude pane.
+tmux new-session -d -s "$SESSION" -n main -c "$PWD" "expediter; exec \${SHELL:-bash}"
 tmux split-window -t "$SESSION:main" -h -c "$PWD" 'claude'
 
 # After the split, pane 0 is expediter (left) and pane 1 is claude (right).
