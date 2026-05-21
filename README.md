@@ -1,16 +1,14 @@
 ![Expediter banner](docs/assets/expediterv0_banner_260519.webp)
 
-Expediter is a companion app that aims to help you more easily access, babysit, or interact with multiple Claude Code agents. The key goal is reducing the time and friction it takes to switch between active agent sessions. When you are planning a spec with the first agent, and your fifth agent is stuck on some random permission (or attempting to delete a branch under development), it should take you seconds to free up or redirect that agent -- Expediter makes this trivial!
+Expediter is a companion app that minimizes the amount of time and friction it takes to switch between many active agent sessions, thereby enabling you to increase your throughput and steer more coding agents. When you are planning a spec with an agent that spends two minutes thinking while your third agent is awaiting a response while your fifth agent is requesting permission to delete a branch under active development, it should take you seconds to course correct your agents. Expediter makes this trivial!
 
 ## Why
 
-It seems plausible that the role of many software engineers in the near future will be like that of a head chef. You have several cooks, i.e., agents, pushing out orders constantly. You need to review what these agents are cooking and check if everything looks right.
+Software engineering in languages with abundant training data is an increasingly a low touch job. The *software architect* of today is more like the chef who manages a bunch of line cooks. Coding agents are incredible at cooking ... their work done per unit time is magnitudes higher than that of humans. This makes agent-minutes extremely valuable. An agent stuck on a request or veering onto an unproductive path is costly, especially when executing a long spec because each delay piles up. If we want to optimally increase our throughput while retaining varying but non-zero levels of oversight over a fleet of agents, it makes sense to minimize the amount of time it takes to switch from one agent to another. Even if you aren't optimizing but simply babysitting many agents, it is beneficial to have a simple tool that makes it easy to access any of your agent sessions.
 
-Most of the time, the permission requests are simple, but sometimes the agents take chaotic steps, and it helps if you're in the loop. Second, **an agent's work per unit time is really high, so agent minutes are valuable!** An agent stuck on a request or veering onto an unproductive path is costly, especially when executing a long spec because each delay piles up.
+I hope that the expediter helps you manage more agents or manage few of them better by putting you in a loop with them. I have been using it and **it has helped eliminate the time it takes hopping from agent number one to five to three to four** (I am also someone who always has too many tabs and windows open) + **enabled me to manage more agents than I otherwise would have**.
 
-My hope is that this simple interface puts you in a loop with your agents. I have been using it personally and **it has helped eliminate the time it takes hopping from agent number one to five to three to four** (I am also someone who always has too many tabs and windows open) + **enabled me to manage more agents than I otherwise would have**.
-
-At the moment, I want to see if the core UX resonates with others. So, give it a go and share what you think of it!
+I don't know if this is the optimal shape for a multi-agent manager, so at the moment, I want to see if the core UX resonates with others. Give it a go and share what you think of it!
 
 (Needless to say, I built this because I was unhappy with all the existing agent management interfaces. Claude Code's official remote control feature demands telemetry. The open-source spin-offs are fine but they also try to be a terminal on your phone, which serves a purpose, but not the problem I was facing.
 
