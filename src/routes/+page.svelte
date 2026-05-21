@@ -20,7 +20,19 @@
 
 	let tickets = $state<Ticket[]>([]);
 	let connected = $state(false);
+	// Sticky: flips true on the first successful onopen and never resets. Without
+	// it, isDisconnected would flash on every page load and every wake-from-
+	// background, because `connected` starts false and openStream reopens the
+	// EventSource on visibilitychange / pageshow before onopen has had a chance
+	// to fire again.
+	let everConnected = $state(false);
 	let focusing = $state<string | null>(null);
+	// In-memory only; lost on page reload. Marks the most recently tapped ticket
+	// so the user has a visual "this is the session I jumped into" cue. Goes
+	// stale if the user switches sessions inside the terminal directly — that's
+	// accepted for v0; proper "currently focused pane" tracking would need
+	// AppleScript polling on the server.
+	let lastTapped = $state<string | null>(null);
 	let mockMode = false;
 	// Reactive: cleared when /api/ping returns 403 (token died, daemon restarted).
 	// Initial value is read from sessionStorage on the browser; null on the server.
@@ -84,6 +96,7 @@
 		);
 		eventSource.onopen = () => {
 			connected = true;
+			everConnected = true;
 		};
 		eventSource.onerror = () => {
 			connected = false;
@@ -155,6 +168,7 @@
 			return;
 		}
 		focusing = ticket.session_id;
+		lastTapped = ticket.session_id;
 		try {
 			await fetch('/api/focus', {
 				method: 'POST',
@@ -169,7 +183,7 @@
 		} finally {
 			setTimeout(() => {
 				if (focusing === ticket.session_id) focusing = null;
-			}, 300);
+			}, 80);
 		}
 	}
 
@@ -190,6 +204,27 @@
 		if (t === 'Notification') return 'NOTIFY';
 		return 'STOP';
 	}
+
+	// Idle Stop/Notification tickets desaturate in step jumps as they age, so a
+	// glanceable signal of "how stale is this thing" is built into the dock.
+	// PermissionRequest never fades (load-bearing red attention); working state
+	// owns its own pastel-green visual and skips fading too.
+	function staleClass(ticket: Ticket, now: number): string {
+		if (ticket.working) return '';
+		if (ticket.event_type === 'PermissionRequest') return '';
+		const ageMin = (now - ticket.created_at) / 60_000;
+		if (ageMin >= 16) return 'stale-4';
+		if (ageMin >= 8) return 'stale-3';
+		if (ageMin >= 4) return 'stale-2';
+		if (ageMin >= 2) return 'stale-1';
+		return '';
+	}
+
+	// True only after we successfully connected at least once AND have since lost
+	// the SSE — i.e. the daemon went away or the network dropped. The
+	// everConnected guard prevents a false "disconnected" flash on initial load
+	// and on background-wake reconnects.
+	const isDisconnected = $derived(!!clientToken && !connected && everConnected);
 
 	function formatAge(createdAt: number, now: number): string {
 		const seconds = Math.max(0, Math.floor((now - createdAt) / 1000));
@@ -263,7 +298,7 @@
 	<header>
 		<div class="brand">
 			<span class="brand-name">Expediter</span>
-			<span class="brand-version">(v0.1)</span>
+			<span class="brand-version">(v0.7)</span>
 		</div>
 		<span class="conn" class:on={connected} aria-label={connected ? 'connected' : 'disconnected'}
 		></span>
@@ -273,18 +308,21 @@
 		<div class="empty empty-no-token" aria-live="polite">
 			<span class="empty-label">Scan the QR code in your terminal to connect</span>
 		</div>
-	{:else if tickets.length === 0}
+	{:else if tickets.length === 0 && !isDisconnected}
 		<div class="empty" aria-live="polite">
 			<span class="dot"></span>
 			<span class="empty-label">You have zero tickets!</span>
 		</div>
+	{:else if tickets.length === 0}
+		<div class="empty" aria-live="polite"></div>
 	{:else}
-		<ul class="queue">
+		<ul class="queue" class:disconnected={isDisconnected}>
 			{#each tickets as ticket (ticket.session_id)}
 				<li
-					class="ticket {typeClass(ticket.event_type)}"
+					class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
 					class:pressing={focusing === ticket.session_id}
 					class:working={ticket.working}
+					class:tapped={lastTapped === ticket.session_id}
 					animate:flip={{ duration: 220 }}
 					in:fly={{ y: -8, duration: 180 }}
 					out:fly={{ y: 8, duration: 140 }}
@@ -310,6 +348,12 @@
 				</li>
 			{/each}
 		</ul>
+	{/if}
+
+	{#if isDisconnected}
+		<div class="disconnected-overlay" role="status" aria-live="polite">
+			<span>you are disconnected</span>
+		</div>
 	{/if}
 </main>
 
@@ -355,7 +399,7 @@
 		display: flex;
 		align-items: baseline;
 		gap: 7px;
-		font-size: 14px;
+		font-size: 18px;
 		letter-spacing: 0.01em;
 		color: #2a1f15;
 	}
@@ -363,7 +407,7 @@
 		font-weight: 600;
 	}
 	.brand-version {
-		font-size: 11px;
+		font-size: 14px;
 		font-weight: 500;
 		color: rgba(42, 31, 21, 0.38);
 		letter-spacing: 0.04em;
@@ -371,8 +415,8 @@
 
 	.conn {
 		position: relative;
-		width: 11px;
-		height: 11px;
+		width: 14px;
+		height: 14px;
 		border: 1px solid #c9bd9a;
 		border-radius: 50%;
 		box-sizing: border-box;
@@ -390,7 +434,33 @@
 	}
 	.conn.on {
 		border-color: #5b8a3a;
-		box-shadow: 0 0 0 3px rgba(91, 138, 58, 0.12);
+		box-shadow: 0 0 0 4px rgba(91, 138, 58, 0.12);
+	}
+	/* Shown when isDisconnected: a viewport-centered status overlay. The queue
+	   below fades out slowly via the .queue.disconnected transition, leaving
+	   this message as the dominant element. pointer-events: none so the
+	   overlay never intercepts taps. */
+	.disconnected-overlay {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+		z-index: 10;
+		font-size: 14px;
+		letter-spacing: 0.22em;
+		text-transform: uppercase;
+		color: rgba(42, 31, 21, 0.6);
+		animation: disconnected-fade-in 900ms ease both;
+	}
+	@keyframes disconnected-fade-in {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
 	}
 	.conn.on::before {
 		background: #5b8a3a;
@@ -436,6 +506,16 @@
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
+		transition: opacity 1.2s ease;
+	}
+	/* When the SSE drops, the ticket list slowly fades to fully transparent and
+	   stops accepting taps. The viewport-centered .disconnected-overlay takes
+	   over as the dominant signal. pointer-events: none cascades down to the
+	   ticket buttons so a tap during the fade-out can't queue /api/focus
+	   against a dead daemon. */
+	.queue.disconnected {
+		opacity: 0;
+		pointer-events: none;
 	}
 
 	.ticket {
@@ -477,6 +557,31 @@
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
+	}
+	/* "Tapped" marker: the most recently tapped ticket gets a stronger drop
+	   shadow so the user can see at a glance which session they jumped into.
+	   Pure box-shadow + z-index (no transform) so it composes cleanly with
+	   pressing/working/stale, which all use their own properties. Persists
+	   until another ticket is tapped or the page reloads. */
+	.ticket.tapped .title {
+		font-weight: 700;
+	}
+	/* Stale tiers for idle Stop/Notification tickets. Step desaturation at 2 / 4 /
+	   8 / 16 minutes; filter applies to the whole ticket including text + border
+	   so the entire palette ages together. Placed before .ticket.working so the
+	   working pastel-green wins if both classes ever co-applied (the helper
+	   skips stale on working/permission tickets, so this is defensive). */
+	.ticket.stale-1 {
+		filter: saturate(0.75);
+	}
+	.ticket.stale-2 {
+		filter: saturate(0.5);
+	}
+	.ticket.stale-3 {
+		filter: saturate(0.25);
+	}
+	.ticket.stale-4 {
+		filter: saturate(0);
 	}
 	/* "Working" state: Claude is processing (UserPromptSubmit / PostToolUse /
 	   PostToolUseFailure). The ticket depresses (scale 0.985) and renders in a
@@ -532,6 +637,7 @@
 		font: inherit;
 		padding: 0;
 		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.stub {
@@ -585,22 +691,31 @@
 		background-size: 8px 1px;
 		background-repeat: repeat-x;
 	}
+	/* Perforation end-caps. Each cap is a half-disc that sits flush against the
+	   ticket's left or right edge (flat side aligned with the perimeter,
+	   rounded side bulging inward). Cap is offset 1px past the ticket edge so
+	   its background covers the ticket's straight border at the notch height,
+	   then the cap's own curved border continues the perimeter inward around
+	   the cutout. Result reads as a punched notch in the ticket, not a disc
+	   stuck on top of it. Fill is var(--page-bg) so the cutout shows the page
+	   color through. */
 	.perforation::before,
 	.perforation::after {
 		content: '';
 		position: absolute;
 		top: 50%;
-		width: var(--notch-size);
+		width: calc(var(--notch-size) / 2);
 		height: var(--notch-size);
-		border-radius: 50%;
-		background: var(--page-bg);
+		background-color: var(--page-bg);
 		transform: translateY(-50%);
 	}
 	.perforation::before {
-		left: calc(-1 * (var(--notch-offset) + var(--notch-size) / 2));
+		left: calc(-1 * var(--notch-offset) - 1px);
+		border-radius: 0 var(--notch-size) var(--notch-size) 0;
 	}
 	.perforation::after {
-		right: calc(-1 * (var(--notch-offset) + var(--notch-size) / 2));
+		right: calc(-1 * var(--notch-offset) - 1px);
+		border-radius: var(--notch-size) 0 0 var(--notch-size);
 	}
 
 	.body {
