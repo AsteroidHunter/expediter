@@ -35,7 +35,7 @@ cd expediter
 4. Write `~/.config/expediter/config` so the shims can find your clone (`EXPEDITER_HOME` points at the repo path).
 5. Drop two commands into `~/.local/bin/`, and add that directory to `~/.zshrc` if it isn't already on your `PATH`:
    - `expediter` -- starts the daemon (if it's not already running) and prints the URL + a scannable QR code for your phone.
-   - `claudex` -- opens a fresh tmux session with `claude` in one window and `expediter` in another, so you can start a session with one command.
+   - `claudex` -- opens a fresh tmux session with `claude` and `expediter` in side-by-side panes, so you can start a session with one command.
 6. Offer to merge Expediter's hook entries into `~/.claude/settings.json` (with a timestamped backup).
 7. Offer to apply Expediter's tmux styling via `source-file` in `~/.tmux.conf` (with a backup if you already have one).
 
@@ -59,7 +59,15 @@ However, there's another command if you want to start a fresh Claude Code sessio
 claudex
 ```
 
-That opens a tmux session with `claude` in one window and `expediter` in another.
+That opens a tmux session with `claude` and `expediter` in side-by-side panes.
+
+If you're new to tmux or Claude Code, try:
+
+```bash
+claudex uno
+```
+
+That starts the daemon, prints the QR, and walks you through four numbered onboarding steps below it.
 
 ### Network requirements
 
