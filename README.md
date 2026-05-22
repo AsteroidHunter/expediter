@@ -1,6 +1,19 @@
 ![Expediter banner](docs/assets/expediterv0_banner_260519.webp)
 
-**Expediter puts all your Claude Code sessions one phone tap away.** It is a companion app that minimizes the amount of time and friction it takes to switch between many active agent sessions, thereby enabling you to increase your throughput and steer more coding agents. When you are planning a spec with an agent that spends two minutes thinking while your third agent is awaiting a response while your fifth agent is requesting permission to delete a branch under active development, it should take you seconds to course correct your agents. Expediter makes this trivial!
+**Expediter puts all your Claude Code sessions one phone tap away.** It is a companion app that minimizes the amount of time and friction it takes to switch between many active agent sessions, thereby enabling you to increase your throughput and steer more coding agents. When you are planning a spec with an agent that spends two minutes thinking while your third agent is awaiting a response while your fifth agent is requesting permission to delete a branch under active development, it should take you seconds to course correct your agents. Expediter makes this trivial!'
+
+**How it works once installed:**
+1. You run `expediter` in your terminal
+2. Use your phone to scan the QR code
+3. Start/resume interacting with your claude sessions (in tmux)
+4. The app will show you tickets, each linked to a unique session
+   - Each ticket shows the name, working folder, and status of linked claude session
+      - Red ticket = permission request
+      - Yellow = awaiting further instructions
+      - Green and shining = the agent is working
+      - Light grey = waiting for permission for too long / stale session
+5. You can tap the ticket to immediately _jump_ to the linked session
+6. (optional) Are all your tickets green? Start a new session and further parallelize your work!
 
 ## Why
 
@@ -10,11 +23,13 @@ I hope that the expediter helps you manage more agents or manage few of them bet
 
 I don't know if this is the optimal shape for a multi-agent manager, so at the moment, I want to see if the core UX resonates with others. Give it a go and share what you think of it!
 
-(Needless to say, I built this because I was unhappy with all the existing agent management interfaces. Claude Code's official remote control feature demands telemetry. The open-source spin-offs are fine but they also try to be a terminal on your phone, which serves a purpose, but not the problem I was facing.
-
-The human-in-the-loop does impose some inherent constraints; there are some who expect humans will be RL-ified from software engineering altogether. Even if that comes to pass, there will still be those who would exercise their agency, orchestrate many talking machines, and find value in building.)
-
 ![Expediter simple visual guide](docs/assets/expediter_visual_guide.webp)
+
+--
+
+Needless to say, I built this because I was unhappy with all the existing agent management interfaces. Claude Code's official remote control feature demands telemetry. The open-source spin-offs are fine but they also try to be a terminal on your phone, which serves a purpose, but not the problem I was facing.
+
+The human-in-the-loop does impose some inherent constraints; there are some who expect humans will be RL-ified from software engineering altogether. Even if that comes to pass, there will still be those who would exercise their agency, orchestrate many talking machines, and find value in building.
 
 ## Install
 
