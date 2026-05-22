@@ -260,13 +260,12 @@ else
 			printf '%s✓%s Brew detected! Marching on ...\n\n' "$GREEN" "$RESET"
 			spinner "Installing tmux ..." "tmux installed." brew install tmux
 		else
-			# Foreground brew install — sudo prompts go to /dev/tty and would
-			# compete with a spinner animation. Print a single static spinner
-			# frame, run the install in foreground (run_quiet captures
-			# stdout/stderr; sudo still surfaces via /dev/tty), then print the
-			# transition line, then animate the tmux install (no sudo needed).
+			# NONINTERACTIVE=1 skips brew's "Press RETURN to continue" prompt,
+			# which would otherwise be swallowed by run_quiet's stdout redirect
+			# and leave the installer looking frozen. The user already consented
+			# at the Ready prompt; sudo prompts still surface via /dev/tty.
 			printf '%s%s%s Installing brew first ...\n' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
-			run_quiet bash -c '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+			NONINTERACTIVE=1 run_quiet bash -c '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 			if [ -x /opt/homebrew/bin/brew ]; then
 				eval "$(/opt/homebrew/bin/brew shellenv)"
 			elif [ -x /usr/local/bin/brew ]; then
@@ -293,6 +292,18 @@ if ! command -v bun >/dev/null 2>&1; then
 	run_quiet bash -c 'curl -fsSL https://bun.sh/install | bash'
 	export BUN_INSTALL="$HOME/.bun"
 	export PATH="$BUN_INSTALL/bin:$PATH"
+fi
+
+# Bun's installer skips writing to ~/.zshrc when the file is missing or not
+# writable, and run_quiet swallows its "manually add the directory" fallback.
+# Append the exports ourselves so a new terminal finds bun regardless.
+if [ -x "$HOME/.bun/bin/bun" ] && ! grep -q "BUN_INSTALL" "$HOME/.zshrc" 2>/dev/null; then
+	cat >> "$HOME/.zshrc" <<'EOF'
+
+# Added by Expediter installer (bun PATH)
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+EOF
 fi
 
 # Visible: spinner-wrapped bun install + bun run build. The spinner helper
@@ -473,9 +484,11 @@ then
 fi
 
 # Conditional surfacing: only emits a line if PATH was actually appended.
-if [ "$PATH_APPENDED" = 1 ]; then
-	printf '\n  Note: ~/.local/bin was added to your PATH. Open a new terminal or run `source %s` before using `expediter` or `claudex`.\n' "$PATH_RC"
-fi
+# Commented out — the closing message now always tells users to open a new
+# terminal, so this conditional note is redundant.
+# if [ "$PATH_APPENDED" = 1 ]; then
+# 	printf '\n  Note: ~/.local/bin was added to your PATH. Open a new terminal or run `source %s` before using `expediter` or `claudex`.\n' "$PATH_RC"
+# fi
 
 # --- 4. Tmux setup ---------------------------------------------------------
 
@@ -523,7 +536,9 @@ esac
 # --- done ------------------------------------------------------------------
 
 printf '\n%s✦%s Expediter is ready!\n\n' "$GREEN" "$RESET"
-printf '%sFew ways to use expediter:%s\n\n' "$BOLD" "$RESET"
-printf '  %sexpediter%s     start the daemon and print the QR for linking your phone\n' "$BOLD" "$RESET"
-printf '  %sclaudex%s       open tmux with claude + expediter side-by-side\n' "$BOLD" "$RESET"
-printf '  %sclaudex uno%s   new to tmux or Claude Code? start here\n\n' "$BOLD" "$RESET"
+printf '%sNext steps:%s\n\n' "$BOLD" "$RESET"
+printf '  %s1.%s Open a new terminal tab.\n\n' "$BOLD" "$RESET"
+printf '  %s2.%s Run one of these commands:\n\n' "$BOLD" "$RESET"
+printf '       %sexpediter%s     start the daemon and print the QR for linking your phone\n' "$BOLD" "$RESET"
+printf '       %sclaudex%s       open tmux with claude + expediter side-by-side\n' "$BOLD" "$RESET"
+printf '       %sclaudex uno%s   new to tmux or Claude Code? start here\n\n' "$BOLD" "$RESET"
