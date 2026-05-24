@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import type { RequestEvent } from '@sveltejs/kit';
-import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { POST } from './event/+server';
@@ -10,9 +10,11 @@ import {
 	deleteSessionTopic,
 	list,
 	remove,
+	upsert,
 	shouldRefresh
 } from '$lib/ticketStore';
 import { whimsicalName } from '$lib/whimsicalName';
+import { loadSessions } from '$lib/server/sessionsStore';
 
 // Unique session_id per test so module-level state doesn't leak.
 let testCounter = 0;
@@ -376,6 +378,155 @@ test('A subsequent event cancels the decline watcher (approve case)', async () =
 	expect(t?.working).toBe(true);
 
 	rmSync(tempDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// SessionStart wiring: payload must upsert an Idle ticket AND persist the
+// session via recordSession. The temp sessions.json is selected via the
+// EXPEDITER_SESSIONS_FILE env var (read on every call by sessionsStore.ts),
+// and the temp transcript lives under ~/.claude/ to satisfy
+// latestCustomTitle's containment check.
+test('SessionStart upserts an Idle ticket and records the session to sessions.json', async () => {
+	const sessionsDir = mkdtempSync(path.join(os.tmpdir(), 'expediter-sessions-'));
+	const sessionsFile = path.join(sessionsDir, 'sessions.json');
+	process.env.EXPEDITER_SESSIONS_FILE = sessionsFile;
+
+	const transcriptDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const transcriptFile = path.join(transcriptDir, 'transcript.jsonl');
+	writeFileSync(transcriptFile, '');
+
+	const id = nextId();
+	const result = await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		tmux_pane: '%55',
+		cwd: '/tmp/proj',
+		transcript_path: transcriptFile
+	});
+	expect(result.status).toBe(200);
+	expect((result.body as { action?: string }).action).toBe('session_started');
+
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.event_type).toBe('Idle');
+	expect(ticket?.tmux_pane).toBe('%55');
+
+	// recordSession is fire-and-forget; give it a tick to land on disk.
+	await new Promise((r) => setTimeout(r, 50));
+	const persisted = await loadSessions();
+	expect(persisted[id]).toBeDefined();
+	expect(persisted[id]?.tmux_pane).toBe('%55');
+	expect(persisted[id]?.cwd).toBe('/tmp/proj');
+
+	delete process.env.EXPEDITER_SESSIONS_FILE;
+	rmSync(sessionsDir, { recursive: true, force: true });
+	rmSync(transcriptDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+test('SessionStart removes a pending:<pane> placeholder before upserting the real ticket', async () => {
+	const sessionsDir = mkdtempSync(path.join(os.tmpdir(), 'expediter-sessions-'));
+	process.env.EXPEDITER_SESSIONS_FILE = path.join(sessionsDir, 'sessions.json');
+	const transcriptDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const transcriptFile = path.join(transcriptDir, 'transcript.jsonl');
+	writeFileSync(transcriptFile, '');
+
+	// Seed a placeholder for pane %77 — as the boot scan would have.
+	upsert({
+		session_id: 'pending:%77',
+		tmux_pane: '%77',
+		cwd: '/tmp/proj',
+		title: 'forgotten lighthouse',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === 'pending:%77')).toBeDefined();
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		tmux_pane: '%77',
+		cwd: '/tmp/proj',
+		transcript_path: transcriptFile
+	});
+
+	expect(list().find((t) => t.session_id === 'pending:%77')).toBeUndefined();
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('Idle');
+
+	delete process.env.EXPEDITER_SESSIONS_FILE;
+	rmSync(sessionsDir, { recursive: true, force: true });
+	rmSync(transcriptDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+test('SessionStart without tmux_pane returns 400', async () => {
+	const result = await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: nextId(),
+		transcript_path: '/tmp/whatever'
+	});
+	expect(result.status).toBe(400);
+});
+
+test('SessionEnd calls forgetSession (entry removed from sessions.json)', async () => {
+	const sessionsDir = mkdtempSync(path.join(os.tmpdir(), 'expediter-sessions-'));
+	const sessionsFile = path.join(sessionsDir, 'sessions.json');
+	process.env.EXPEDITER_SESSIONS_FILE = sessionsFile;
+	const transcriptDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const transcriptFile = path.join(transcriptDir, 'transcript.jsonl');
+	writeFileSync(transcriptFile, '');
+
+	const id = nextId();
+	// Stage: SessionStart writes the entry.
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		tmux_pane: '%88',
+		cwd: '/tmp/proj',
+		transcript_path: transcriptFile
+	});
+	await new Promise((r) => setTimeout(r, 50));
+	expect((await loadSessions())[id]).toBeDefined();
+
+	// SessionEnd should remove it.
+	await callHandler({ hook_event_name: 'SessionEnd', session_id: id });
+	await new Promise((r) => setTimeout(r, 50));
+	expect((await loadSessions())[id]).toBeUndefined();
+
+	delete process.env.EXPEDITER_SESSIONS_FILE;
+	rmSync(sessionsDir, { recursive: true, force: true });
+	rmSync(transcriptDir, { recursive: true, force: true });
+	deleteSessionTopic(id);
+});
+
+test('Stop on a pane with a placeholder removes the placeholder first', async () => {
+	// Seed a placeholder for pane %33 — boot-scan equivalent.
+	upsert({
+		session_id: 'pending:%33',
+		tmux_pane: '%33',
+		cwd: '/tmp/proj',
+		title: 'forgotten lighthouse',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === 'pending:%33')).toBeDefined();
+
+	// A real session_id arrives via Stop (a pre-existing unnamed session's
+	// first interaction post-daemon-boot).
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		tmux_pane: '%33',
+		cwd: '/tmp/proj'
+	});
+
+	expect(list().find((t) => t.session_id === 'pending:%33')).toBeUndefined();
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('Stop');
+
 	remove(id);
 	deleteSessionTopic(id);
 });

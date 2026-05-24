@@ -3,6 +3,7 @@ import {
 	upsert,
 	remove,
 	markWorking,
+	findByPane,
 	resolveDeclineIfMatch,
 	incrementCounter,
 	getCachedTitle,
@@ -18,6 +19,7 @@ import { recentTranscriptText, latestCustomTitle } from '$lib/transcript';
 import { getRefreshInterval, getTitleSource } from '$lib/config';
 import { watchForDecline } from '$lib/declineWatcher';
 import { whimsicalName } from '$lib/whimsicalName';
+import { recordSession, forgetSession } from '$lib/server/sessionsStore';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -89,6 +91,18 @@ function resolveDisplayTitle(session_id: string): string {
 	return '';
 }
 
+// Removes a boot-scan placeholder ticket bound to this pane, if one exists.
+// Placeholders are keyed by the synthetic `pending:<pane_id>` session_id; real
+// tickets are keyed by the authoritative session_id. When the first real hook
+// for a previously-unidentified pane arrives, the placeholder must be cleared
+// before the real ticket is upserted — otherwise both coexist briefly.
+function reconcilePlaceholder(tmux_pane: string): void {
+	const existing = findByPane(tmux_pane);
+	if (existing && existing.session_id.startsWith('pending:')) {
+		remove(existing.session_id);
+	}
+}
+
 export const POST: RequestHandler = async ({ request }) => {
 	let payload: HookPayload;
 	try {
@@ -107,6 +121,48 @@ export const POST: RequestHandler = async ({ request }) => {
 	// PR, Stop, Notification, or SessionEnd. Cancel before branching so each
 	// branch can start fresh; the PR branch below will register a new watcher.
 	cancelActiveDeclineWatcher(session_id);
+
+	if (hook_event_name === 'SessionStart') {
+		if (!tmux_pane) {
+			return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
+		}
+		if (!transcript_path) {
+			return json({ ok: false, error: 'missing transcript_path' }, { status: 400 });
+		}
+		// If the boot scan seeded a `pending:<pane>` placeholder for this pane,
+		// remove it before upserting the authoritative ticket. Otherwise both
+		// would coexist for one frame.
+		reconcilePlaceholder(tmux_pane);
+		// Persist before upserting so a daemon crash between the two leaves the
+		// session discoverable on the next boot scan. Awaited so the on-disk
+		// side effect is observable to anything that polls sessions.json right
+		// after POST returns (notably the test suite); the write is microseconds
+		// for a tiny JSON payload, not a latency concern.
+		await recordSession({
+			session_id,
+			tmux_pane,
+			cwd: cwd ?? '',
+			transcript_path
+		}).catch((e) => console.warn('[sessionStart] recordSession failed', e));
+		upsert({
+			session_id,
+			tmux_pane,
+			cwd: cwd ?? '',
+			title: resolveDisplayTitle(session_id),
+			event_type: 'Idle',
+			created_at: Date.now()
+		});
+		// Fire-and-forget title pre-fill. In chat-title mode resolveDisplayTitle
+		// already returned a whimsical fallback; this upgrades it as soon as the
+		// jsonl has a real custom-title line. setCachedTitle live-patches any
+		// currently-displayed ticket for this session (see ticketStore.ts).
+		void latestCustomTitle(transcript_path)
+			.then((t) => {
+				if (t) setCachedTitle(session_id, t);
+			})
+			.catch(() => {});
+		return json({ ok: true, action: 'session_started' });
+	}
 
 	if (CLEAR_EVENTS.has(hook_event_name)) {
 		if (hook_event_name === 'UserPromptSubmit') {
@@ -128,6 +184,12 @@ export const POST: RequestHandler = async ({ request }) => {
 		// events represent "Claude is processing" — flip the ticket into the
 		// working tier of the dock instead.
 		if (hook_event_name === 'SessionEnd') {
+			// Awaited (rather than fire-and-forget) so callers that observe
+			// sessions.json immediately after POST returns see a consistent
+			// state — and so it can't race a subsequent recordSession write.
+			await forgetSession(session_id).catch((e) =>
+				console.warn('[sessionEnd] forgetSession failed', e)
+			);
 			deleteSessionTopic(session_id);
 			remove(session_id);
 			return json({ ok: true, action: 'cleared' });
@@ -144,6 +206,12 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!tmux_pane) {
 		return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
 	}
+
+	// If a boot-scan placeholder is bound to this pane, remove it before the
+	// real ticket lands. Covers the case where a pre-existing unnamed session's
+	// first hook is a Stop / PermissionRequest / Notification (not SessionStart),
+	// e.g. for sessions that were running before install.
+	reconcilePlaceholder(tmux_pane);
 
 	// Title generation happens on UserPromptSubmit (see CLEAR_EVENTS branch above);
 	// by the time we land here the cache is typically populated. In chat-title

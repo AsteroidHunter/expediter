@@ -14,6 +14,7 @@ import {
 	markWorking,
 	markWorkingIfMatch,
 	resolveDeclineIfMatch,
+	findByPane,
 	subscribe,
 	type Ticket
 } from './ticketStore';
@@ -453,6 +454,91 @@ test('list() sorts within the idle tier by created_at desc', () => {
 	expect(ours.map((t) => t.session_id)).toEqual([newer, older]);
 	remove(older);
 	remove(newer);
+});
+
+test('Idle is superseded by Notification (priority 0 > Idle -1)', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Notification',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('Notification');
+	remove(id);
+});
+
+test('Idle is superseded by Stop (priority 1 > Idle -1)', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('Stop');
+	remove(id);
+});
+
+test('Idle is superseded by PermissionRequest (priority 2 > Idle -1)', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('PermissionRequest');
+	remove(id);
+});
+
+test('findByPane returns the matching ticket when present', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%42',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	const found = findByPane('%42');
+	expect(found?.session_id).toBe(id);
+	remove(id);
+});
+
+test('findByPane returns undefined when no ticket matches', () => {
+	expect(findByPane('%nonexistent')).toBeUndefined();
 });
 
 test('multiple sessions are isolated', () => {
