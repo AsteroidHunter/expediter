@@ -1,4 +1,4 @@
-export type EventType = 'Stop' | 'PermissionRequest' | 'Notification';
+export type EventType = 'Stop' | 'PermissionRequest' | 'Notification' | 'Idle';
 
 // `title` may be empty string when the async topic refresh has not yet
 // populated the cache for this session; the frontend renders the title
@@ -60,7 +60,8 @@ function notify(): void {
 const EVENT_PRIORITY: Record<EventType, number> = {
 	PermissionRequest: 2,
 	Stop: 1,
-	Notification: 0
+	Notification: 0,
+	Idle: -1
 };
 
 export function upsert(ticket: Omit<Ticket, 'working'>): void {
@@ -142,6 +143,18 @@ export function resolveDeclineIfMatch(session_id: string, created_at: number): b
 
 export function list(): Ticket[] {
 	return snapshot();
+}
+
+// Linear scan to find any ticket bound to a given tmux_pane. Used by hook
+// handlers to reconcile a boot-scan placeholder (synthetic key
+// `pending:<pane_id>`) against the first authoritative event for that pane:
+// the handler removes the placeholder, then upserts the real ticket keyed by
+// session_id. Returns undefined when no ticket matches.
+export function findByPane(tmux_pane: string): Ticket | undefined {
+	for (const ticket of store.values()) {
+		if (ticket.tmux_pane === tmux_pane) return ticket;
+	}
+	return undefined;
 }
 
 export function incrementCounter(session_id: string): number {
