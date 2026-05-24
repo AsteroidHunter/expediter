@@ -159,3 +159,22 @@ test('upsertPlaceholder titles are deterministic per pane (same pane → same na
 	expect(first).toBe(second);
 	remove('pending:%500');
 });
+
+// Regression: when the boot scan parses --name from argv but findSessionIdByName
+// returns no hit (no jsonl with a matching custom-title), the ticket must still
+// show the user-supplied name rather than falling back to a whimsical stub.
+test('upsertPlaceholder uses the supplied title when --name is known', () => {
+	upsertPlaceholder('%501', '/users/x/proj', 'job-app-helper-1');
+	const ticket = list().find((t) => t.tmux_pane === '%501');
+	expect(ticket?.session_id).toBe('pending:%501');
+	expect(ticket?.title).toBe('job-app-helper-1');
+	remove('pending:%501');
+});
+
+test('upsertPlaceholder falls back to whimsical when title is undefined', () => {
+	upsertPlaceholder('%502', '/users/x/proj', undefined);
+	const ticket = list().find((t) => t.tmux_pane === '%502');
+	expect(ticket?.title).not.toBe('');
+	expect(ticket?.title).not.toBe('job-app-helper-1');
+	remove('pending:%502');
+});

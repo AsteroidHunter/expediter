@@ -165,13 +165,13 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 		.catch(() => {});
 }
 
-export function upsertPlaceholder(pane_id: string, cwd: string): void {
+export function upsertPlaceholder(pane_id: string, cwd: string, title?: string): void {
 	const key = `pending:${pane_id}`;
 	upsert({
 		session_id: key,
 		tmux_pane: pane_id,
 		cwd,
-		title: whimsicalName(key),
+		title: title ?? whimsicalName(key),
 		event_type: 'Idle',
 		created_at: Date.now()
 	});
@@ -223,9 +223,11 @@ export async function runBootScan(): Promise<void> {
 				continue;
 			}
 		}
-		// Unnamed (or named with no jsonl match): synthetic placeholder. Not
-		// persisted to sessions.json — the first real hook event for this pane
-		// will reconcile via reconcilePlaceholder + recordSession.
-		upsertPlaceholder(pane.pane_id, pane.pane_current_path);
+		// Synthetic `pending:<pane>` placeholder. When --name was present we
+		// pass it through as the title even without a jsonl match — the user
+		// explicitly named the session, so the whimsical fallback would lie.
+		// Not persisted to sessions.json — the first real hook event for this
+		// pane will reconcile via reconcilePlaceholder + recordSession.
+		upsertPlaceholder(pane.pane_id, pane.pane_current_path, name ?? undefined);
 	}
 }
