@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import os from 'node:os';
@@ -57,49 +57,6 @@ export async function listPanes(): Promise<PaneRow[]> {
 	return parsePaneRows(stdout);
 }
 
-// Walks a single level down from the shell PID looking for a claude child.
-// Returns the matching child's argv (via `ps -o command=`) or null. Per the
-// plan's Future Refinements, this is intentionally single-level — wrappers
-// like `nohup claude &` would nest claude deeper and need a recursive walk;
-// the normal `tmux → bash → claude` topology is single-level.
-export async function claudeArgvFor(panePid: number): Promise<string | null> {
-	let pids: string[];
-	try {
-		const { stdout } = await execFileAsync('pgrep', ['-P', String(panePid)]);
-		pids = stdout
-			.split('\n')
-			.map((s) => s.trim())
-			.filter(Boolean);
-	} catch {
-		return null;
-	}
-	for (const pid of pids) {
-		try {
-			const { stdout } = await execFileAsync('ps', ['-o', 'command=', '-p', pid]);
-			const argv = stdout.trim();
-			const firstToken = argv.split(/\s+/)[0] ?? '';
-			const basename = path.basename(firstToken);
-			if (CLAUDE_COMMANDS.has(basename)) return argv;
-		} catch {
-			continue;
-		}
-	}
-	return null;
-}
-
-// Extracts `--name <value>` from a claude argv string. Handles space-separated
-// (`--name foo`) and equals form (`--name=foo`), with optional single or
-// double quoting around the value. Returns null when no `--name` flag is
-// present. Argv is the authoritative source — pane_title can be overridden
-// by tmux config or shell escapes; argv cannot.
-export function parseName(argv: string): string | null {
-	const eq = argv.match(/--name=("([^"]+)"|'([^']+)'|(\S+))/);
-	if (eq) return eq[2] ?? eq[3] ?? eq[4] ?? null;
-	const sp = argv.match(/--name\s+("([^"]+)"|'([^']+)'|(\S+))/);
-	if (sp) return sp[2] ?? sp[3] ?? sp[4] ?? null;
-	return null;
-}
-
 // Claude Code stores per-cwd transcripts under ~/.claude/projects/<slug>/,
 // where the slug is the absolute cwd with `/` replaced by `-`. The leading
 // slash becomes a leading `-`. Mirrors Claude Code's own on-disk layout.
@@ -107,36 +64,77 @@ export function slugify(cwd: string): string {
 	return cwd.replace(/\//g, '-');
 }
 
-// Scans ~/.claude/projects/<slug>/ for the jsonl whose latest custom-title
-// equals the provided name. Returns the matching session_id (jsonl filename
-// minus extension) and transcript_path, or null when nothing matches. Linear
-// scan over the directory — small cardinality in practice; if a project
-// accumulates hundreds of jsonls the scan still completes in well under a
-// second because latestCustomTitle does a single backwards walk per file.
-export async function findSessionIdByName(
-	cwd: string,
-	name: string
-): Promise<{ session_id: string; transcript_path: string } | null> {
-	const slug = slugify(cwd);
-	const projectDir = path.join(os.homedir(), '.claude', 'projects', slug);
-	let entries: string[];
+export type SessionMeta = {
+	pid: number;
+	sessionId: string;
+	name: string;
+	cwd: string;
+};
+
+// Each running claude writes ~/.claude/sessions/<pid>.json with its sessionId,
+// name (from --name or /rename), and cwd. This file is the authoritative
+// source for boot-scan identification — argv parsing is unreliable (the
+// --resume picker leaves no name on the CLI) and pgrep-P is racy during
+// claude startup. Reading the metadata directory and walking up via
+// parent-pid sidesteps both problems.
+export function parseSessionMeta(raw: string): SessionMeta | null {
+	let parsed: unknown;
 	try {
-		entries = await readdir(projectDir);
+		parsed = JSON.parse(raw);
 	} catch {
 		return null;
 	}
-	for (const entry of entries) {
-		if (!entry.endsWith('.jsonl')) continue;
-		const filePath = path.join(projectDir, entry);
-		const title = await latestCustomTitle(filePath).catch(() => null);
-		if (title === name) {
-			return {
-				session_id: entry.slice(0, -'.jsonl'.length),
-				transcript_path: filePath
-			};
-		}
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+	const p = parsed as Record<string, unknown>;
+	if (
+		typeof p.pid !== 'number' ||
+		typeof p.sessionId !== 'string' ||
+		typeof p.cwd !== 'string'
+	) {
+		return null;
 	}
-	return null;
+	return {
+		pid: p.pid,
+		sessionId: p.sessionId,
+		name: typeof p.name === 'string' ? p.name : '',
+		cwd: p.cwd
+	};
+}
+
+export async function readSessionMetas(): Promise<SessionMeta[]> {
+	const dir = path.join(os.homedir(), '.claude', 'sessions');
+	let entries: string[];
+	try {
+		entries = await readdir(dir);
+	} catch {
+		return [];
+	}
+	const out: SessionMeta[] = [];
+	for (const entry of entries) {
+		if (!entry.endsWith('.json')) continue;
+		let raw: string;
+		try {
+			raw = await readFile(path.join(dir, entry), 'utf8');
+		} catch {
+			continue;
+		}
+		const meta = parseSessionMeta(raw);
+		if (meta) out.push(meta);
+	}
+	return out;
+}
+
+// `ps -o ppid= -p <pid>` returns the parent pid, or fails with non-zero exit
+// when the pid is dead. Returning null on failure lets the caller discard
+// stale metadata files (claude exited without cleanup).
+export async function parentPid(pid: number): Promise<number | null> {
+	try {
+		const { stdout } = await execFileAsync('ps', ['-o', 'ppid=', '-p', String(pid)]);
+		const n = Number(stdout.trim());
+		return Number.isFinite(n) && n > 0 ? n : null;
+	} catch {
+		return null;
+	}
 }
 
 // Mirrors resolveDisplayTitle from the hook handler: chat-title mode returns
@@ -165,13 +163,13 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 		.catch(() => {});
 }
 
-export function upsertPlaceholder(pane_id: string, cwd: string, title?: string): void {
+export function upsertPlaceholder(pane_id: string, cwd: string): void {
 	const key = `pending:${pane_id}`;
 	upsert({
 		session_id: key,
 		tmux_pane: pane_id,
 		cwd,
-		title: title ?? whimsicalName(key),
+		title: whimsicalName(key),
 		event_type: 'Idle',
 		created_at: Date.now()
 	});
@@ -191,10 +189,20 @@ export async function runBootScan(): Promise<void> {
 	const persisted = await loadSessions();
 	await pruneStaleSessions(livePaneIds);
 
-	// Index persisted entries by tmux_pane for O(1) match per live pane.
 	const byPane = new Map<string, SessionEntry>();
 	for (const entry of Object.values(persisted)) {
 		if (livePaneIds.has(entry.tmux_pane)) byPane.set(entry.tmux_pane, entry);
+	}
+
+	// shell_pid → SessionMeta. Built from ~/.claude/sessions/*.json by walking
+	// each metadata file's pid up to its parent (the tmux pane shell). Dead
+	// metadata drops out when parentPid returns null.
+	const metas = await readSessionMetas();
+	const metaByShellPid = new Map<number, SessionMeta>();
+	for (const meta of metas) {
+		const ppid = await parentPid(meta.pid);
+		if (ppid === null) continue;
+		metaByShellPid.set(ppid, meta);
 	}
 
 	for (const pane of claudePanes) {
@@ -203,31 +211,30 @@ export async function runBootScan(): Promise<void> {
 			upsertIdle(persistedEntry, bootScanInitialTitle(persistedEntry.session_id));
 			continue;
 		}
-		const argv = await claudeArgvFor(pane.pane_pid);
-		const name = argv ? parseName(argv) : null;
-		if (name) {
-			const hit = await findSessionIdByName(pane.pane_current_path, name);
-			if (hit) {
-				const entry: SessionEntry = {
-					session_id: hit.session_id,
-					tmux_pane: pane.pane_id,
-					cwd: pane.pane_current_path,
-					transcript_path: hit.transcript_path
-				};
-				await recordSession(entry).catch((e) =>
-					console.warn('[bootScan] recordSession failed', e)
-				);
-				// Named-session match: the title is already known (we matched on it),
-				// so seed it directly instead of waiting for the async upgrade.
-				upsertIdle(entry, name);
-				continue;
-			}
+		const meta = metaByShellPid.get(pane.pane_pid);
+		if (meta) {
+			const transcriptPath = path.join(
+				os.homedir(),
+				'.claude',
+				'projects',
+				slugify(meta.cwd),
+				`${meta.sessionId}.jsonl`
+			);
+			const entry: SessionEntry = {
+				session_id: meta.sessionId,
+				tmux_pane: pane.pane_id,
+				cwd: meta.cwd,
+				transcript_path: transcriptPath
+			};
+			await recordSession(entry).catch((e) =>
+				console.warn('[bootScan] recordSession failed', e)
+			);
+			upsertIdle(entry, meta.name || bootScanInitialTitle(meta.sessionId));
+			continue;
 		}
-		// Synthetic `pending:<pane>` placeholder. When --name was present we
-		// pass it through as the title even without a jsonl match — the user
-		// explicitly named the session, so the whimsical fallback would lie.
-		// Not persisted to sessions.json — the first real hook event for this
-		// pane will reconcile via reconcilePlaceholder + recordSession.
-		upsertPlaceholder(pane.pane_id, pane.pane_current_path, name ?? undefined);
+		// No metadata for this pane's shell pid — claude hasn't written one
+		// yet, or this is a non-standard launch. First real hook event will
+		// reconcile via reconcilePlaceholder.
+		upsertPlaceholder(pane.pane_id, pane.pane_current_path);
 	}
 }
