@@ -64,45 +64,33 @@ test('parseName returns null on bare `claude`', () => {
 
 test('parsePaneRows handles `|`-delimited tmux output', () => {
 	const stdout =
-		'%1|12345|claude|/Users/x/foo|1\n%2|67890|bash|/Users/x/bar|1\n';
+		'%1|12345|claude|/Users/x/foo\n%2|67890|bash|/Users/x/bar\n';
 	const rows = parsePaneRows(stdout);
 	expect(rows.length).toBe(2);
 	expect(rows[0]).toEqual({
 		pane_id: '%1',
 		pane_pid: 12345,
 		pane_current_command: 'claude',
-		pane_current_path: '/Users/x/foo',
-		session_attached: true
+		pane_current_path: '/Users/x/foo'
 	});
 	expect(rows[1].pane_current_command).toBe('bash');
 });
 
-test('parsePaneRows marks session_attached=false when the trailing field is 0', () => {
-	const rows = parsePaneRows('%1|1|claude|/p|0\n');
-	expect(rows[0].session_attached).toBe(false);
-});
-
 test('parsePaneRows skips malformed rows', () => {
-	const stdout = '%1|12345|claude|/Users/x/foo|1\nbad-row\n%2|notanint|bash|/elsewhere|1\n';
+	const stdout = '%1|12345|claude|/Users/x/foo\nbad-row\n%2|notanint|bash|/elsewhere\n';
 	const rows = parsePaneRows(stdout);
 	expect(rows.length).toBe(1);
 	expect(rows[0].pane_id).toBe('%1');
 });
 
 test('parsePaneRows handles trailing newline gracefully', () => {
-	expect(parsePaneRows('%1|1|claude|/p|1\n').length).toBe(1);
+	expect(parsePaneRows('%1|1|claude|/p\n').length).toBe(1);
 });
 
 // ─── isClaudePane ──────────────────────────────────────────────────────────
 
 function row(cmd: string): PaneRow {
-	return {
-		pane_id: '%1',
-		pane_pid: 1,
-		pane_current_command: cmd,
-		pane_current_path: '/',
-		session_attached: true
-	};
+	return { pane_id: '%1', pane_pid: 1, pane_current_command: cmd, pane_current_path: '/' };
 }
 
 test('isClaudePane accepts claude and claude.exe', () => {

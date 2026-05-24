@@ -28,32 +28,21 @@ export type PaneRow = {
 	pane_pid: number;
 	pane_current_command: string;
 	pane_current_path: string;
-	session_attached: boolean;
 };
 
 // Parses the `|`-delimited rows emitted by `tmux list-panes -F`. One row per
 // line; malformed rows are skipped silently (defensive against shell-injected
-// or escaped path characters that could split a row early). The trailing
-// session_attached column is `1` when the pane's tmux session has at least one
-// attached client, `0` otherwise — we only want attached sessions in the dock
-// because detached ones produce tickets that tap to nothing (no terminal
-// window to bring forward).
+// or escaped path characters that could split a row early).
 export function parsePaneRows(stdout: string): PaneRow[] {
 	const rows: PaneRow[] = [];
 	for (const line of stdout.split('\n')) {
 		if (!line) continue;
 		const parts = line.split('|');
-		if (parts.length < 5) continue;
-		const [pane_id, pidStr, cmd, cwd, attachedStr] = parts;
+		if (parts.length < 4) continue;
+		const [pane_id, pidStr, cmd, cwd] = parts;
 		const pane_pid = Number(pidStr);
 		if (!Number.isFinite(pane_pid)) continue;
-		rows.push({
-			pane_id,
-			pane_pid,
-			pane_current_command: cmd,
-			pane_current_path: cwd,
-			session_attached: attachedStr === '1'
-		});
+		rows.push({ pane_id, pane_pid, pane_current_command: cmd, pane_current_path: cwd });
 	}
 	return rows;
 }
@@ -63,7 +52,7 @@ export async function listPanes(): Promise<PaneRow[]> {
 		'list-panes',
 		'-a',
 		'-F',
-		'#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}|#{session_attached}'
+		'#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}'
 	]);
 	return parsePaneRows(stdout);
 }
@@ -196,10 +185,7 @@ export async function runBootScan(): Promise<void> {
 		console.warn('[bootScan] tmux list-panes failed (tmux not running?):', err);
 		return;
 	}
-	// Attached-only: a pane in a detached tmux session can be focused via
-	// select-window/select-pane but there's no terminal window to bring
-	// forward, so the resulting ticket is a dead tap. Skip those entirely.
-	const claudePanes = panes.filter((p) => isClaudePane(p) && p.session_attached);
+	const claudePanes = panes.filter(isClaudePane);
 	const livePaneIds = new Set(claudePanes.map((p) => p.pane_id));
 
 	const persisted = await loadSessions();
