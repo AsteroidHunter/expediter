@@ -101,11 +101,16 @@ export function removeIfMatch(session_id: string, created_at: number): boolean {
 
 // Flip the ticket into the working state instead of deleting it, and bump
 // created_at so the working tier sorts most-recently-processing first. Returns
-// true if a ticket existed for this session.
+// true if a ticket existed for this session. An Idle ticket (boot-scan or
+// SessionStart seed, no prior interaction) gets lifted to Stop on the way in:
+// the .type-idle saturate(0) filter would otherwise desaturate the green
+// working palette and the IDLE label is wrong while claude is actively
+// processing. Stop is the natural rest state after the working pulse ends.
 export function markWorking(session_id: string): boolean {
 	const existing = store.get(session_id);
 	if (!existing) return false;
-	store.set(session_id, { ...existing, working: true, created_at: Date.now() });
+	const event_type = existing.event_type === 'Idle' ? 'Stop' : existing.event_type;
+	store.set(session_id, { ...existing, event_type, working: true, created_at: Date.now() });
 	notify();
 	return true;
 }

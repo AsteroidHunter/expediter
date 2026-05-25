@@ -260,6 +260,42 @@ test('markWorking bumps created_at so the working tier sorts most-recent-first',
 	remove(id);
 });
 
+// Regression: a boot-scan / SessionStart-seeded Idle ticket that gets prompted
+// must transition to Stop so the green working palette isn't desaturated by
+// the .type-idle saturate(0) filter and the label doesn't read "IDLE" while
+// claude is actively processing.
+test('markWorking lifts an Idle ticket to Stop', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	markWorking(id);
+	const t = list().find((x) => x.session_id === id);
+	expect(t?.event_type).toBe('Stop');
+	expect(t?.working).toBe(true);
+	remove(id);
+});
+
+test('markWorking leaves non-Idle event_type unchanged', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at: Date.now()
+	});
+	markWorking(id);
+	expect(list().find((x) => x.session_id === id)?.event_type).toBe('PermissionRequest');
+	remove(id);
+});
+
 test('markWorking returns false and does not notify on unknown session', () => {
 	const snapshots: Ticket[][] = [];
 	const unsub = subscribe((snap) => snapshots.push(snap));

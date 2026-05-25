@@ -206,11 +206,12 @@ export async function runBootScan(): Promise<void> {
 	}
 
 	for (const pane of claudePanes) {
-		const persistedEntry = byPane.get(pane.pane_id);
-		if (persistedEntry) {
-			upsertIdle(persistedEntry, bootScanInitialTitle(persistedEntry.session_id));
-			continue;
-		}
+		// Metadata-first. The persisted entry can be stale: if the previous
+		// claude in this pane exited and a new one took its place, sessions.json
+		// still points to the dead session_id but the metadata file reflects
+		// the live one. Letting persisted win would key the dock ticket by the
+		// dead session_id, breaking markWorking lookups for the live claude's
+		// hook events.
 		const meta = metaByShellPid.get(pane.pane_pid);
 		if (meta) {
 			const transcriptPath = path.join(
@@ -232,8 +233,15 @@ export async function runBootScan(): Promise<void> {
 			upsertIdle(entry, meta.name || bootScanInitialTitle(meta.sessionId));
 			continue;
 		}
-		// No metadata for this pane's shell pid — claude hasn't written one
-		// yet, or this is a non-standard launch. First real hook event will
+		// Fallback: claude hasn't written a metadata file yet (older versions,
+		// or brand-new process). Use the persisted entry if we have one for
+		// this pane.
+		const persistedEntry = byPane.get(pane.pane_id);
+		if (persistedEntry) {
+			upsertIdle(persistedEntry, bootScanInitialTitle(persistedEntry.session_id));
+			continue;
+		}
+		// Neither metadata nor persistence — the first real hook event will
 		// reconcile via reconcilePlaceholder.
 		upsertPlaceholder(pane.pane_id, pane.pane_current_path);
 	}
