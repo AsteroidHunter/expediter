@@ -24,7 +24,7 @@ const TITLE_VALUE = TITLE_IDX >= 0 ? process.argv[TITLE_IDX + 1] : null;
 const STEPS_IDX = process.argv.indexOf('--steps');
 const STEPS_RAW = STEPS_IDX !== -1 ? process.argv[STEPS_IDX + 1] : undefined;
 
-// `expediter update [--dev|--no-pull|...]` — refresh this install by running
+// `expediter update [--dev|--no-pull|...]` refreshes this install by running
 // update.sh in EXPEDITER_HOME and passing through any extra flags. Handled
 // before anything else so it never starts the daemon. update.sh pulls the
 // latest by default; --dev / --no-pull skips the pull and rebuilds the current
@@ -38,7 +38,7 @@ if (process.argv[2] === 'update') {
 		stdio: 'inherit',
 	});
 	if (res.error) {
-		console.error(`expediter update: could not run update.sh — ${res.error.message}`);
+		console.error(`expediter update: could not run update.sh (${res.error.message})`);
 		process.exit(1);
 	}
 	process.exit(res.status ?? 1);
@@ -52,7 +52,7 @@ if (SHOW_HELP) {
 	console.log('');
 	console.log('  update                 Pull the latest and rebuild in place.');
 	console.log('                         Add --dev (or --no-pull) to skip the pull and rebuild the');
-	console.log('                         current checkout — e.g. when updating from a feature branch.');
+	console.log('                         current checkout, e.g. when updating from a feature branch.');
 	console.log('  --print-url            Also print the tethered URL as text (default: QR only).');
 	console.log('                         Use this only if your phone cannot scan the QR — the URL');
 	console.log('                         contains the session token and will stay in scrollback.');

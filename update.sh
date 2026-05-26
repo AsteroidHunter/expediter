@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# update.sh — refresh an existing Expediter install in place on macOS.
+# update.sh - refresh an existing Expediter install in place on macOS.
 #
 # Run from the cloned repo (or via `expediter update`):
 #   ./update.sh            pull the latest, then rebuild + re-sync
@@ -9,7 +9,7 @@
 # It assumes Expediter is already installed (see ./install.sh for a first-time
 # setup) and only refreshes the parts that actually go stale:
 #   1. Pulls the latest source (fast-forward only; skipped with --dev, on a
-#      dirty checkout, or when the branch has diverged — see the Sync phase).
+#      dirty checkout, or when the branch has diverged - see the Sync phase).
 #   2. Rebuilds the app (bun install + bun run build → build/index.js).
 #   3. Rewrites the `expediter` / `claudex` shims and the config file, and
 #      re-copies the cc-clock / cc-dates status-bar helpers (which install.sh
@@ -21,7 +21,7 @@
 #   - Re-check or install Claude Code, tmux, Homebrew, or Bun.
 #   - Touch your PATH or ~/.tmux.conf (the tmux conf is sourced from the repo,
 #     so edits there take effect on the next tmux reload).
-#   - Force or merge during the pull — only a clean fast-forward. Local edits
+#   - Force or merge during the pull - only a clean fast-forward. Local edits
 #     and diverged history are left untouched (it builds what's on disk).
 #   - Stop a running daemon. Rebuilding under a live process is safe; you just
 #     restart it afterwards to pick up the new build.
@@ -34,7 +34,7 @@ PORT="${EXPEDITER_PORT:-5179}"
 
 # --- flags -----------------------------------------------------------------
 # Default pulls the latest before rebuilding. --dev / --no-pull skips the pull
-# so a feature-branch / worktree checkout (e.g. premain) is built as-is — handy
+# so a feature-branch / worktree checkout (e.g. premain) is built as-is - handy
 # when you're updating from a branch you don't want HEAD moved on.
 
 PULL=1
@@ -200,16 +200,16 @@ printf 'Fetching the latest source before rebuilding.\n\n'
 # .git is a directory in a normal clone but a *file* (a gitdir pointer) inside a
 # worktree, so test for either with -e.
 if [ "$PULL" = 0 ]; then
-	printf '%s⊘%s Skipping git pull (--dev) — building the current checkout.\n' "$DIM" "$RESET"
+	printf '%s⊘%s Skipping git pull (--dev) - building the current checkout.\n' "$DIM" "$RESET"
 elif [ ! -e "$REPO/.git" ]; then
-	printf '%s⊘%s Not a git checkout — building the current files.\n' "$DIM" "$RESET"
+	printf '%s⊘%s Not a git checkout - building the current files.\n' "$DIM" "$RESET"
 else
 	branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
 	# Never pull over local edits: a stray change in the clone could conflict or
 	# be clobbered. Build what's on disk and say why. (Untracked files don't
 	# block a fast-forward, so they're not counted as "dirty" here.)
 	if ! git -C "$REPO" diff --quiet 2>/dev/null || ! git -C "$REPO" diff --cached --quiet 2>/dev/null; then
-		printf '%s⚠%s Local changes in the checkout — skipping pull, building %s as-is.\n' "$BOLD" "$RESET" "$branch"
+		printf '%s⚠%s Local changes in the checkout - skipping pull, building %s as-is.\n' "$BOLD" "$RESET" "$branch"
 	else
 		before=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo '')
 		if git -C "$REPO" pull --ff-only >>"$LOG" 2>&1; then
@@ -221,8 +221,8 @@ else
 			fi
 		else
 			# Diverged history, no upstream, or a fast-forward that would clobber an
-			# untracked file. Don't force or merge — just build what's here.
-			printf '%s⚠%s Could not fast-forward %s (diverged or no upstream) — building as-is. See %s.\n' "$BOLD" "$RESET" "$branch" "$LOG"
+			# untracked file. Don't force or merge - just build what's here.
+			printf '%s⚠%s Could not fast-forward %s (diverged or no upstream) - building as-is. See %s.\n' "$BOLD" "$RESET" "$branch" "$LOG"
 		fi
 	fi
 fi
@@ -257,10 +257,10 @@ printf 'Refreshing the expediter / claudex commands, config, and status-bar help
 # moved). Byte-identical to what install.sh writes.
 mkdir -p "$HOME/.config/expediter"
 cat > "$HOME/.config/expediter/config" <<'EOF'
-# expediter config — written by install.sh
+# expediter config - written by install.sh
 # If you move the cloned repo, update EXPEDITER_HOME below (or re-run install.sh).
 # The `export` is load-bearing: the shims source this file and exec bun, which
-# is a child process — without `export`, EXPEDITER_HOME would be a shell var and
+# is a child process - without `export`, EXPEDITER_HOME would be a shell var and
 # would not propagate to bun's environment, causing bin/expediter.mjs to abort.
 EOF
 printf 'export EXPEDITER_HOME="%s"\n' "$REPO" >> "$HOME/.config/expediter/config"
@@ -269,7 +269,7 @@ printf 'export EXPEDITER_HOME="%s"\n' "$REPO" >> "$HOME/.config/expediter/config
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/expediter" <<'EOF'
 #!/usr/bin/env bash
-# expediter shim — installed by install.sh. Reads ~/.config/expediter/config
+# expediter shim - installed by install.sh. Reads ~/.config/expediter/config
 # to find the cloned repo, then runs bin/expediter.mjs under Bun.
 config="$HOME/.config/expediter/config"
 if [ ! -f "$config" ]; then
@@ -293,7 +293,7 @@ chmod +x "$HOME/.local/bin/expediter"
 
 cat > "$HOME/.local/bin/claudex" <<'EOF'
 #!/usr/bin/env bash
-# claudex shim — installed by install.sh.
+# claudex shim - installed by install.sh.
 config="$HOME/.config/expediter/config"
 if [ ! -f "$config" ]; then
 	echo "claudex: missing $config. Re-run install.sh from the cloned repo." >&2
@@ -301,7 +301,7 @@ if [ ! -f "$config" ]; then
 fi
 # shellcheck disable=SC1090
 . "$config"
-# Re-export defensively — claudex.sh and any child process needs it in env.
+# Re-export defensively - claudex.sh and any child process needs it in env.
 export EXPEDITER_HOME
 if [ -z "${EXPEDITER_HOME:-}" ] || [ ! -d "$EXPEDITER_HOME" ]; then
 	echo "claudex: cannot find the Expediter repo at ${EXPEDITER_HOME:-<unset>}"
@@ -347,7 +347,7 @@ settings_path, hook_script = sys.argv[1], sys.argv[2]
 
 # (event_name, matcher) tuples. SessionStart's matcher accepts only single
 # exact strings (not regex / pipe-alternation), so it is registered three times
-# — once per source value we care about. `compact` is intentionally omitted to
+# - once per source value we care about. `compact` is intentionally omitted to
 # avoid an auto-compaction gray flash on a working ticket.
 EVENTS = [
     ("Stop", ""),
@@ -395,7 +395,7 @@ for ev, matcher in EVENTS:
             continue
         # Dedupe key is (matcher, hook_script-in-command). Without the matcher
         # component, the three SessionStart blocks (startup / resume / clear)
-        # would collapse to one — the first wins and the other two are silently
+        # would collapse to one - the first wins and the other two are silently
         # dropped.
         if block.get("matcher", "") != matcher:
             continue
@@ -435,7 +435,7 @@ printf '\n%s✦%s Expediter updated!\n\n' "$GREEN" "$RESET"
 
 # The rebuild rewrote build/index.js on disk, but a daemon that was already
 # running loaded the old build into memory at startup and won't notice. Flag it
-# so the update doesn't silently appear to do nothing. We only instruct — never
+# so the update doesn't silently appear to do nothing. We only instruct - never
 # kill a foreground process living in another terminal (uninstall.sh refuses to
 # for the same reason).
 if [ "$DAEMON_RUNNING" = 1 ]; then
