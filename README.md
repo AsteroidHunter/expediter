@@ -111,6 +111,34 @@ The daemon also trusts processes on your own Mac -- anything running as your use
 
 `expediter` runs the production build (`bun ./build/index.js`) under the hood. SvelteKit's built-in CSRF check is production-only, so the production build is the supported deployment surface. `bun run dev` is for contributors changing the code; don't use it as your everyday daemon.
 
+## Update
+
+Already installed? Pull the latest and rebuild in place with one command -- no need to uninstall and reinstall:
+
+```bash
+expediter update
+```
+
+Or run it directly from the clone:
+
+```bash
+./update.sh
+```
+
+Afterwards, restart the daemon (Ctrl-C the `expediter` terminal and re-run it) to load the new build.
+
+<details>
+<summary>The updater will ...</summary>
+
+1. `git pull --ff-only` the current branch -- skipped if you pass `--dev`/`--no-pull`, your checkout has local changes, or the branch can't fast-forward. It never forces or merges; in those cases it just rebuilds what's on disk.
+2. Rebuild the app (`bun install` + `bun run build`).
+3. Rewrite the `expediter` / `claudex` shims and config, and re-copy the `cc-clock` / `cc-dates` status-bar helpers.
+4. Re-merge Expediter's hook entries into `~/.claude/settings.json` (timestamped backup first), so any newly added events register.
+
+Contributors working on a branch can skip the pull with `expediter update --dev` (or `./update.sh --dev`) to rebuild the current checkout as-is.
+
+</details>
+
 ## Uninstall
 
 ```bash

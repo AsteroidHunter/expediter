@@ -2,6 +2,18 @@ import type { Handle } from '@sveltejs/kit';
 import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { getServerToken } from '$lib/token';
+import { runBootScan } from '$lib/server/bootScan';
+
+// Boot-time session enumeration. Runs once per server-module load so the dock
+// reflects every claude session currently in tmux at daemon start, not just
+// the ones that have recently emitted a hook event. Errors are swallowed so a
+// missing tmux server (or any other failure mode) doesn't crash daemon
+// startup. Skipped under NODE_ENV=test (Bun sets this automatically) so test
+// imports of hooks.server.ts don't mutate the in-memory ticket store or shell
+// out to tmux.
+if (process.env.NODE_ENV !== 'test') {
+	void runBootScan().catch((e) => console.warn('[bootScan]', e));
+}
 
 // adapter-node honors EXPEDITER_* envs because svelte.config.js sets envPrefix.
 // Each of these would silently switch getClientAddress() or event.url.host to a

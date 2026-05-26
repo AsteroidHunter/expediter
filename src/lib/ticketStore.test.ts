@@ -14,6 +14,9 @@ import {
 	markWorking,
 	markWorkingIfMatch,
 	resolveDeclineIfMatch,
+	findByPane,
+	dropPaneTicketsExcept,
+	rebindPaneTicket,
 	subscribe,
 	type Ticket
 } from './ticketStore';
@@ -259,6 +262,42 @@ test('markWorking bumps created_at so the working tier sorts most-recent-first',
 	remove(id);
 });
 
+// Regression: a boot-scan / SessionStart-seeded Idle ticket that gets prompted
+// must transition to Stop so the green working palette isn't desaturated by
+// the .type-idle saturate(0) filter and the label doesn't read "IDLE" while
+// claude is actively processing.
+test('markWorking lifts an Idle ticket to Stop', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	markWorking(id);
+	const t = list().find((x) => x.session_id === id);
+	expect(t?.event_type).toBe('Stop');
+	expect(t?.working).toBe(true);
+	remove(id);
+});
+
+test('markWorking leaves non-Idle event_type unchanged', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at: Date.now()
+	});
+	markWorking(id);
+	expect(list().find((x) => x.session_id === id)?.event_type).toBe('PermissionRequest');
+	remove(id);
+});
+
 test('markWorking returns false and does not notify on unknown session', () => {
 	const snapshots: Ticket[][] = [];
 	const unsub = subscribe((snap) => snapshots.push(snap));
@@ -455,6 +494,91 @@ test('list() sorts within the idle tier by created_at desc', () => {
 	remove(newer);
 });
 
+test('Idle is superseded by Notification (priority 0 > Idle -1)', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Notification',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('Notification');
+	remove(id);
+});
+
+test('Idle is superseded by Stop (priority 1 > Idle -1)', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('Stop');
+	remove(id);
+});
+
+test('Idle is superseded by PermissionRequest (priority 2 > Idle -1)', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '',
+		title: '',
+		event_type: 'PermissionRequest',
+		created_at: Date.now()
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('PermissionRequest');
+	remove(id);
+});
+
+test('findByPane returns the matching ticket when present', () => {
+	const id = nextId();
+	upsert({
+		session_id: id,
+		tmux_pane: '%42',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Stop',
+		created_at: Date.now()
+	});
+	const found = findByPane('%42');
+	expect(found?.session_id).toBe(id);
+	remove(id);
+});
+
+test('findByPane returns undefined when no ticket matches', () => {
+	expect(findByPane('%nonexistent')).toBeUndefined();
+});
+
 test('multiple sessions are isolated', () => {
 	const a = nextId();
 	const b = nextId();
@@ -471,4 +595,56 @@ test('multiple sessions are isolated', () => {
 	expect(shouldRefresh(a, 1)).toBe(false); // a is in flight
 	incrementCounter(b); // 5
 	expect(shouldRefresh(b, 5)).toBe(true);
+});
+
+// ─── dropPaneTicketsExcept ───────────────────────────────────────────────────
+
+test('dropPaneTicketsExcept removes same-pane tickets keyed differently, keeps the rest', () => {
+	upsert({ session_id: 'keep', tmux_pane: '%9', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+	upsert({ session_id: 'stale', tmux_pane: '%9', cwd: '/a', title: 't', event_type: 'Idle', created_at: Date.now() });
+	upsert({ session_id: 'other-pane', tmux_pane: '%8', cwd: '/b', title: 't', event_type: 'Stop', created_at: Date.now() });
+
+	const removed = dropPaneTicketsExcept('%9', 'keep');
+	expect(removed).toEqual(['stale']);
+	expect(list().find((t) => t.session_id === 'keep')).toBeDefined();
+	expect(list().find((t) => t.session_id === 'stale')).toBeUndefined();
+	expect(list().find((t) => t.session_id === 'other-pane')).toBeDefined();
+	remove('keep');
+	remove('other-pane');
+});
+
+test('dropPaneTicketsExcept is a no-op when only the kept ticket exists', () => {
+	upsert({ session_id: 'solo', tmux_pane: '%12', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+	expect(dropPaneTicketsExcept('%12', 'solo')).toEqual([]);
+	expect(list().find((t) => t.session_id === 'solo')).toBeDefined();
+	remove('solo');
+});
+
+// ─── rebindPaneTicket ────────────────────────────────────────────────────────
+
+test('rebindPaneTicket re-keys a stale same-pane ticket to the live session_id, preserving fields', () => {
+	upsert({ session_id: 'old-key', tmux_pane: '%20', cwd: '/proj', title: 'my session', event_type: 'Stop', created_at: 123 });
+	const displaced = rebindPaneTicket('%20', 'new-key');
+	expect(displaced).toEqual(['old-key']);
+	const t = list().find((x) => x.tmux_pane === '%20');
+	expect(t?.session_id).toBe('new-key');
+	expect(t?.title).toBe('my session');
+	expect(t?.cwd).toBe('/proj');
+	expect(list().find((x) => x.session_id === 'old-key')).toBeUndefined();
+	remove('new-key');
+});
+
+test('rebindPaneTicket returns [] and changes nothing when the pane has no ticket', () => {
+	expect(rebindPaneTicket('%404', 'whatever')).toEqual([]);
+	expect(list().find((t) => t.tmux_pane === '%404')).toBeUndefined();
+});
+
+test('rebindPaneTicket drops strays when a ticket is already keyed correctly', () => {
+	upsert({ session_id: 'correct', tmux_pane: '%21', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+	upsert({ session_id: 'stray', tmux_pane: '%21', cwd: '/a', title: 't', event_type: 'Idle', created_at: Date.now() });
+	const displaced = rebindPaneTicket('%21', 'correct');
+	expect(displaced).toEqual(['stray']);
+	expect(list().filter((t) => t.tmux_pane === '%21').length).toBe(1);
+	expect(list().find((t) => t.session_id === 'correct')).toBeDefined();
+	remove('correct');
 });

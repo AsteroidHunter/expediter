@@ -5,7 +5,7 @@
 	import { browser } from '$app/environment';
 	import { getClientToken, clearClientToken } from '$lib/clientToken';
 
-	type EventType = 'Stop' | 'PermissionRequest' | 'Notification';
+	type EventType = 'Stop' | 'PermissionRequest' | 'Notification' | 'Idle';
 	// `title` may be empty string before the async topic refresh has run;
 	// rendered conditionally so empty values produce no element.
 	type Ticket = {
@@ -196,12 +196,14 @@
 	function typeClass(t: EventType): string {
 		if (t === 'PermissionRequest') return 'type-permission';
 		if (t === 'Notification') return 'type-notification';
+		if (t === 'Idle') return 'type-idle';
 		return 'type-stop';
 	}
 
 	function typeLabel(t: EventType): string {
 		if (t === 'PermissionRequest') return 'PERMISSION';
 		if (t === 'Notification') return 'NOTIFY';
+		if (t === 'Idle') return 'IDLE';
 		return 'STOP';
 	}
 
@@ -212,6 +214,9 @@
 	function staleClass(ticket: Ticket, now: number): string {
 		if (ticket.working) return '';
 		if (ticket.event_type === 'PermissionRequest') return '';
+		// Idle tickets are already fully desaturated via .type-idle CSS — stale
+		// tiers (which apply additional saturate() filters) would be redundant.
+		if (ticket.event_type === 'Idle') return '';
 		const ageMin = (now - ticket.created_at) / 60_000;
 		if (ageMin >= 16) return 'stale-4';
 		if (ageMin >= 8) return 'stale-3';
@@ -298,7 +303,7 @@
 	<header>
 		<div class="brand">
 			<span class="brand-name">Expediter</span>
-			<span class="brand-version">(v0.7)</span>
+			<span class="brand-version">(v0.72)</span>
 		</div>
 		<span class="conn" class:on={connected} aria-label={connected ? 'connected' : 'disconnected'}
 		></span>
@@ -335,7 +340,7 @@
 						{/if}
 						<div class="stub">
 							<span class="project">{projectLabel(ticket.cwd)}</span>
-							<span class="type">{typeLabel(ticket.event_type)}</span>
+							<span class="type">{ticket.working ? 'COOKING' : typeLabel(ticket.event_type)}</span>
 							<span class="age">{formatAge(ticket.created_at, now)}</span>
 						</div>
 						<div class="perforation" aria-hidden="true"></div>
@@ -554,6 +559,13 @@
 		--title: #4a2f1a;
 		--muted: #a07a55;
 		--accent: #8a5a28;
+	}
+	/* Idle tickets are seeded by the boot scan (and the SessionStart hook) for
+	   sessions that haven't emitted a real event yet. Fully desaturated as a
+	   glanceable "live but quiet" signal — visually identical to .stale-4 so an
+	   aged Stop and a fresh Idle read as the same low-priority state. */
+	.ticket.type-idle {
+		filter: saturate(0);
 	}
 	.ticket.pressing {
 		transform: scale(0.985);

@@ -415,14 +415,21 @@ import json, os, sys
 
 settings_path, hook_script = sys.argv[1], sys.argv[2]
 
+# (event_name, matcher) tuples. SessionStart's matcher accepts only single
+# exact strings (not regex / pipe-alternation), so it is registered three times
+# — once per source value we care about. `compact` is intentionally omitted to
+# avoid an auto-compaction gray flash on a working ticket.
 EVENTS = [
-    "Stop",
-    "PermissionRequest",
-    "Notification",
-    "UserPromptSubmit",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "SessionEnd",
+    ("Stop", ""),
+    ("PermissionRequest", ""),
+    ("Notification", ""),
+    ("UserPromptSubmit", ""),
+    ("PostToolUse", ""),
+    ("PostToolUseFailure", ""),
+    ("SessionEnd", ""),
+    ("SessionStart", "startup"),
+    ("SessionStart", "resume"),
+    ("SessionStart", "clear"),
 ]
 
 if os.path.exists(settings_path):
@@ -447,14 +454,22 @@ if not isinstance(hooks, dict):
 
 added = 0
 skipped = 0
-for ev in EVENTS:
+for ev, matcher in EVENTS:
     blocks = hooks.setdefault(ev, [])
     if not isinstance(blocks, list):
         sys.stderr.write(f"settings.json hooks.{ev} must be a list. Skipping.\n")
         continue
     already = False
     for block in blocks:
-        for h in (block or {}).get("hooks", []) or []:
+        if not isinstance(block, dict):
+            continue
+        # Dedupe key is (matcher, hook_script-in-command). Without the matcher
+        # component, the three SessionStart blocks (startup / resume / clear)
+        # would collapse to one — the first wins and the other two are silently
+        # dropped.
+        if block.get("matcher", "") != matcher:
+            continue
+        for h in block.get("hooks", []) or []:
             if isinstance(h, dict) and hook_script in str(h.get("command", "")):
                 already = True
                 break
@@ -464,7 +479,7 @@ for ev in EVENTS:
         skipped += 1
         continue
     blocks.append({
-        "matcher": "",
+        "matcher": matcher,
         "hooks": [
             {"type": "command", "command": f"{hook_script} {ev}"}
         ],

@@ -3,6 +3,8 @@ import {
 	upsert,
 	remove,
 	markWorking,
+	dropPaneTicketsExcept,
+	rebindPaneTicket,
 	resolveDeclineIfMatch,
 	incrementCounter,
 	getCachedTitle,
@@ -18,6 +20,7 @@ import { recentTranscriptText, latestCustomTitle } from '$lib/transcript';
 import { getRefreshInterval, getTitleSource } from '$lib/config';
 import { watchForDecline } from '$lib/declineWatcher';
 import { whimsicalName } from '$lib/whimsicalName';
+import { recordSession, forgetSession } from '$lib/server/sessionsStore';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -89,6 +92,10 @@ function resolveDisplayTitle(session_id: string): string {
 	return '';
 }
 
+function cancelWatchers(session_ids: string[]): void {
+	for (const id of session_ids) cancelActiveDeclineWatcher(id);
+}
+
 export const POST: RequestHandler = async ({ request }) => {
 	let payload: HookPayload;
 	try {
@@ -107,6 +114,48 @@ export const POST: RequestHandler = async ({ request }) => {
 	// PR, Stop, Notification, or SessionEnd. Cancel before branching so each
 	// branch can start fresh; the PR branch below will register a new watcher.
 	cancelActiveDeclineWatcher(session_id);
+
+	if (hook_event_name === 'SessionStart') {
+		if (!tmux_pane) {
+			return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
+		}
+		if (!transcript_path) {
+			return json({ ok: false, error: 'missing transcript_path' }, { status: 400 });
+		}
+		// Clear any ticket bound to this pane under a different key (boot-scan
+		// placeholder, or a prior/diverged session_id) before upserting the
+		// authoritative one, so the pane never shows two tickets.
+		cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id));
+		// Persist before upserting so a daemon crash between the two leaves the
+		// session discoverable on the next boot scan. Awaited so the on-disk
+		// side effect is observable to anything that polls sessions.json right
+		// after POST returns (notably the test suite); the write is microseconds
+		// for a tiny JSON payload, not a latency concern.
+		await recordSession({
+			session_id,
+			tmux_pane,
+			cwd: cwd ?? '',
+			transcript_path
+		}).catch((e) => console.warn('[sessionStart] recordSession failed', e));
+		upsert({
+			session_id,
+			tmux_pane,
+			cwd: cwd ?? '',
+			title: resolveDisplayTitle(session_id),
+			event_type: 'Idle',
+			created_at: Date.now()
+		});
+		// Fire-and-forget title pre-fill. In chat-title mode resolveDisplayTitle
+		// already returned a whimsical fallback; this upgrades it as soon as the
+		// jsonl has a real custom-title line. setCachedTitle live-patches any
+		// currently-displayed ticket for this session (see ticketStore.ts).
+		void latestCustomTitle(transcript_path)
+			.then((t) => {
+				if (t) setCachedTitle(session_id, t);
+			})
+			.catch(() => {});
+		return json({ ok: true, action: 'session_started' });
+	}
 
 	if (CLEAR_EVENTS.has(hook_event_name)) {
 		if (hook_event_name === 'UserPromptSubmit') {
@@ -128,10 +177,23 @@ export const POST: RequestHandler = async ({ request }) => {
 		// events represent "Claude is processing" — flip the ticket into the
 		// working tier of the dock instead.
 		if (hook_event_name === 'SessionEnd') {
+			// Awaited (rather than fire-and-forget) so callers that observe
+			// sessions.json immediately after POST returns see a consistent
+			// state — and so it can't race a subsequent recordSession write.
+			await forgetSession(session_id).catch((e) =>
+				console.warn('[sessionEnd] forgetSession failed', e)
+			);
 			deleteSessionTopic(session_id);
 			remove(session_id);
 			return json({ ok: true, action: 'cleared' });
 		}
+		// UserPromptSubmit / PostToolUse / PostToolUseFailure flip the pane's
+		// ticket to working. If that ticket is keyed by a stale session_id (a
+		// rewind changed the live session_id while the dock ticket kept the
+		// boot-scan/metadata one), markWorking would miss it and the ticket
+		// would stay idle until the next Stop re-created it. Rebind the pane's
+		// ticket to the live session_id first so markWorking lands.
+		if (tmux_pane) cancelWatchers(rebindPaneTicket(tmux_pane, session_id));
 		markWorking(session_id);
 		return json({ ok: true, action: 'marked_working' });
 	}
@@ -144,6 +206,12 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!tmux_pane) {
 		return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
 	}
+
+	// Clear any ticket bound to this pane under a different key before the real
+	// ticket lands — a boot-scan placeholder, or a stale/diverged session_id
+	// (e.g. after a rewind) that would otherwise leave a second ticket for the
+	// same pane.
+	cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id));
 
 	// Title generation happens on UserPromptSubmit (see CLEAR_EVENTS branch above);
 	// by the time we land here the cache is typically populated. In chat-title
