@@ -1,24 +1,28 @@
 #!/usr/bin/env bash
 # update.sh — refresh an existing Expediter install in place on macOS.
 #
-# Run from the cloned repo, after pulling/pushing changes:
-#   ./update.sh
+# Run from the cloned repo (or via `expediter update`):
+#   ./update.sh            pull the latest, then rebuild + re-sync
+#   ./update.sh --dev      skip the pull; rebuild the current checkout as-is
 #
 # This is the fast path that replaces the old uninstall.sh + install.sh dance.
 # It assumes Expediter is already installed (see ./install.sh for a first-time
-# setup) and only refreshes the parts that actually go stale when the source
-# changes:
-#   1. Rebuilds the app (bun install + bun run build → build/index.js).
-#   2. Rewrites the `expediter` / `claudex` shims and the config file, and
+# setup) and only refreshes the parts that actually go stale:
+#   1. Pulls the latest source (fast-forward only; skipped with --dev, on a
+#      dirty checkout, or when the branch has diverged — see the Sync phase).
+#   2. Rebuilds the app (bun install + bun run build → build/index.js).
+#   3. Rewrites the `expediter` / `claudex` shims and the config file, and
 #      re-copies the cc-clock / cc-dates status-bar helpers (which install.sh
 #      copies into ~/.local/bin rather than referencing from the repo).
-#   3. Re-merges Expediter's hook entries into ~/.claude/settings.json so any
+#   4. Re-merges Expediter's hook entries into ~/.claude/settings.json so any
 #      newly added events are registered. Idempotent; backs up first.
 #
-# What it does NOT do (these propagate by reference / belong to first install):
+# What it does NOT do:
 #   - Re-check or install Claude Code, tmux, Homebrew, or Bun.
 #   - Touch your PATH or ~/.tmux.conf (the tmux conf is sourced from the repo,
 #     so edits there take effect on the next tmux reload).
+#   - Force or merge during the pull — only a clean fast-forward. Local edits
+#     and diverged history are left untouched (it builds what's on disk).
 #   - Stop a running daemon. Rebuilding under a live process is safe; you just
 #     restart it afterwards to pick up the new build.
 
@@ -27,6 +31,32 @@ set -euo pipefail
 LOG="$HOME/.expediter-update.log"
 : > "$LOG"
 PORT="${EXPEDITER_PORT:-5179}"
+
+# --- flags -----------------------------------------------------------------
+# Default pulls the latest before rebuilding. --dev / --no-pull skips the pull
+# so a feature-branch / worktree checkout (e.g. premain) is built as-is — handy
+# when you're updating from a branch you don't want HEAD moved on.
+
+PULL=1
+for arg in "$@"; do
+	case "$arg" in
+		--no-pull|--dev) PULL=0 ;;
+		--help|-h)
+			cat <<EOF
+Usage: ./update.sh [--dev|--no-pull] [--help|-h]
+
+Refreshes an existing Expediter install in place: pulls the latest source
+(fast-forward only), rebuilds, then re-syncs the shims, helpers, and hooks.
+
+  --dev, --no-pull  Skip the git pull and build the current checkout as-is.
+                    Use on a feature branch / worktree (e.g. premain) where
+                    you don't want update.sh moving HEAD.
+  --help, -h        Show this message and exit.
+EOF
+			exit 0
+			;;
+	esac
+done
 
 # --- helpers ---------------------------------------------------------------
 
@@ -161,11 +191,47 @@ fi
 banner "updater"
 printf '\n'
 
-# --- 1. Build --------------------------------------------------------------
+# --- 1. Sync ---------------------------------------------------------------
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
-section "1. Build"
-printf 'Rebuilding the app from the latest source.\n\n'
+section "1. Sync"
+printf 'Fetching the latest source before rebuilding.\n\n'
+
+# .git is a directory in a normal clone but a *file* (a gitdir pointer) inside a
+# worktree, so test for either with -e.
+if [ "$PULL" = 0 ]; then
+	printf '%s⊘%s Skipping git pull (--dev) — building the current checkout.\n' "$DIM" "$RESET"
+elif [ ! -e "$REPO/.git" ]; then
+	printf '%s⊘%s Not a git checkout — building the current files.\n' "$DIM" "$RESET"
+else
+	branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
+	# Never pull over local edits: a stray change in the clone could conflict or
+	# be clobbered. Build what's on disk and say why. (Untracked files don't
+	# block a fast-forward, so they're not counted as "dirty" here.)
+	if ! git -C "$REPO" diff --quiet 2>/dev/null || ! git -C "$REPO" diff --cached --quiet 2>/dev/null; then
+		printf '%s⚠%s Local changes in the checkout — skipping pull, building %s as-is.\n' "$BOLD" "$RESET" "$branch"
+	else
+		before=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo '')
+		if git -C "$REPO" pull --ff-only >>"$LOG" 2>&1; then
+			after=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo '')
+			if [ "$before" = "$after" ]; then
+				printf '%s✓%s Already up to date (%s).\n' "$GREEN" "$RESET" "$branch"
+			else
+				printf '%s✓%s Pulled the latest on %s.\n' "$GREEN" "$RESET" "$branch"
+			fi
+		else
+			# Diverged history, no upstream, or a fast-forward that would clobber an
+			# untracked file. Don't force or merge — just build what's here.
+			printf '%s⚠%s Could not fast-forward %s (diverged or no upstream) — building as-is. See %s.\n' "$BOLD" "$RESET" "$branch" "$LOG"
+		fi
+	fi
+fi
+
+# --- 2. Build --------------------------------------------------------------
+
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+section "2. Build"
+printf 'Rebuilding the app from the current source.\n\n'
 
 # A fresh non-interactive shell may not have sourced the rc that puts Bun on
 # PATH. Add Bun's default install dir defensively before giving up.
@@ -184,7 +250,7 @@ spinner "Building ..." "App built." bash -c "cd '$REPO' && bun run build"
 # --- 2. Shims & helpers ----------------------------------------------------
 
 SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
-section "2. Shims & helpers"
+section "3. Shims & helpers"
 printf 'Refreshing the expediter / claudex commands, config, and status-bar helpers.\n\n'
 
 # Rewrite the config (idempotent; also self-heals EXPEDITER_HOME if the repo
@@ -260,7 +326,7 @@ printf '%s✓%s Shims, config, and helpers refreshed.\n' "$GREEN" "$RESET"
 # --- 3. Hooks --------------------------------------------------------------
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
-section "3. Hooks"
+section "4. Hooks"
 printf 'Re-syncing expediter hook entries in ~/.claude/settings.json.\n'
 printf 'A timestamped backup is saved first if the file exists.\n\n'
 

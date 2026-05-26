@@ -8,7 +8,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
 
 const PORT = process.env.EXPEDITER_PORT ?? '5179';
@@ -24,11 +24,35 @@ const TITLE_VALUE = TITLE_IDX >= 0 ? process.argv[TITLE_IDX + 1] : null;
 const STEPS_IDX = process.argv.indexOf('--steps');
 const STEPS_RAW = STEPS_IDX !== -1 ? process.argv[STEPS_IDX + 1] : undefined;
 
+// `expediter update [--dev|--no-pull|...]` — refresh this install by running
+// update.sh in EXPEDITER_HOME and passing through any extra flags. Handled
+// before anything else so it never starts the daemon. update.sh pulls the
+// latest by default; --dev / --no-pull skips the pull and rebuilds the current
+// checkout (what you want when updating from a feature branch / worktree).
+if (process.argv[2] === 'update') {
+	if (!HOME) {
+		console.error('expediter: EXPEDITER_HOME is not set. Re-run install.sh from the cloned repo.');
+		process.exit(1);
+	}
+	const res = spawnSync(path.join(HOME, 'update.sh'), process.argv.slice(3), {
+		stdio: 'inherit',
+	});
+	if (res.error) {
+		console.error(`expediter update: could not run update.sh — ${res.error.message}`);
+		process.exit(1);
+	}
+	process.exit(res.status ?? 1);
+}
+
 if (SHOW_HELP) {
 	console.log(
 		'Usage: expediter [--print-url] [--title default|haiku] [--steps "<s1>|<s2>|..."] [--help]'
 	);
+	console.log('   or: expediter update [--dev]');
 	console.log('');
+	console.log('  update                 Pull the latest and rebuild in place.');
+	console.log('                         Add --dev (or --no-pull) to skip the pull and rebuild the');
+	console.log('                         current checkout — e.g. when updating from a feature branch.');
 	console.log('  --print-url            Also print the tethered URL as text (default: QR only).');
 	console.log('                         Use this only if your phone cannot scan the QR — the URL');
 	console.log('                         contains the session token and will stay in scrollback.');
