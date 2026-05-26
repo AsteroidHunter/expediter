@@ -303,7 +303,7 @@
 	<header>
 		<div class="brand">
 			<span class="brand-name">Expediter</span>
-			<span class="brand-version">(v0.7)</span>
+			<span class="brand-version">(v0.72)</span>
 		</div>
 		<span class="conn" class:on={connected} aria-label={connected ? 'connected' : 'disconnected'}
 		></span>

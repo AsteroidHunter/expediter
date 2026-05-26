@@ -1,7 +1,7 @@
 {
 	"name": "expediter",
 	"private": true,
-	"version": "0.0.1",
+	"version": "0.72.0",
 	"type": "module",
 	"description": "Local-first ticket UI for Claude Code, driven by hook events from your active sessions.",
 	"author": "Akash Satpathy",
