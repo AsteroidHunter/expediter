@@ -33,24 +33,29 @@ LOG="$HOME/.expediter-update.log"
 PORT="${EXPEDITER_PORT:-5179}"
 
 # --- flags -----------------------------------------------------------------
-# Default pulls the latest before rebuilding. --dev / --no-pull skips the pull
-# so a feature-branch / worktree checkout (e.g. premain) is built as-is - handy
-# when you're updating from a branch you don't want HEAD moved on.
+# Default pulls the latest and rebuilds only if the pull advanced HEAD, so a
+# no-op run does nothing. --dev / --no-pull skips the pull and always rebuilds
+# (a feature-branch / worktree checkout, e.g. premain, where you've changed
+# local code). --force rebuilds even when already up to date.
 
 PULL=1
+FORCE=0
 for arg in "$@"; do
 	case "$arg" in
 		--no-pull|--dev) PULL=0 ;;
+		--force|-f) FORCE=1 ;;
 		--help|-h)
 			cat <<EOF
-Usage: ./update.sh [--dev|--no-pull] [--help|-h]
+Usage: ./update.sh [--dev|--no-pull] [--force|-f] [--help|-h]
 
 Refreshes an existing Expediter install in place: pulls the latest source
-(fast-forward only), rebuilds, then re-syncs the shims, helpers, and hooks.
+(fast-forward only), then rebuilds and re-syncs the shims, helpers, and hooks
+only when something actually changed.
 
-  --dev, --no-pull  Skip the git pull and build the current checkout as-is.
+  --dev, --no-pull  Skip the git pull and rebuild the current checkout as-is.
                     Use on a feature branch / worktree (e.g. premain) where
                     you don't want update.sh moving HEAD.
+  --force, -f       Rebuild and re-sync even when already up to date.
   --help, -h        Show this message and exit.
 EOF
 			exit 0
@@ -198,7 +203,9 @@ section "1. Sync"
 printf 'Fetching the latest source before rebuilding.\n\n'
 
 # .git is a directory in a normal clone but a *file* (a gitdir pointer) inside a
-# worktree, so test for either with -e.
+# worktree, so test for either with -e. NEEDS_REBUILD flips to 0 only when a
+# pull finds nothing new; every other path leaves it 1.
+NEEDS_REBUILD=1
 if [ "$PULL" = 0 ]; then
 	printf '%s⊘%s Skipping git pull (--dev) - building the current checkout.\n' "$DIM" "$RESET"
 elif [ ! -e "$REPO/.git" ]; then
@@ -215,6 +222,8 @@ else
 		if git -C "$REPO" pull --ff-only >>"$LOG" 2>&1; then
 			after=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo '')
 			if [ "$before" = "$after" ]; then
+				# Nothing pulled, so the source is unchanged: nothing to rebuild.
+				NEEDS_REBUILD=0
 				printf '%s✓%s Already up to date (%s).\n' "$GREEN" "$RESET" "$branch"
 			else
 				printf '%s✓%s Pulled the latest on %s.\n' "$GREEN" "$RESET" "$branch"
@@ -225,6 +234,13 @@ else
 			printf '%s⚠%s Could not fast-forward %s (diverged or no upstream) - building as-is. See %s.\n' "$BOLD" "$RESET" "$branch" "$LOG"
 		fi
 	fi
+fi
+
+# A pull that advanced nothing means the build and the (idempotent) shim/hook
+# re-sync would just redo identical work, so stop here unless --force was given.
+if [ "$NEEDS_REBUILD" = 0 ] && [ "$FORCE" = 0 ]; then
+	printf '\n%s✦%s Already up to date, nothing to rebuild. (Run with --force to rebuild anyway.)\n' "$GREEN" "$RESET"
+	exit 0
 fi
 
 # --- 2. Build --------------------------------------------------------------
