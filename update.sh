@@ -175,6 +175,13 @@ if [ ! -f "$REPO/package.json" ]; then
 	exit 1
 fi
 
+# Records the commit that build/ was last built from. build/ is gitignored, so
+# the marker lives with it and is wiped whenever the build is. This lets a later
+# run tell whether the build is current even if HEAD moved via a manual git pull
+# (which would otherwise look like "nothing to do" because update.sh's own pull
+# finds nothing new).
+BUILT_MARKER="$REPO/build/.expediter-built-commit"
+
 # An update only makes sense if there's an install to update. The config file
 # is install.sh's canonical "I ran successfully" marker.
 if [ ! -f "$HOME/.config/expediter/config" ]; then
@@ -203,9 +210,11 @@ section "1. Sync"
 printf 'Fetching the latest source before rebuilding.\n\n'
 
 # .git is a directory in a normal clone but a *file* (a gitdir pointer) inside a
-# worktree, so test for either with -e. NEEDS_REBUILD flips to 0 only when a
-# pull finds nothing new; every other path leaves it 1.
+# worktree, so test for either with -e. NEEDS_REBUILD defaults to 1; the clean
+# pull path sets SYNC_CLEAN=1 and defers the decision to the build-currency
+# check below. The --dev / dirty / diverged / non-git paths keep NEEDS_REBUILD=1.
 NEEDS_REBUILD=1
+SYNC_CLEAN=0
 if [ "$PULL" = 0 ]; then
 	printf '%s⊘%s Skipping git pull (--dev) - building the current checkout.\n' "$DIM" "$RESET"
 elif [ ! -e "$REPO/.git" ]; then
@@ -221,9 +230,10 @@ else
 		before=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo '')
 		if git -C "$REPO" pull --ff-only >>"$LOG" 2>&1; then
 			after=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo '')
+			# Clean checkout, pull succeeded; the build-currency check below
+			# decides whether to rebuild (HEAD may have moved via a manual pull).
+			SYNC_CLEAN=1
 			if [ "$before" = "$after" ]; then
-				# Nothing pulled, so the source is unchanged: nothing to rebuild.
-				NEEDS_REBUILD=0
 				printf '%s✓%s Already up to date (%s).\n' "$GREEN" "$RESET" "$branch"
 			else
 				printf '%s✓%s Pulled the latest on %s.\n' "$GREEN" "$RESET" "$branch"
@@ -236,8 +246,19 @@ else
 	fi
 fi
 
-# A pull that advanced nothing means the build and the (idempotent) shim/hook
-# re-sync would just redo identical work, so stop here unless --force was given.
+# On a clean checkout that pulled cleanly, rebuild only if the build isn't
+# current: build/index.js missing, no recorded build commit, or HEAD differs
+# from it (e.g. a manual git pull moved HEAD since the last build).
+if [ "$SYNC_CLEAN" = 1 ]; then
+	head_now=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo '')
+	built=$(cat "$BUILT_MARKER" 2>/dev/null || echo '')
+	if [ -f "$REPO/build/index.js" ] && [ -n "$built" ] && [ "$built" = "$head_now" ]; then
+		NEEDS_REBUILD=0
+	fi
+fi
+
+# Nothing to rebuild and not forced: the build and the (idempotent) shim/hook
+# re-sync would just redo identical work, so stop here.
 if [ "$NEEDS_REBUILD" = 0 ] && [ "$FORCE" = 0 ]; then
 	printf '\n%s✦%s Already up to date, nothing to rebuild. (Run with --force to rebuild anyway.)\n' "$GREEN" "$RESET"
 	exit 0
@@ -262,6 +283,11 @@ fi
 
 spinner "Installing dependencies ..." "Dependencies installed." bash -c "cd '$REPO' && bun install"
 spinner "Building ..." "App built." bash -c "cd '$REPO' && bun run build"
+
+# Record the commit we just built so a later run can tell whether the build is
+# current (a manual git pull can move HEAD with no rebuild in between). build/
+# exists now that the build succeeded.
+git -C "$REPO" rev-parse HEAD > "$BUILT_MARKER" 2>/dev/null || true
 
 # --- 2. Shims & helpers ----------------------------------------------------
 
