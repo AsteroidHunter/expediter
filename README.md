@@ -1,12 +1,12 @@
 ![Expediter banner](docs/assets/expediterv0_banner_260519.webp)
 
-**Expediter puts all your Claude Code sessions one phone tap away.** It is a companion app that minimizes the amount of time and friction it takes to switch between many active agent sessions, thereby enabling you to increase your throughput and steer more coding agents. When you are planning a spec with an agent that spends two minutes thinking while your third agent is awaiting a response while your fifth agent is requesting permission to delete a branch under active development, it should take you seconds to course correct your agents. Expediter makes this trivial!'
+**Expediter puts all your Claude Code sessions one phone tap away.** It is a companion app that minimizes the amount of time and friction it takes to switch between many active agent sessions, thereby enabling you to increase your throughput and steer more coding agents. When you are planning a spec with an agent that spends two minutes thinking while your third agent is awaiting a response while your fifth agent is requesting permission to delete a branch under active development, it should take you seconds to course correct your agents. Expediter makes this trivial!
 
 **How it works once installed:**
 1. You run `expediter` in your terminal
 2. Use your phone to scan the QR code
 3. Start/resume interacting with your claude sessions (in tmux)
-4. The app will show you tickets, each linked to a unique session
+4. Once an agent replies, the app will show you tickets, each linked to a unique session
    - Each ticket shows the name, working folder, and status of linked claude session
       - Red ticket = permission request
       - Yellow = awaiting further instructions
