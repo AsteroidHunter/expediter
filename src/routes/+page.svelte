@@ -340,7 +340,7 @@
 						{/if}
 						<div class="stub">
 							<span class="project">{projectLabel(ticket.cwd)}</span>
-							<span class="type">{typeLabel(ticket.event_type)}</span>
+							<span class="type">{ticket.working ? 'COOKING' : typeLabel(ticket.event_type)}</span>
 							<span class="age">{formatAge(ticket.created_at, now)}</span>
 						</div>
 						<div class="perforation" aria-hidden="true"></div>
