@@ -3,7 +3,8 @@ import {
 	upsert,
 	remove,
 	markWorking,
-	findByPane,
+	dropPaneTicketsExcept,
+	rebindPaneTicket,
 	resolveDeclineIfMatch,
 	incrementCounter,
 	getCachedTitle,
@@ -91,16 +92,8 @@ function resolveDisplayTitle(session_id: string): string {
 	return '';
 }
 
-// Removes a boot-scan placeholder ticket bound to this pane, if one exists.
-// Placeholders are keyed by the synthetic `pending:<pane_id>` session_id; real
-// tickets are keyed by the authoritative session_id. When the first real hook
-// for a previously-unidentified pane arrives, the placeholder must be cleared
-// before the real ticket is upserted — otherwise both coexist briefly.
-function reconcilePlaceholder(tmux_pane: string): void {
-	const existing = findByPane(tmux_pane);
-	if (existing && existing.session_id.startsWith('pending:')) {
-		remove(existing.session_id);
-	}
+function cancelWatchers(session_ids: string[]): void {
+	for (const id of session_ids) cancelActiveDeclineWatcher(id);
 }
 
 export const POST: RequestHandler = async ({ request }) => {
@@ -129,10 +122,10 @@ export const POST: RequestHandler = async ({ request }) => {
 		if (!transcript_path) {
 			return json({ ok: false, error: 'missing transcript_path' }, { status: 400 });
 		}
-		// If the boot scan seeded a `pending:<pane>` placeholder for this pane,
-		// remove it before upserting the authoritative ticket. Otherwise both
-		// would coexist for one frame.
-		reconcilePlaceholder(tmux_pane);
+		// Clear any ticket bound to this pane under a different key (boot-scan
+		// placeholder, or a prior/diverged session_id) before upserting the
+		// authoritative one, so the pane never shows two tickets.
+		cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id));
 		// Persist before upserting so a daemon crash between the two leaves the
 		// session discoverable on the next boot scan. Awaited so the on-disk
 		// side effect is observable to anything that polls sessions.json right
@@ -194,6 +187,13 @@ export const POST: RequestHandler = async ({ request }) => {
 			remove(session_id);
 			return json({ ok: true, action: 'cleared' });
 		}
+		// UserPromptSubmit / PostToolUse / PostToolUseFailure flip the pane's
+		// ticket to working. If that ticket is keyed by a stale session_id (a
+		// rewind changed the live session_id while the dock ticket kept the
+		// boot-scan/metadata one), markWorking would miss it and the ticket
+		// would stay idle until the next Stop re-created it. Rebind the pane's
+		// ticket to the live session_id first so markWorking lands.
+		if (tmux_pane) cancelWatchers(rebindPaneTicket(tmux_pane, session_id));
 		markWorking(session_id);
 		return json({ ok: true, action: 'marked_working' });
 	}
@@ -207,11 +207,11 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'missing tmux_pane' }, { status: 400 });
 	}
 
-	// If a boot-scan placeholder is bound to this pane, remove it before the
-	// real ticket lands. Covers the case where a pre-existing unnamed session's
-	// first hook is a Stop / PermissionRequest / Notification (not SessionStart),
-	// e.g. for sessions that were running before install.
-	reconcilePlaceholder(tmux_pane);
+	// Clear any ticket bound to this pane under a different key before the real
+	// ticket lands — a boot-scan placeholder, or a stale/diverged session_id
+	// (e.g. after a rewind) that would otherwise leave a second ticket for the
+	// same pane.
+	cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id));
 
 	// Title generation happens on UserPromptSubmit (see CLEAR_EVENTS branch above);
 	// by the time we land here the cache is typically populated. In chat-title

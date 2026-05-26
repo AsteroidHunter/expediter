@@ -502,6 +502,61 @@ test('SessionEnd calls forgetSession (entry removed from sessions.json)', async 
 	deleteSessionTopic(id);
 });
 
+// Core repro for the "ticket stays grey / working never engages" bug: the
+// pane's ticket is keyed by a stale session_id (boot-scan/metadata key that
+// diverged from the live session after a rewind). UserPromptSubmit must rebind
+// it to the live session_id so markWorking lands on the first message.
+test('UserPromptSubmit rebinds a stale-keyed pane ticket and marks it working', async () => {
+	upsert({
+		session_id: 'old-sid',
+		tmux_pane: '%7',
+		cwd: '/proj',
+		title: 'my-session',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+
+	const result = await callHandler({
+		hook_event_name: 'UserPromptSubmit',
+		session_id: 'live-sid',
+		tmux_pane: '%7'
+	});
+	expect((result.body as { action?: string }).action).toBe('marked_working');
+
+	const t = list().find((x) => x.tmux_pane === '%7');
+	expect(t?.session_id).toBe('live-sid');
+	expect(t?.working).toBe(true);
+	expect(t?.title).toBe('my-session');
+	expect(list().find((x) => x.session_id === 'old-sid')).toBeUndefined();
+	remove('live-sid');
+	deleteSessionTopic('live-sid');
+});
+
+test('Stop on a pane with a stale-keyed ticket leaves a single ticket under the live session_id', async () => {
+	upsert({
+		session_id: 'old-sid-2',
+		tmux_pane: '%17',
+		cwd: '/proj',
+		title: 'whatever',
+		event_type: 'Idle',
+		created_at: Date.now()
+	});
+
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: 'live-sid-2',
+		tmux_pane: '%17',
+		cwd: '/proj'
+	});
+
+	const paneTickets = list().filter((t) => t.tmux_pane === '%17');
+	expect(paneTickets.length).toBe(1);
+	expect(paneTickets[0].session_id).toBe('live-sid-2');
+	expect(paneTickets[0].event_type).toBe('Stop');
+	remove('live-sid-2');
+	deleteSessionTopic('live-sid-2');
+});
+
 test('Stop on a pane with a placeholder removes the placeholder first', async () => {
 	// Seed a placeholder for pane %33 — boot-scan equivalent.
 	upsert({

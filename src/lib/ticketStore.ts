@@ -162,6 +162,67 @@ export function findByPane(tmux_pane: string): Ticket | undefined {
 	return undefined;
 }
 
+// Remove every ticket bound to tmux_pane whose key is not keepSessionId, and
+// return the removed session_ids. One tmux pane runs one claude session, so a
+// pane should hold at most one ticket; a stale one (left by a session that
+// exited without SessionEnd, or whose live session_id diverged from the
+// boot-scan/metadata key after a rewind) must be cleared before the
+// authoritative event for that pane upserts the real ticket. Generalizes the
+// old placeholder-only reconciliation — a `pending:<pane>` ticket is just one
+// kind of mismatched key. Callers cancel any per-session side effects (decline
+// watchers) for the returned ids.
+export function dropPaneTicketsExcept(tmux_pane: string, keepSessionId: string): string[] {
+	const removed: string[] = [];
+	for (const [key, ticket] of store) {
+		if (ticket.tmux_pane === tmux_pane && key !== keepSessionId) {
+			store.delete(key);
+			removed.push(key);
+		}
+	}
+	if (removed.length) notify();
+	return removed;
+}
+
+// Re-key a pane's existing ticket to sessionId, preserving all its fields.
+// For events that update an existing ticket but never create one (the
+// markWorking clear-events): if the pane's ticket is keyed by a stale
+// session_id — e.g. a conversation rewind changed the live session_id while
+// the dock ticket still carries the pre-rewind one — then markWorking(sessionId)
+// would miss it and the ticket would never flip to working. Rebinding moves
+// the ticket under the live session_id so the subsequent lookup succeeds.
+// Drops any extra same-pane tickets. Returns the displaced session_ids
+// (the old key plus any strays) for side-effect cleanup.
+export function rebindPaneTicket(tmux_pane: string, sessionId: string): string[] {
+	const samePane: Array<[string, Ticket]> = [];
+	for (const [key, ticket] of store) {
+		if (ticket.tmux_pane === tmux_pane) samePane.push([key, ticket]);
+	}
+	const displaced: string[] = [];
+	let changed = false;
+	const hasCorrect = samePane.some(([key]) => key === sessionId);
+	if (!hasCorrect && samePane.length > 0) {
+		// Re-key the most-recently-created stale ticket; it's the best proxy for
+		// the live session's current state.
+		let pick = samePane[0];
+		for (const entry of samePane) {
+			if (entry[1].created_at > pick[1].created_at) pick = entry;
+		}
+		store.delete(pick[0]);
+		store.set(sessionId, { ...pick[1], session_id: sessionId });
+		displaced.push(pick[0]);
+		changed = true;
+	}
+	for (const [key] of samePane) {
+		if (key !== sessionId && store.has(key)) {
+			store.delete(key);
+			displaced.push(key);
+			changed = true;
+		}
+	}
+	if (changed) notify();
+	return displaced;
+}
+
 export function incrementCounter(session_id: string): number {
 	const entry = getOrCreateTopic(session_id);
 	entry.counter += 1;
