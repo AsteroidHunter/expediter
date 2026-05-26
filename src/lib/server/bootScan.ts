@@ -28,21 +28,35 @@ export type PaneRow = {
 	pane_pid: number;
 	pane_current_command: string;
 	pane_current_path: string;
+	// True when the pane's tmux session has at least one attached client.
+	// `#{session_attached}` is a client count, so `> 0` (not `=== 1`) — a
+	// session with 2+ attached clients is still attached.
+	session_attached: boolean;
 };
 
 // Parses the `|`-delimited rows emitted by `tmux list-panes -F`. One row per
 // line; malformed rows are skipped silently (defensive against shell-injected
-// or escaped path characters that could split a row early).
+// or escaped path characters that could split a row early). Column order is
+// pane_id | pane_pid | command | session_attached | cwd — cwd is last and
+// rejoined from the remaining parts so a `|` inside a path (rare but legal)
+// doesn't corrupt the session_attached column.
 export function parsePaneRows(stdout: string): PaneRow[] {
 	const rows: PaneRow[] = [];
 	for (const line of stdout.split('\n')) {
 		if (!line) continue;
 		const parts = line.split('|');
-		if (parts.length < 4) continue;
-		const [pane_id, pidStr, cmd, cwd] = parts;
+		if (parts.length < 5) continue;
+		const [pane_id, pidStr, cmd, attachedStr] = parts;
+		const cwd = parts.slice(4).join('|');
 		const pane_pid = Number(pidStr);
 		if (!Number.isFinite(pane_pid)) continue;
-		rows.push({ pane_id, pane_pid, pane_current_command: cmd, pane_current_path: cwd });
+		rows.push({
+			pane_id,
+			pane_pid,
+			pane_current_command: cmd,
+			pane_current_path: cwd,
+			session_attached: Number(attachedStr) > 0
+		});
 	}
 	return rows;
 }
@@ -52,7 +66,7 @@ export async function listPanes(): Promise<PaneRow[]> {
 		'list-panes',
 		'-a',
 		'-F',
-		'#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}'
+		'#{pane_id}|#{pane_pid}|#{pane_current_command}|#{session_attached}|#{pane_current_path}'
 	]);
 	return parsePaneRows(stdout);
 }
@@ -175,15 +189,31 @@ export function upsertPlaceholder(pane_id: string, cwd: string): void {
 	});
 }
 
-export async function runBootScan(): Promise<void> {
+// The three side-effecting inputs runBootScan depends on, injectable so tests
+// can feed synthetic pane/metadata/parent-pid combinations without shelling
+// out to tmux/ps or touching ~/.claude/sessions. Defaults to the real
+// implementations in production.
+export type BootScanDeps = {
+	listPanes: () => Promise<PaneRow[]>;
+	readSessionMetas: () => Promise<SessionMeta[]>;
+	parentPid: (pid: number) => Promise<number | null>;
+};
+
+export async function runBootScan(
+	deps: BootScanDeps = { listPanes, readSessionMetas, parentPid }
+): Promise<void> {
 	let panes: PaneRow[];
 	try {
-		panes = await listPanes();
+		panes = await deps.listPanes();
 	} catch (err) {
 		console.warn('[bootScan] tmux list-panes failed (tmux not running?):', err);
 		return;
 	}
 	const claudePanes = panes.filter(isClaudePane);
+	// livePaneIds intentionally includes detached panes: a detached session is
+	// still alive (its claude process is running), so pruneStaleSessions must
+	// not drop its persisted record just because no client is attached. The
+	// attached check happens later, only when deciding whether to seed a ticket.
 	const livePaneIds = new Set(claudePanes.map((p) => p.pane_id));
 
 	const persisted = await loadSessions();
@@ -197,15 +227,21 @@ export async function runBootScan(): Promise<void> {
 	// shell_pid → SessionMeta. Built from ~/.claude/sessions/*.json by walking
 	// each metadata file's pid up to its parent (the tmux pane shell). Dead
 	// metadata drops out when parentPid returns null.
-	const metas = await readSessionMetas();
+	const metas = await deps.readSessionMetas();
 	const metaByShellPid = new Map<number, SessionMeta>();
 	for (const meta of metas) {
-		const ppid = await parentPid(meta.pid);
+		const ppid = await deps.parentPid(meta.pid);
 		if (ppid === null) continue;
 		metaByShellPid.set(ppid, meta);
 	}
 
 	for (const pane of claudePanes) {
+		// Autospawn shows only sessions whose tmux session is currently
+		// attached. A detached session has no terminal window to bring forward,
+		// so its ticket would tap to nothing. This is a boot-time snapshot: a
+		// session detached after the daemon starts keeps its ticket until the
+		// next restart.
+		if (!pane.session_attached) continue;
 		// Metadata-first. The persisted entry can be stale: if the previous
 		// claude in this pane exited and a new one took its place, sessions.json
 		// still points to the dead session_id but the metadata file reflects
