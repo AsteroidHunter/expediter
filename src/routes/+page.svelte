@@ -428,7 +428,7 @@
 					{#if shuttingDown}
 						Ending connection...
 					{:else if shutdownArmed}
-						Tap again to confirm
+						Tap to confirm
 					{:else}
 						End connection
 					{/if}
@@ -657,8 +657,8 @@
 	}
 	/* Armed state: first tap on a destructive action. Background flips to the
 	   PermissionRequest palette so the "this will kill the daemon" reading is
-	   unambiguous, and the label changes to "Tap again to confirm". Reverts on
-	   the 4s timer or on closing the panel. */
+	   unambiguous, and the label changes to "Tap to confirm". Reverts on the
+	   4s timer or on closing the panel. */
 	.settings-action.armed {
 		background: #f9d5cc;
 		color: #5a1e1a;
