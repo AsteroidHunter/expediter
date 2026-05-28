@@ -272,7 +272,7 @@
 		disarmShutdown();
 	}
 
-	async function onShutdownClick(): Promise<void> {
+	function onShutdownClick(): void {
 		if (!shutdownArmed) {
 			shutdownArmed = true;
 			shutdownArmTimer = setTimeout(disarmShutdown, 4000);
@@ -281,16 +281,20 @@
 		disarmShutdown();
 		if (!clientToken) return;
 		shuttingDown = true;
-		try {
-			await fetch('/api/shutdown', {
-				method: 'POST',
-				headers: { 'x-expediter-token': clientToken }
-			});
-		} catch {
-			// Daemon may close the connection mid-shutdown; the SSE drop surfaces
-			// the state via the existing isDisconnected overlay regardless.
-		}
-		settingsOpen = false;
+		// Fire-and-forget: the daemon exits ~100ms after acknowledging, so the
+		// response may never reach us cleanly. Awaiting would leave the
+		// "Shutting down..." label visible until the network stack timed out.
+		// Instead, fire the request, briefly flash the label as feedback, and
+		// then close the panel — the existing isDisconnected overlay takes
+		// over once the SSE drops.
+		void fetch('/api/shutdown', {
+			method: 'POST',
+			headers: { 'x-expediter-token': clientToken }
+		}).catch(() => {});
+		setTimeout(() => {
+			settingsOpen = false;
+			shuttingDown = false;
+		}, 600);
 	}
 
 	onMount(async () => {
@@ -368,13 +372,20 @@
 					aria-expanded={settingsOpen}
 					onclick={toggleSettings}
 				>
-					<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+					<svg
+						viewBox="0 0 24 24"
+						width="18"
+						height="18"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.6"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="3" />
 						<path
-							d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8.94 4.5c.04-.33.06-.66.06-1s-.02-.67-.06-1l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.4 7.4 0 0 0-1.73-1l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.62.25-1.2.58-1.73 1l-2.39-.96a.5.5 0 0 0-.6.22L3.91 8.78a.5.5 0 0 0 .12.64L6.06 11c-.04.33-.06.66-.06 1s.02.67.06 1l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.53.42 1.11.75 1.73 1l.36 2.54c.04.24.25.42.5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54c.62-.25 1.2-.58 1.73-1l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64L20.94 13z"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="1.5"
-							stroke-linejoin="round"
+							d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
 						/>
 					</svg>
 				</button>
@@ -547,13 +558,25 @@
 		transform: rotate(45deg);
 	}
 
-	/* Full-viewport transparent backdrop. Its only job is to catch off-panel
-	   taps and dismiss the menu. Tickets below stay visible. */
+	/* Full-viewport blurred backdrop. Dims and blurs the dock behind the panel
+	   so the menu has visual focus, and absorbs off-panel taps to dismiss.
+	   backdrop-filter is Safari-supported via -webkit- prefix. Fades in. */
 	.settings-backdrop {
 		position: fixed;
 		inset: 0;
 		z-index: 20;
-		background: transparent;
+		background: rgba(42, 31, 21, 0.18);
+		-webkit-backdrop-filter: blur(6px);
+		backdrop-filter: blur(6px);
+		animation: settings-backdrop-fade 160ms ease both;
+	}
+	@keyframes settings-backdrop-fade {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
 	}
 
 	/* Dropdown anchored to the top-right under the header. Fixed so it isn't
@@ -566,12 +589,24 @@
 		z-index: 21;
 		background: #fffdf5;
 		border: 1px solid #c9bd9a;
-		box-shadow: 0 6px 20px rgba(80, 60, 30, 0.12);
+		box-shadow: 0 12px 32px rgba(80, 60, 30, 0.22);
 		min-width: 220px;
 		padding: 4px;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
+		transform-origin: top right;
+		animation: settings-panel-pop 180ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+	}
+	@keyframes settings-panel-pop {
+		from {
+			opacity: 0;
+			transform: translateY(-4px) scale(0.96);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0) scale(1);
+		}
 	}
 	.settings-action {
 		background: transparent;
