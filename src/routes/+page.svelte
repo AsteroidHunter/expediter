@@ -409,13 +409,30 @@
 				disabled={shuttingDown}
 				onclick={onShutdownClick}
 			>
-				{#if shuttingDown}
-					Shutting down...
-				{:else if shutdownArmed}
-					Tap again to confirm
-				{:else}
-					Shut down expediter
-				{/if}
+				<svg
+					class="action-icon"
+					viewBox="0 0 24 24"
+					width="18"
+					height="18"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.8"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M12 3v9" />
+					<path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+				</svg>
+				<span class="action-label">
+					{#if shuttingDown}
+						Ending connection...
+					{:else if shutdownArmed}
+						Tap again to confirm
+					{:else}
+						End connection
+					{/if}
+				</span>
 			</button>
 		</div>
 	{/if}
@@ -579,36 +596,39 @@
 		}
 	}
 
-	/* Dropdown anchored to the top-right under the header. Fixed so it isn't
-	   pushed by the ticket list and so safe-area insets are picked up directly.
-	   Width left to content; min-width keeps the action label from wrapping. */
+	/* Viewport-centered panel. Fixed positioning + translate centers it across
+	   both axes. min-width keeps the action label from wrapping. Panel scales
+	   in from the center. */
 	.settings-panel {
 		position: fixed;
-		top: calc(env(safe-area-inset-top, 0) + 46px);
-		right: 14px;
+		top: 50%;
+		left: 50%;
 		z-index: 21;
 		background: #fffdf5;
 		border: 1px solid #c9bd9a;
 		box-shadow: 0 12px 32px rgba(80, 60, 30, 0.22);
-		min-width: 220px;
+		min-width: 240px;
 		padding: 4px;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		transform-origin: top right;
+		transform-origin: center;
 		animation: settings-panel-pop 180ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
 	}
 	@keyframes settings-panel-pop {
 		from {
 			opacity: 0;
-			transform: translateY(-4px) scale(0.96);
+			transform: translate(-50%, -50%) scale(0.94);
 		}
 		to {
 			opacity: 1;
-			transform: translateY(0) scale(1);
+			transform: translate(-50%, -50%) scale(1);
 		}
 	}
 	.settings-action {
+		display: flex;
+		align-items: center;
+		gap: 10px;
 		background: transparent;
 		border: 0;
 		color: #2a1f15;
@@ -616,12 +636,18 @@
 		font-size: 13px;
 		letter-spacing: 0.04em;
 		text-align: left;
-		padding: 12px 14px;
+		padding: 14px 16px;
 		cursor: pointer;
 		-webkit-tap-highlight-color: transparent;
 		transition:
 			background 120ms ease,
 			color 120ms ease;
+	}
+	.settings-action .action-icon {
+		flex-shrink: 0;
+	}
+	.settings-action .action-label {
+		flex: 1;
 	}
 	.settings-action:hover {
 		background: rgba(201, 189, 154, 0.18);
