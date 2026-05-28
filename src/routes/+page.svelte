@@ -244,6 +244,55 @@
 	let now = $state(Date.now());
 	let ageTimer: ReturnType<typeof setInterval> | null = null;
 
+	// Settings menu + two-tap shutdown. shutdownArmed flips true on the first
+	// tap and back to false on a 4s timer, on settings-close, or on the second
+	// confirming tap. The 4s window is short enough that an accidental first
+	// tap doesn't sit there pre-armed for long, and long enough that a
+	// deliberate user can comfortably tap again.
+	let settingsOpen = $state(false);
+	let shutdownArmed = $state(false);
+	let shuttingDown = $state(false);
+	let shutdownArmTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function disarmShutdown(): void {
+		shutdownArmed = false;
+		if (shutdownArmTimer !== null) {
+			clearTimeout(shutdownArmTimer);
+			shutdownArmTimer = null;
+		}
+	}
+
+	function toggleSettings(): void {
+		settingsOpen = !settingsOpen;
+		if (!settingsOpen) disarmShutdown();
+	}
+
+	function closeSettings(): void {
+		settingsOpen = false;
+		disarmShutdown();
+	}
+
+	async function onShutdownClick(): Promise<void> {
+		if (!shutdownArmed) {
+			shutdownArmed = true;
+			shutdownArmTimer = setTimeout(disarmShutdown, 4000);
+			return;
+		}
+		disarmShutdown();
+		if (!clientToken) return;
+		shuttingDown = true;
+		try {
+			await fetch('/api/shutdown', {
+				method: 'POST',
+				headers: { 'x-expediter-token': clientToken }
+			});
+		} catch {
+			// Daemon may close the connection mid-shutdown; the SSE drop surfaces
+			// the state via the existing isDisconnected overlay regardless.
+		}
+		settingsOpen = false;
+	}
+
 	onMount(async () => {
 		if (browser && new URLSearchParams(window.location.search).has('mock')) {
 			const loader = Object.values(mockLoaders)[0];
@@ -286,6 +335,10 @@
 			clearInterval(ageTimer);
 			ageTimer = null;
 		}
+		if (shutdownArmTimer !== null) {
+			clearTimeout(shutdownArmTimer);
+			shutdownArmTimer = null;
+		}
 		if (browser && visibilityListener) {
 			document.removeEventListener('visibilitychange', visibilityListener);
 		}
@@ -305,9 +358,56 @@
 			<span class="brand-name">Expediter</span>
 			<span class="brand-version">(v0.72)</span>
 		</div>
-		<span class="conn" class:on={connected} aria-label={connected ? 'connected' : 'disconnected'}
-		></span>
+		<div class="header-right">
+			{#if clientToken}
+				<button
+					type="button"
+					class="gear"
+					class:open={settingsOpen}
+					aria-label="Settings"
+					aria-expanded={settingsOpen}
+					onclick={toggleSettings}
+				>
+					<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+						<path
+							d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8.94 4.5c.04-.33.06-.66.06-1s-.02-.67-.06-1l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.4 7.4 0 0 0-1.73-1l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.62.25-1.2.58-1.73 1l-2.39-.96a.5.5 0 0 0-.6.22L3.91 8.78a.5.5 0 0 0 .12.64L6.06 11c-.04.33-.06.66-.06 1s.02.67.06 1l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.53.42 1.11.75 1.73 1l.36 2.54c.04.24.25.42.5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54c.62-.25 1.2-.58 1.73-1l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64L20.94 13z"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.5"
+							stroke-linejoin="round"
+						/>
+					</svg>
+				</button>
+			{/if}
+			<span class="conn" class:on={connected} aria-label={connected ? 'connected' : 'disconnected'}
+			></span>
+		</div>
 	</header>
+
+	{#if settingsOpen}
+		<div
+			class="settings-backdrop"
+			role="presentation"
+			onclick={closeSettings}
+		></div>
+		<div class="settings-panel" role="menu">
+			<button
+				type="button"
+				class="settings-action danger"
+				class:armed={shutdownArmed}
+				disabled={shuttingDown}
+				onclick={onShutdownClick}
+			>
+				{#if shuttingDown}
+					Shutting down...
+				{:else if shutdownArmed}
+					Tap again to confirm
+				{:else}
+					Shut down expediter
+				{/if}
+			</button>
+		</div>
+	{/if}
 
 	{#if !clientToken}
 		<div class="empty empty-no-token" aria-live="polite">
@@ -416,6 +516,96 @@
 		font-weight: 500;
 		color: rgba(42, 31, 21, 0.38);
 		letter-spacing: 0.04em;
+	}
+
+	.header-right {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+
+	.gear {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: 0;
+		padding: 4px;
+		margin: -4px;
+		color: rgba(42, 31, 21, 0.45);
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition:
+			color 150ms ease,
+			transform 200ms ease;
+	}
+	.gear:hover,
+	.gear.open {
+		color: #2a1f15;
+	}
+	.gear.open {
+		transform: rotate(45deg);
+	}
+
+	/* Full-viewport transparent backdrop. Its only job is to catch off-panel
+	   taps and dismiss the menu. Tickets below stay visible. */
+	.settings-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 20;
+		background: transparent;
+	}
+
+	/* Dropdown anchored to the top-right under the header. Fixed so it isn't
+	   pushed by the ticket list and so safe-area insets are picked up directly.
+	   Width left to content; min-width keeps the action label from wrapping. */
+	.settings-panel {
+		position: fixed;
+		top: calc(env(safe-area-inset-top, 0) + 46px);
+		right: 14px;
+		z-index: 21;
+		background: #fffdf5;
+		border: 1px solid #c9bd9a;
+		box-shadow: 0 6px 20px rgba(80, 60, 30, 0.12);
+		min-width: 220px;
+		padding: 4px;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.settings-action {
+		background: transparent;
+		border: 0;
+		color: #2a1f15;
+		font: inherit;
+		font-size: 13px;
+		letter-spacing: 0.04em;
+		text-align: left;
+		padding: 12px 14px;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition:
+			background 120ms ease,
+			color 120ms ease;
+	}
+	.settings-action:hover {
+		background: rgba(201, 189, 154, 0.18);
+	}
+	.settings-action.danger {
+		color: #8b2e1f;
+	}
+	/* Armed state: first tap on a destructive action. Background flips to the
+	   PermissionRequest palette so the "this will kill the daemon" reading is
+	   unambiguous, and the label changes to "Tap again to confirm". Reverts on
+	   the 4s timer or on closing the panel. */
+	.settings-action.armed {
+		background: #f9d5cc;
+		color: #5a1e1a;
+		font-weight: 600;
+	}
+	.settings-action:disabled {
+		opacity: 0.55;
+		cursor: default;
 	}
 
 	.conn {
