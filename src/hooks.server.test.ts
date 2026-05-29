@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from 'bun:test';
-import { handle } from './hooks.server';
+import { handle, normalizeIp, isAllowedIp, isAllowedHost } from './hooks.server';
 import { __setTokenForTesting } from './lib/token';
 
 // Known token used for all gate tests. 22 base64url chars.
@@ -242,6 +242,40 @@ test('200 response carries x-frame-options: DENY', async () => {
 test('403 response carries x-frame-options: DENY', async () => {
 	const res = await runGate(makeEvent({ url: 'http://192.168.1.50:5179/api/focus', method: 'POST' }));
 	expect(res.headers.get('x-frame-options')).toBe('DENY');
+});
+
+// --- normalizeIp / isAllowedIp / isAllowedHost unit tests ---
+
+test('normalizeIp strips ::ffff: prefix from IPv4-mapped IPv6 addresses', () => {
+	expect(normalizeIp('::ffff:127.0.0.1')).toBe('127.0.0.1');
+	expect(normalizeIp('::ffff:192.168.1.5')).toBe('192.168.1.5');
+});
+
+test('normalizeIp leaves bare IPv4 and IPv6 untouched', () => {
+	expect(normalizeIp('127.0.0.1')).toBe('127.0.0.1');
+	expect(normalizeIp('::1')).toBe('::1');
+	expect(normalizeIp('192.168.1.50')).toBe('192.168.1.50');
+});
+
+test('normalizeIp returns null for null / undefined / empty', () => {
+	expect(normalizeIp(null)).toBeNull();
+	expect(normalizeIp(undefined)).toBeNull();
+	expect(normalizeIp('')).toBeNull();
+});
+
+test('isAllowedIp accepts loopback literals and rejects everything else', () => {
+	expect(isAllowedIp('127.0.0.1')).toBe(true);
+	expect(isAllowedIp('::1')).toBe(true);
+	expect(isAllowedIp('192.168.1.5')).toBe(false);
+	expect(isAllowedIp('10.0.0.1')).toBe(false);
+	expect(isAllowedIp(null)).toBe(false);
+});
+
+// Regression: a Host header missing the port (some proxies strip it) must not
+// silently pass — the host check is part of the DNS-rebinding defense.
+test('isAllowedHost rejects a literal host with no port suffix', () => {
+	expect(isAllowedHost('localhost')).toBe(false);
+	expect(isAllowedHost('192.168.1.50')).toBe(false);
 });
 
 // --- SSE log redaction ---

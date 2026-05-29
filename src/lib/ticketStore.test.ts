@@ -648,3 +648,74 @@ test('rebindPaneTicket drops strays when a ticket is already keyed correctly', (
 	expect(list().find((t) => t.session_id === 'correct')).toBeDefined();
 	remove('correct');
 });
+
+// Pick the most-recently-created stale ticket: the rebind-comment claims this
+// behavior but the existing tests only cover a single-stale case.
+test('rebindPaneTicket re-keys the most-recently-created stale ticket when multiple share a pane', () => {
+	upsert({ session_id: 'older-stale', tmux_pane: '%30', cwd: '/a', title: 'old title', event_type: 'Stop', created_at: 1000 });
+	upsert({ session_id: 'newer-stale', tmux_pane: '%30', cwd: '/a', title: 'new title', event_type: 'Stop', created_at: 9999 });
+
+	const displaced = rebindPaneTicket('%30', 'live-key');
+
+	const survivor = list().find((t) => t.session_id === 'live-key');
+	expect(survivor?.title).toBe('new title');
+	expect(displaced).toContain('older-stale');
+	expect(displaced).toContain('newer-stale');
+	expect(list().filter((t) => t.tmux_pane === '%30').length).toBe(1);
+	remove('live-key');
+});
+
+// ─── subscribe / notify discipline ───────────────────────────────────────────
+
+test('subscribe delivers snapshots to multiple subscribers and unsubscribe removes the listener', () => {
+	const a: Ticket[][] = [];
+	const b: Ticket[][] = [];
+	const unsubA = subscribe((snap) => a.push(snap));
+	const unsubB = subscribe((snap) => b.push(snap));
+
+	const id = nextId();
+	upsert({ session_id: id, tmux_pane: '%1', cwd: '', title: '', event_type: 'Stop', created_at: Date.now() });
+	expect(a.length > 0).toBe(true);
+	expect(b.length > 0).toBe(true);
+	expect(a.length).toBe(b.length);
+
+	const aSnapsAtUnsub = a.length;
+	const bSnapsAtUnsub = b.length;
+	unsubB();
+	upsert({ session_id: id, tmux_pane: '%1', cwd: '', title: '', event_type: 'PermissionRequest', created_at: Date.now() });
+	expect(a.length).toBe(aSnapsAtUnsub + 1);
+	expect(b.length).toBe(bSnapsAtUnsub); // B no longer notified
+
+	unsubA();
+	remove(id);
+});
+
+// Code-claimed quiescence: setCachedTitle should only notify when the ticket's
+// title actually changes. Without this, a no-op refresh would spam SSE.
+test('setCachedTitle does not notify subscribers when the title is unchanged', () => {
+	const id = nextId();
+	upsert({ session_id: id, tmux_pane: '%1', cwd: '', title: 'same title', event_type: 'Stop', created_at: Date.now() });
+	setCachedTitle(id, 'same title');
+
+	const snaps: Ticket[][] = [];
+	const unsub = subscribe((s) => snaps.push(s));
+	setCachedTitle(id, 'same title');
+	expect(snaps.length).toBe(0);
+
+	unsub();
+	remove(id);
+});
+
+// Code-claimed: dropPaneTicketsExcept skips notify when it removes nothing.
+test('dropPaneTicketsExcept does not notify subscribers when nothing is removed', () => {
+	upsert({ session_id: 'only-keeper', tmux_pane: '%60', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+
+	const snaps: Ticket[][] = [];
+	const unsub = subscribe((s) => snaps.push(s));
+	const removed = dropPaneTicketsExcept('%60', 'only-keeper');
+	expect(removed).toEqual([]);
+	expect(snaps.length).toBe(0);
+
+	unsub();
+	remove('only-keeper');
+});

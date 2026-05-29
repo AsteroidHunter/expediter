@@ -40,9 +40,31 @@ return fa & "|" & wTty`;
 	}
 }
 
-// Multi-client sessions: pick the most-recently-active client's tty so the
-// tap raises the terminal the user actually just touched, not whichever one
-// attached first. `client_activity` bumps on every keystroke.
+// Parses `tmux list-clients -F '#{client_activity} #{client_tty}'` output and
+// returns the most-recently-active client's tty. Multi-client sessions emit one
+// row per attached client; picking by activity raises the terminal the user
+// actually just touched, not whichever client tmux happened to list first.
+// Malformed rows (no space, non-numeric activity, empty tty) are silently
+// skipped. Returns null when no usable row remains.
+export function pickMostRecentTty(stdout: string): string | null {
+	const rows = stdout
+		.split('\n')
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0)
+		.map((line) => {
+			const sp = line.indexOf(' ');
+			if (sp < 0) return null;
+			const activity = Number(line.slice(0, sp));
+			const tty = line.slice(sp + 1).trim();
+			if (!Number.isFinite(activity) || !tty) return null;
+			return { activity, tty };
+		})
+		.filter((r): r is { activity: number; tty: string } => r !== null);
+	if (rows.length === 0) return null;
+	rows.sort((a, b) => b.activity - a.activity);
+	return rows[0].tty;
+}
+
 async function clientTtyForSession(session: string): Promise<string | null> {
 	try {
 		const { stdout } = await execFileAsync('tmux', [
@@ -52,22 +74,7 @@ async function clientTtyForSession(session: string): Promise<string | null> {
 			'-F',
 			'#{client_activity} #{client_tty}'
 		]);
-		const rows = stdout
-			.split('\n')
-			.map((s) => s.trim())
-			.filter((s) => s.length > 0)
-			.map((line) => {
-				const sp = line.indexOf(' ');
-				if (sp < 0) return null;
-				const activity = Number(line.slice(0, sp));
-				const tty = line.slice(sp + 1).trim();
-				if (!Number.isFinite(activity) || !tty) return null;
-				return { activity, tty };
-			})
-			.filter((r): r is { activity: number; tty: string } => r !== null);
-		if (rows.length === 0) return null;
-		rows.sort((a, b) => b.activity - a.activity);
-		return rows[0].tty;
+		return pickMostRecentTty(stdout);
 	} catch {
 		return null;
 	}

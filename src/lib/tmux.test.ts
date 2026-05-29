@@ -3,6 +3,7 @@ import {
 	raiseTerminalScript,
 	parseActivateResult,
 	applyActivateResult,
+	pickMostRecentTty,
 	focusPane,
 	FocusError,
 	type TabLocation
@@ -148,6 +149,61 @@ test('applyActivateResult on unknown preserves a stale entry rather than evictin
 	]);
 	applyActivateResult(cache, '/dev/ttys003', { kind: 'unknown', raw: 'garbage' });
 	expect(cache.get('/dev/ttys003')).toEqual({ windowId: 1, tabIndex: 2 });
+});
+
+// pickMostRecentTty ─────────────────────────────────────────────────────────
+
+test('pickMostRecentTty returns null on empty stdout', () => {
+	expect(pickMostRecentTty('')).toBeNull();
+});
+
+test('pickMostRecentTty returns null on whitespace-only stdout', () => {
+	expect(pickMostRecentTty('   \n  \t  \n')).toBeNull();
+});
+
+test('pickMostRecentTty returns the only tty when one client is attached', () => {
+	expect(pickMostRecentTty('1700000000 /dev/ttys003\n')).toBe('/dev/ttys003');
+});
+
+// Core fix: when two terminals are attached to one session, the more-recently-
+// active client's tty wins regardless of row order in tmux's output.
+test('pickMostRecentTty picks the higher-activity tty when it appears second', () => {
+	const stdout = '1700000000 /dev/ttys003\n1700000050 /dev/ttys009\n';
+	expect(pickMostRecentTty(stdout)).toBe('/dev/ttys009');
+});
+
+test('pickMostRecentTty picks the higher-activity tty when it appears first', () => {
+	const stdout = '1700000050 /dev/ttys009\n1700000000 /dev/ttys003\n';
+	expect(pickMostRecentTty(stdout)).toBe('/dev/ttys009');
+});
+
+test('pickMostRecentTty picks any tty across a wide spread of clients', () => {
+	const stdout = [
+		'1700000010 /dev/ttys001',
+		'1700001000 /dev/ttys999', // highest
+		'1700000500 /dev/ttys555',
+		'1700000100 /dev/ttys111'
+	].join('\n');
+	expect(pickMostRecentTty(stdout)).toBe('/dev/ttys999');
+});
+
+test('pickMostRecentTty skips rows missing the activity/tty separator', () => {
+	const stdout = 'malformed-no-space\n1700000050 /dev/ttys009\n';
+	expect(pickMostRecentTty(stdout)).toBe('/dev/ttys009');
+});
+
+test('pickMostRecentTty skips rows whose activity column is not numeric', () => {
+	const stdout = 'notanumber /dev/ttys999\n1700000050 /dev/ttys009\n';
+	expect(pickMostRecentTty(stdout)).toBe('/dev/ttys009');
+});
+
+test('pickMostRecentTty skips rows whose tty column is empty', () => {
+	const stdout = '1700001000 \n1700000050 /dev/ttys009\n';
+	expect(pickMostRecentTty(stdout)).toBe('/dev/ttys009');
+});
+
+test('pickMostRecentTty returns null when every row is malformed', () => {
+	expect(pickMostRecentTty('garbage\nmore-garbage\nnotanumber tty\n')).toBeNull();
 });
 
 // focusPane validation ─────────────────────────────────────────────────────
