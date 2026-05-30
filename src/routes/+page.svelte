@@ -813,12 +813,14 @@
 	}
 	/* Idle tickets are seeded by the boot scan (and the SessionStart hook) for
 	   sessions that haven't emitted a real event yet. Fully desaturated AND
-	   dimmed to 60% opacity, so a never-touched session reads as more recessed
-	   than an aged Stop (which desaturates to the same grey via .stale-4 but
-	   stays at full opacity). */
+	   given a translucent fill (rgba --bg) so the page shows through and a
+	   never-touched session reads as a fainter card than an aged Stop (which
+	   desaturates to the same grey via .stale-4 but keeps a solid fill). Only
+	   the fill is translucent; text and border stay crisp, unlike element
+	   opacity which faded the whole ticket. */
 	.ticket.type-idle {
 		filter: saturate(0);
-		opacity: 0.6;
+		--bg: rgba(255, 241, 201, 0.5);
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
