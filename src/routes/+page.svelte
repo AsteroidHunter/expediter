@@ -48,6 +48,38 @@
 	let visibilityListener: (() => void) | null = null;
 	let pageshowListener: (() => void) | null = null;
 
+	// Brave/iOS fallback for keeping the screen awake. Third-party iOS browsers
+	// (Brave, etc.) are WebKit-based but do not expose `navigator.wakeLock`, so the
+	// acquireWakeLock() path above silently no-ops there and the screen locks on
+	// the OS timer. A muted, looping 1px <video> is the only mechanism iOS offers
+	// to defer auto-lock without a tap. Gated to mount ONLY when the native API is
+	// absent, so Safari / installed PWAs keep using the real Wake Lock and never
+	// spin up a redundant decoder.
+	//
+	// The asset (static/keep-awake.mp4) is encoded with NO audio track on purpose:
+	// a video carrying any audio track — even a silent one — claims the iOS audio
+	// session and pauses the user's music/podcast. An audio-free track never does.
+	let keepAliveVideo = $state<HTMLVideoElement | null>(null);
+	const useVideoFallback = browser && !('wakeLock' in navigator);
+
+	// Drive the fallback video off the same `connected` state as the green dot:
+	// play while the SSE stream is live (hold the screen on), pause when it drops
+	// (no live data — let the phone sleep). Re-setting `.muted` in JS is
+	// deliberate: the muted *attribute* does not reliably reflect to the property,
+	// and WebKit only autoplays a genuinely-muted element.
+	$effect(() => {
+		const v = keepAliveVideo;
+		if (!useVideoFallback || !v) return;
+		if (connected) {
+			v.muted = true;
+			void v.play().catch(() => {
+				/* autoplay refused (e.g. Low Power Mode) — nothing to do */
+			});
+		} else {
+			v.pause();
+		}
+	});
+
 	// Background probe to detect a dead token (daemon restarted while we slept).
 	// 403 means our sessionStorage value is stale — clear it so the empty-state
 	// branch flips to "Scan the QR code...". 200 or any error means "token is
@@ -488,6 +520,24 @@
 			<span>you are disconnected</span>
 		</div>
 	{/if}
+
+	{#if useVideoFallback}
+		<!-- Keep-screen-awake fallback for Brave/iOS — see useVideoFallback in the
+		     script. Audio-free 1px loop; play/pause is driven by the $effect. -->
+		<!-- svelte-ignore a11y_media_has_caption -->
+		<video
+			bind:this={keepAliveVideo}
+			class="keep-awake"
+			muted
+			loop
+			playsinline
+			preload="auto"
+			aria-hidden="true"
+			tabindex="-1"
+		>
+			<source src="/keep-awake.mp4" type="video/mp4" />
+		</video>
+	{/if}
 </main>
 
 <style>
@@ -510,6 +560,21 @@
 
 	:global(*) {
 		box-sizing: border-box;
+	}
+
+	/* Fallback keep-awake video: must stay rendered and on-screen (WebKit halts
+	   playback for display:none / fully-transparent elements), but invisible and
+	   inert. 1px + near-zero opacity satisfies "visible" without showing a dot. */
+	.keep-awake {
+		position: fixed;
+		right: 0;
+		bottom: 0;
+		width: 1px;
+		height: 1px;
+		opacity: 0.01;
+		pointer-events: none;
+		border: 0;
+		z-index: -1;
 	}
 
 	main {
