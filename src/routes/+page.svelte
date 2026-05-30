@@ -250,10 +250,10 @@
 		// tiers (which apply additional saturate() filters) would be redundant.
 		if (ticket.event_type === 'Idle') return '';
 		const ageMin = (now - ticket.created_at) / 60_000;
-		if (ageMin >= 16) return 'stale-4';
-		if (ageMin >= 8) return 'stale-3';
-		if (ageMin >= 4) return 'stale-2';
-		if (ageMin >= 2) return 'stale-1';
+		if (ageMin >= 32) return 'stale-4';
+		if (ageMin >= 16) return 'stale-3';
+		if (ageMin >= 8) return 'stale-2';
+		if (ageMin >= 4) return 'stale-1';
 		return '';
 	}
 
@@ -877,11 +877,13 @@
 		--accent: #8a5a28;
 	}
 	/* Idle tickets are seeded by the boot scan (and the SessionStart hook) for
-	   sessions that haven't emitted a real event yet. Fully desaturated as a
-	   glanceable "live but quiet" signal — visually identical to .stale-4 so an
-	   aged Stop and a fresh Idle read as the same low-priority state. */
+	   sessions that haven't emitted a real event yet. Fully desaturated AND
+	   dimmed to 60% opacity, so a never-touched session reads as more recessed
+	   than an aged Stop (which desaturates to the same grey via .stale-4 but
+	   stays at full opacity). */
 	.ticket.type-idle {
 		filter: saturate(0);
+		opacity: 0.6;
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
@@ -894,8 +896,8 @@
 	.ticket.tapped .title {
 		font-weight: 700;
 	}
-	/* Stale tiers for idle Stop/Notification tickets. Step desaturation at 2 / 4 /
-	   8 / 16 minutes; filter applies to the whole ticket including text + border
+	/* Stale tiers for idle Stop/Notification tickets. Step desaturation at 4 / 8 /
+	   16 / 32 minutes; filter applies to the whole ticket including text + border
 	   so the entire palette ages together. Placed before .ticket.working so the
 	   working pastel-green wins if both classes ever co-applied (the helper
 	   skips stale on working/permission tickets, so this is defensive). */
