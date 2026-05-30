@@ -65,6 +65,52 @@ export function pickMostRecentTty(stdout: string): string | null {
 	return rows[0].tty;
 }
 
+// Parses `tmux list-clients -F '#{client_activity}|#{client_tty}|#{window_id}'`
+// (no -t filter, so one row per attached client across ALL sessions) and returns
+// the most-recently-active client whose currently-displayed window is
+// `windowId`. This is what disambiguates a session group: a window shared across
+// grouped sessions is on screen only in the client(s) that have it as their
+// current window, so matching on the displayed window — not the owning session —
+// finds the tab the user is actually looking at. Genuinely mirrored clients
+// (two clients on one session showing the same window) both match and break by
+// activity, like pickMostRecentTty. Returns null when no attached client
+// currently displays the window. Malformed rows (fewer than 3 columns,
+// non-numeric activity, empty tty/window) are silently skipped.
+export function pickTtyForWindow(stdout: string, windowId: string): string | null {
+	if (!windowId) return null;
+	const rows = stdout
+		.split('\n')
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0)
+		.map((line) => {
+			const parts = line.split('|');
+			if (parts.length < 3) return null;
+			const activity = Number(parts[0]);
+			const tty = parts[1].trim();
+			const win = parts[2].trim();
+			if (!Number.isFinite(activity) || !tty || !win) return null;
+			return { activity, tty, win };
+		})
+		.filter((r): r is { activity: number; tty: string; win: string } => r !== null)
+		.filter((r) => r.win === windowId);
+	if (rows.length === 0) return null;
+	rows.sort((a, b) => b.activity - a.activity);
+	return rows[0].tty;
+}
+
+async function clientTtyForWindow(windowId: string): Promise<string | null> {
+	try {
+		const { stdout } = await execFileAsync('tmux', [
+			'list-clients',
+			'-F',
+			'#{client_activity}|#{client_tty}|#{window_id}'
+		]);
+		return pickTtyForWindow(stdout, windowId);
+	} catch {
+		return null;
+	}
+}
+
 async function clientTtyForSession(session: string): Promise<string | null> {
 	try {
 		const { stdout } = await execFileAsync('tmux', [
@@ -194,6 +240,7 @@ export async function focusPane(pane: string): Promise<void> {
 		throw new FocusError(`invalid pane id '${pane}'`);
 	}
 
+	let windowId: string;
 	let session: string;
 	try {
 		const { stdout } = await execFileAsync('tmux', [
@@ -201,9 +248,13 @@ export async function focusPane(pane: string): Promise<void> {
 			'-p',
 			'-t',
 			pane,
-			'#{session_name}'
+			'#{window_id}|#{session_name}'
 		]);
-		session = stdout.trim();
+		// window_id (`@N`) never contains a pipe, so split on the first one;
+		// the remainder is the session name.
+		const sep = stdout.indexOf('|');
+		windowId = sep >= 0 ? stdout.slice(0, sep).trim() : '';
+		session = (sep >= 0 ? stdout.slice(sep + 1) : stdout).trim();
 	} catch {
 		throw new FocusError(`pane '${pane}' no longer exists`);
 	}
@@ -211,6 +262,18 @@ export async function focusPane(pane: string): Promise<void> {
 	if (!session) {
 		throw new FocusError(`pane '${pane}' resolved to empty session`);
 	}
+
+	// Resolve the target Terminal tty BEFORE switching windows. A pane's window
+	// can be shared across a session group — grouped sessions each have their own
+	// client with an independent current window — so the client currently
+	// displaying this window is the tab the user is actually looking at. The
+	// select-window below switches every client on the session to this window,
+	// which would erase that distinction, so we capture it first. Falls back to
+	// the session's most-recently-active client when no attached client currently
+	// has this window on screen (e.g. the user navigated away in every tab).
+	let tty = windowId ? await clientTtyForWindow(windowId) : null;
+	if (!tty) tty = await clientTtyForSession(session);
+	debugFocus(`[focus] pane=${pane} window=${windowId} session=${session} tty=${tty ?? '<none>'}`);
 
 	// select-window switches the session's current window to the one containing
 	// the pane; select-pane then picks the exact pane within that window. Both
@@ -232,9 +295,6 @@ export async function focusPane(pane: string): Promise<void> {
 	} catch {
 		throw new FocusError(`tmux select-window/select-pane failed for '${pane}'`);
 	}
-
-	const tty = await clientTtyForSession(session);
-	debugFocus(`[focus] pane=${pane} session=${session} tty=${tty ?? '<none>'}`);
 
 	// const pre = await captureTerminalState();
 	// console.log(`[focus] state pre=${pre}`);

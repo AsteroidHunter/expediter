@@ -4,6 +4,7 @@ import {
 	parseActivateResult,
 	applyActivateResult,
 	pickMostRecentTty,
+	pickTtyForWindow,
 	focusPane,
 	FocusError,
 	type TabLocation
@@ -204,6 +205,56 @@ test('pickMostRecentTty skips rows whose tty column is empty', () => {
 
 test('pickMostRecentTty returns null when every row is malformed', () => {
 	expect(pickMostRecentTty('garbage\nmore-garbage\nnotanumber tty\n')).toBeNull();
+});
+
+// pickTtyForWindow ──────────────────────────────────────────────────────────
+
+test('pickTtyForWindow returns null on empty stdout', () => {
+	expect(pickTtyForWindow('', '@5')).toBeNull();
+});
+
+test('pickTtyForWindow returns null when windowId is empty', () => {
+	expect(pickTtyForWindow('1700000000|/dev/ttys003|@5\n', '')).toBeNull();
+});
+
+test('pickTtyForWindow returns the tty of the client displaying the window', () => {
+	expect(pickTtyForWindow('1700000000|/dev/ttys003|@5\n', '@5')).toBe('/dev/ttys003');
+});
+
+// Core grouped-session fix: two tabs attached to the same window group, each
+// client on a different current window. The tap must land on the client whose
+// visible window matches the tapped pane's window, not whichever the session
+// resolves to.
+test('pickTtyForWindow ignores clients displaying a different window', () => {
+	const stdout = ['1700000050|/dev/ttys003|@2', '1700000000|/dev/ttys009|@5'].join('\n');
+	expect(pickTtyForWindow(stdout, '@5')).toBe('/dev/ttys009');
+});
+
+test('pickTtyForWindow returns null when no client currently displays the window', () => {
+	const stdout = ['1700000050|/dev/ttys003|@2', '1700000000|/dev/ttys009|@7'].join('\n');
+	expect(pickTtyForWindow(stdout, '@5')).toBeNull();
+});
+
+// Mirrored clients: two clients on one session both showing @5. Tiebreak by
+// activity, matching pickMostRecentTty's behavior.
+test('pickTtyForWindow breaks ties between same-window clients by activity', () => {
+	const stdout = ['1700000000|/dev/ttys003|@5', '1700000050|/dev/ttys009|@5'].join('\n');
+	expect(pickTtyForWindow(stdout, '@5')).toBe('/dev/ttys009');
+});
+
+test('pickTtyForWindow skips rows with fewer than three columns', () => {
+	const stdout = ['1700001000|/dev/ttys999', '1700000050|/dev/ttys009|@5'].join('\n');
+	expect(pickTtyForWindow(stdout, '@5')).toBe('/dev/ttys009');
+});
+
+test('pickTtyForWindow skips rows whose activity column is not numeric', () => {
+	const stdout = ['notanumber|/dev/ttys999|@5', '1700000050|/dev/ttys009|@5'].join('\n');
+	expect(pickTtyForWindow(stdout, '@5')).toBe('/dev/ttys009');
+});
+
+test('pickTtyForWindow skips rows whose tty column is empty', () => {
+	const stdout = ['1700001000||@5', '1700000050|/dev/ttys009|@5'].join('\n');
+	expect(pickTtyForWindow(stdout, '@5')).toBe('/dev/ttys009');
 });
 
 // focusPane validation ─────────────────────────────────────────────────────
