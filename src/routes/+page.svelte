@@ -829,6 +829,17 @@
 		gap: 16px;
 		transition: opacity 1.2s ease;
 	}
+	/* In landscape the dock has width to spare, so the single column reflows
+	   into two. Pure layout swap on .queue — tickets are grid items that flow
+	   row-major (highest-priority top-left), gap carries over, and the flip/fly
+	   transitions, disconnect fade, and per-ticket perforation are all
+	   unaffected. No rotation, so main's safe-area padding stays correct. */
+	@media (orientation: landscape) {
+		.queue {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+		}
+	}
 	/* When the SSE drops, the ticket list slowly fades to fully transparent and
 	   stops accepting taps. The viewport-centered .disconnected-overlay takes
 	   over as the dominant signal. pointer-events: none cascades down to the
@@ -885,7 +896,7 @@
 	   opacity which faded the whole ticket. */
 	.ticket.type-idle {
 		filter: saturate(0);
-		--bg: rgba(255, 241, 201, 0.5);
+		--bg: rgba(255, 241, 201, 0.2);
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
