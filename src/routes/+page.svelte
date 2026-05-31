@@ -771,6 +771,14 @@
 		flex-direction: column;
 		gap: 16px;
 		transition: opacity 1.2s ease;
+		/* Promote the list to its own compositing layer. On iOS WebKit, animating
+		   this container's opacity while its children carry filter() (the stale /
+		   idle saturate() tints) can fail to repaint — the tickets stay painted at
+		   their old opacity even though the value is already 0, so the disconnect
+		   fade visually never happens. Owning a layer makes the opacity composite
+		   over the whole subtree at once, so the fade actually renders. */
+		will-change: opacity;
+		transform: translateZ(0);
 	}
 	/* In landscape the dock has width to spare, so the single column reflows
 	   into two. Pure layout swap on .queue — tickets are grid items that flow
