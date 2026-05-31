@@ -66,7 +66,7 @@ If you're an opinionated tmux user, just run:
 expediter
 ```
 
-A QR code shows up in your terminal. Scan it with your phone's camera, open the link in Safari, and you're connected.
+A QR code shows up in your terminal. Scan it with your phone's camera and open the link in Safari. The first time you connect a phone you install a small certificate so it trusts the connection (see [First connection](#first-connection-trust-the-certificate) below); after that, scanning just works.
 
 However, there's another command if you want to start a fresh Claude Code session along with the Expediter daemon:
 
@@ -84,26 +84,39 @@ claudex uno
 
 That starts the daemon, prints the QR, and walks you through four numbered onboarding steps below it.
 
+### First connection: trust the certificate
+
+Expediter serves over HTTPS by default. A trusted HTTPS connection is what lets your phone install Expediter to its home screen as an app, and it encrypts everything between phone and Mac. In return, HTTPS needs your phone to trust the daemon's certificate -- a one-time setup per phone:
+
+1. Run `expediter`. On first start it creates a local certificate authority at `~/.expediter/tls/ca.crt`.
+2. Get `ca.crt` onto your phone. AirDrop is easiest: right-click it in Finder > Share > AirDrop.
+3. On the phone, open the file and install the profile under Settings > General > VPN & Device Management.
+4. Turn trust on under Settings > General > About > Certificate Trust Settings (enable "Expediter Local CA").
+5. Scan the QR. You're connected, with a real lock icon.
+
+This is once per phone, and the certificate is long-lived. Don't want to bother? Run `expediter --http` for plaintext instead: no certificate, but no home-screen install, and the connection is readable by a sniffer on your network. The choice sticks (saved to `~/.expediter/config.json`); switch back with `expediter --https`.
+
 ### Network requirements
 
 Expediter needs your phone to reach your Mac at its LAN IP. That's fine on home Wi-Fi and most office or coworking networks. Two situations where it won't work:
 
 - **Wi-Fi with client isolation.** Some hotel and airport Wi-Fi, and some company guest networks, block peer-to-peer traffic at the access point. Your phone can't reach your Mac no matter what the QR says.
-- **Captive portals.** HTTP requests get intercepted until you sign in. Complete the sign-on on both devices first, then re-run `expediter`.
+- **Captive portals.** Requests get intercepted until you sign in. Complete the sign-on on both devices first, then re-run `expediter`.
+- **Wi-Fi that blocks mDNS.** The default HTTPS QR points at your Mac's `.local` name (Bonjour/mDNS). The same client isolation and multicast filtering that breaks the case above also stops `.local` from resolving. If the HTTPS QR won't load but both devices are on the same network, fall back to `expediter --http`, which uses the raw IP instead.
 
-If you switch networks (say, coffee shop to home), your Mac gets a new IP and the old QR points at the wrong address. Re-run `expediter` to get a fresh one.
+On HTTPS the QR points at your Mac's stable `.local` name, so switching networks doesn't invalidate it (as long as the new network allows mDNS). On `--http` the QR encodes the raw IP, so a new network means a new address -- re-run `expediter` for a fresh QR.
 
 ## Security & access control
 
-Expediter trusts your local network, like Plex, Sonos, or a Philips Hue bridge. Anyone on the same Wi-Fi can reach the daemon's HTTP port; a per-session token gate stops them from doing anything once they reach it.
+Expediter trusts your local network, like Plex, Sonos, or a Philips Hue bridge. Anyone on the same Wi-Fi can reach the daemon's port; a per-session token gate stops them from doing anything once they reach it.
 
-The token is 16 cryptographically random bytes, base64url-encoded (~22 characters), held only in the daemon's process memory -- there is no token file on disk. The QR you scan encodes the token in the URL fragment (`http://<host>:5179/#<token>`); browsers never transmit URL fragments to servers, so the token stays out of request logs, server access logs, and proxy logs. Your phone's inline page script reads the fragment, stashes it in `sessionStorage`, and immediately clears the address bar.
+The token is 16 cryptographically random bytes, base64url-encoded (~22 characters), held only in the daemon's process memory -- there is no token file on disk. The QR you scan encodes the token in the URL fragment (`https://<host>.local:5179/#<token>`); browsers never transmit URL fragments to servers, so the token stays out of request logs, server access logs, and proxy logs. Your phone's inline page script reads the fragment, stashes it in `sessionStorage`, and immediately clears the address bar.
 
 Every time you stop and restart the daemon (Mac reboot, manual stop+start, crash + relaunch, `expediter` re-invocation), a fresh token is minted in the new process. The old QR stops working; your phone will prompt you to re-scan. There is no rotation ceremony beyond "restart the daemon."
 
 **What this stops:** uninvited devices on the same Wi-Fi (no token, can't reach `/api/*`), borrowed-phone access creep (the token dies when you stop the daemon), and post-session token replay (the new daemon process knows nothing about the old token).
 
-**What this does not stop:** packet sniffing on the same network. Expediter sends ticket data over plain HTTP, so a packet sniffer on your Wi-Fi could read it. With a captured token they could also briefly pop your Terminal window forward, until the daemon restarts and mints a new one. Stick to trusted Wi-Fi; full transport encryption is on the roadmap.
+**Transport security.** On the default HTTPS transport, traffic between phone and Mac is encrypted, so a packet sniffer on your Wi-Fi sees only ciphertext. If you opt into `--http`, ticket data and the token travel in the clear: a sniffer on the same network could read them and, with a captured token, briefly pop your Terminal window forward (until the daemon restarts and mints a new one). On `--http`, stick to trusted Wi-Fi.
 
 The daemon also trusts processes on your own Mac -- anything running as your user account can POST hook events without a token (via `127.0.0.1`) and can fetch the current token from a loopback-only `/api/token` endpoint. This is the same trust boundary the operating system already enforces around your home directory, Anthropic API keys, and SSH keys; the token gate's job is to extend that trust selectively to your phone.
 
