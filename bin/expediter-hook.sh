@@ -15,14 +15,6 @@ set -u
 EVENT="${1:-}"
 PORT="${EXPEDITER_PORT:-5179}"
 
-# Transport must match the running daemon (one listener: HTTPS or HTTP). The
-# launcher persists the choice in config.json; default to HTTPS unless it says
-# "http". grep (not python) keeps this fast since it runs on every hook event.
-SCHEME=https
-if grep -q '"transport"[[:space:]]*:[[:space:]]*"http"' "$HOME/.expediter/config.json" 2>/dev/null; then
-	SCHEME=http
-fi
-
 # Standing assumption: Claude Code always runs inside tmux. If TMUX_PANE is
 # empty (Claude Code launched outside tmux despite the hard requirement), we
 # would produce an unfocusable ticket — bail silently instead.
@@ -60,13 +52,8 @@ if [ -n "$PAYLOAD" ]; then
 	# exits non-zero), so a `|| echo 000` fallback would concatenate "000000".
 	# Just let the assignment swallow curl's exit status — STATUS will be the
 	# "000" curl emits if the daemon is unreachable.
-	# -k on HTTPS: a loopback connection to our own self-signed cert can't be
-	# MITM'd, so skipping verification is safe and avoids needing the CA in a
-	# local trust store just for this POST.
-	INSECURE=""
-	if [ "$SCHEME" = "https" ]; then INSECURE="-k"; fi
-	STATUS=$(curl -s $INSECURE -o /dev/null -m 2 -w '%{http_code}' \
-		-X POST "${SCHEME}://localhost:${PORT}/api/hooks/event" \
+	STATUS=$(curl -s -o /dev/null -m 2 -w '%{http_code}' \
+		-X POST "http://localhost:${PORT}/api/hooks/event" \
 		-H 'Content-Type: application/json' \
 		-d "$PAYLOAD" 2>/dev/null)
 	if [ -n "${DEBUG_HOOK:-}" ] && [[ "$STATUS" != 2* ]]; then
