@@ -514,8 +514,16 @@
 
 	main {
 		min-height: 100vh;
-		padding: calc(env(safe-area-inset-top, 0) + 14px) 14px
-			calc(env(safe-area-inset-bottom, 0) + 14px) 14px;
+		/* All four insets, not just top/bottom: in landscape the device notch /
+		   camera moves to a side, so the left/right safe-area insets become
+		   non-zero and must pad the dock clear of it. The OS reports the exact
+		   inset per device and orientation (viewport-fit=cover is set in
+		   app.html), so this is notch-size-agnostic — nothing is hardcoded per
+		   phone. In portrait the left/right insets are ~0, so it stays at 14px. */
+		padding: calc(env(safe-area-inset-top, 0) + 14px)
+			calc(env(safe-area-inset-right, 0) + 14px)
+			calc(env(safe-area-inset-bottom, 0) + 14px)
+			calc(env(safe-area-inset-left, 0) + 14px);
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
@@ -990,10 +998,14 @@
 	.perforation::before {
 		left: calc(-1 * var(--notch-offset) - 1px);
 		border-radius: 0 var(--notch-size) var(--notch-size) 0;
+		border: 1px solid var(--border);
+		border-left: 0;
 	}
 	.perforation::after {
 		right: calc(-1 * var(--notch-offset) - 1px);
 		border-radius: var(--notch-size) 0 0 var(--notch-size);
+		border: 1px solid var(--border);
+		border-right: 0;
 	}
 
 	.body {
