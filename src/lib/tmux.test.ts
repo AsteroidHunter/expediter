@@ -34,26 +34,29 @@ test('raiseTerminalScript with tty and no cache emits enumeration branch only', 
 	expect(script).toContain('if not wasFront then delay 0.2');
 });
 
-test('raiseTerminalScript with cache resolves id to a bound window before setting frontmost', () => {
+test('raiseTerminalScript with cache resolves the window directly by id and binds it', () => {
 	const cached: TabLocation = { windowId: 128573, tabIndex: 2 };
 	const script = raiseTerminalScript('/dev/ttys003', cached);
-	// Cached branch looks up the window by id, binds it to `w`, then operates
-	// on `w`. The bind adds an Apple Event roundtrip that lets Terminal's
-	// activation transition settle — without it, `set frontmost` issued
-	// immediately after `activate` is silently dropped from background.
-	expect(script).toContain('if id of window wi is 128573 then');
-	expect(script).toContain('set w to window wi');
+	// Cached branch resolves the window in ONE Apple Event via `window id <id>`
+	// and binds it to `w`, instead of walking every window comparing ids — that
+	// walk made every warm tap O(window count × z-order depth) in Apple Events.
+	// It still acts on the bound `w`: `set frontmost` against the bare
+	// `window id <id>` specifier is silently dropped mid-activation, so the
+	// bound form is what survives.
+	expect(script).toContain('set w to window id 128573');
 	expect(script).toContain('if tty of tab 2 of w is targetTTY then');
 	expect(script).toContain('set selected of tab 2 of w to true');
 	expect(script).toContain('set frontmost of w to true');
 	expect(script).toContain('return "hit"');
+	// The cached branch must NOT walk the window list comparing ids anymore.
+	expect(script).not.toContain('if id of window wi is 128573 then');
 	// Activation-transition guard must apply to cached taps too — the
 	// cached branch is what runs on the second+ tap to a tty, and a
 	// background-to-foreground transition still races without the delay.
 	expect(script).toContain('set wasFront to frontmost');
 	expect(script).toContain('if not wasFront then delay 0.2');
-	// Must NOT issue `set frontmost` against the unbound window expression
-	// from the cached branch — the bound form is what survives activation.
+	// Must NOT issue `set frontmost` against the unbound window expression —
+	// the bound `w` is what survives activation.
 	expect(script).not.toContain('set frontmost of window id 128573 to true');
 	expect(script).not.toContain('set frontmost of window wi to true');
 	// Enumeration fallback must still be present so a stale cache misses gracefully.

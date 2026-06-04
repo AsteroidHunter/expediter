@@ -192,23 +192,26 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 	// already being frontmost so already-foregrounded taps stay fast
 	// (stress-tested 10/10 with the gated delay).
 	const escaped = tty.replace(/"/g, '\\"');
+	// Warm (cache-hit) branch: resolve the window in ONE Apple Event via
+	// `window id <id>` instead of walking `count of windows` and reading
+	// `id of window wi` one at a time. That walk cost an Apple Event per window
+	// (~30ms each), so every warm tap was O(window count × z-order depth) — a tab
+	// buried behind a dozen Terminal windows took hundreds of ms even on a cache
+	// hit. We still bind the resolved window to `w` and act on the bound
+	// reference: `set frontmost` against the bare `window id <id>` specifier is
+	// silently dropped mid-activation, whereas `w` survives. A stale id (window
+	// closed / tab moved / tty no longer matches) throws or falls out of the try
+	// and drops through to the full enumeration below, which refreshes the cache.
 	const cachedBranch = cached
 		? `
-	repeat with wi from 1 to (count of windows)
-		try
-			if id of window wi is ${cached.windowId} then
-				set w to window wi
-				try
-					if tty of tab ${cached.tabIndex} of w is targetTTY then
-						set selected of tab ${cached.tabIndex} of w to true
-						set frontmost of w to true
-						return "hit"
-					end if
-				end try
-				exit repeat
-			end if
-		end try
-	end repeat`
+	try
+		set w to window id ${cached.windowId}
+		if tty of tab ${cached.tabIndex} of w is targetTTY then
+			set selected of tab ${cached.tabIndex} of w to true
+			set frontmost of w to true
+			return "hit"
+		end if
+	end try`
 		: '';
 	return `
 tell application "Terminal"
