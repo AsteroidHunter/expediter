@@ -213,6 +213,11 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 		end if
 	end try`
 		: '';
+	// Cold/enumeration branch (no cache, or a cache miss): scan each window with a
+	// single `tty of tabs of window wi` read — one Apple Event per window instead
+	// of one per tab — and match the tty in-memory, binding `w` only on the matched
+	// window so `set frontmost` still runs against a bound reference. The per-window
+	// `try` skips windows that don't expose tabs (Settings, etc.), as before.
 	return `
 tell application "Terminal"
 	set wasFront to frontmost
@@ -221,16 +226,15 @@ tell application "Terminal"
 	set targetTTY to "${escaped}"${cachedBranch}
 	repeat with wi from 1 to (count of windows)
 		try
-			set w to window wi
-			set wid to id of w
-			repeat with ti from 1 to (count of tabs of w)
-				try
-					if tty of tab ti of w is targetTTY then
-						set selected of tab ti of w to true
-						set frontmost of w to true
-						return "miss:" & wid & ":" & ti
-					end if
-				end try
+			set theTtys to tty of tabs of window wi
+			repeat with ti from 1 to (count of theTtys)
+				if item ti of theTtys is targetTTY then
+					set w to window wi
+					set wid to id of w
+					set selected of tab ti of w to true
+					set frontmost of w to true
+					return "miss:" & wid & ":" & ti
+				end if
 			end repeat
 		end try
 	end repeat
