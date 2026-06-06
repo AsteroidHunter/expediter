@@ -47,6 +47,15 @@ if (useHttps) {
 server.listen(port, host, () => {
 	const scheme = useHttps ? 'https' : 'http';
 	console.log(`Listening on ${scheme}://${host}:${port}`);
+	// DEBUG_EXPEDITER (not EXPEDITER_*, which build/env.js would reject): confirm
+	// the socket actually bound where we think, and on which address family. A
+	// phone reaching this Mac over IPv6-only Wi-Fi won't hit an IPv4 0.0.0.0 bind.
+	if (process.env.DEBUG_EXPEDITER) {
+		const addr = server.address();
+		console.error(
+			`[expediter:debug] bound socket: ${JSON.stringify(addr)} useHttps=${useHttps}`
+		);
+	}
 });
 
 // Graceful shutdown mirroring adapter-node's build/index.js. closeIdleConnections

@@ -36,6 +36,19 @@ const HTTPS_FLAG = process.argv.includes('--https');
 const CONFIG_DIR = path.join(os.homedir(), '.expediter');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
+// Opt-in diagnostics for "phone can't connect" debugging. Gated on
+// DEBUG_EXPEDITER (NOT an EXPEDITER_* name — adapter-node's build/env.js throws
+// on any unknown EXPEDITER_* var, which would crash the daemon). Goes to stderr
+// so it never corrupts the QR/URL on stdout.
+const DEBUG = !!process.env.DEBUG_EXPEDITER;
+function dbg(...args) {
+	if (DEBUG) console.error('[expediter:debug]', ...args);
+}
+// Strip the token fragment so debug output is safe to paste into a chat.
+function redactUrl(u) {
+	return u ? u.replace(/#.*/, '#<token>') : u;
+}
+
 async function readConfig() {
 	try {
 		const parsed = JSON.parse(await fs.readFile(CONFIG_FILE, 'utf8'));
@@ -172,8 +185,16 @@ function pickTetherAddress() {
 			candidates.push(a.address);
 		}
 	}
-	if (candidates.length === 0) return null;
+	if (candidates.length === 0) {
+		dbg('pickTetherAddress: no external IPv4 interfaces found');
+		return null;
+	}
 	candidates.sort((a, b) => score(a) - score(b));
+	dbg(
+		'pickTetherAddress candidates (lower score wins):',
+		candidates.map((a) => `${a}=${score(a)}`).join(' ')
+	);
+	dbg('pickTetherAddress picked:', candidates[0]);
 	return candidates[0];
 }
 
@@ -236,13 +257,24 @@ async function printAccess() {
 
 	// HTTPS → https://<host>.local (the cert SAN, stable across DHCP); HTTP → the
 	// raw LAN IP. accessUrl returns null only for HTTP with no LAN interface.
+	const dotLocalHost = transport === 'https' ? localDotLocalName() : '';
+	const lanIp = transport === 'http' ? pickTetherAddress() : null;
+	dbg(
+		`building access URL: transport=${transport} dotLocalHost=${dotLocalHost || '<n/a>'} lanIp=${lanIp || '<n/a>'} port=${PORT}`
+	);
+	if (transport === 'https') {
+		dbg(
+			`the phone must resolve "${dotLocalHost}" via mDNS/Bonjour AND trust the CA at ~/.expediter/tls/ca.crt`
+		);
+	}
 	const url = accessUrl({
 		transport,
-		dotLocalHost: transport === 'https' ? localDotLocalName() : '',
-		lanIp: transport === 'http' ? pickTetherAddress() : null,
+		dotLocalHost,
+		lanIp,
 		port: PORT,
 		token
 	});
+	dbg('advertised URL (token redacted):', redactUrl(url) ?? '<none>');
 	if (!url) {
 		console.log('');
 		console.log(`Daemon running at http://localhost:${PORT}/`);
@@ -280,10 +312,15 @@ async function printAccess() {
 }
 
 // --- main ---
+dbg(`transport=${transport} port=${PORT} (loopback probe ${SCHEME}://127.0.0.1:${PORT}/)`);
 if (await isDaemonUp()) {
+	dbg(
+		'daemon already running — reusing it. Gate debug logging only appears if THAT process was started with DEBUG_EXPEDITER. Stop it (Ctrl-C in its terminal) and re-run to capture gate logs.'
+	);
 	await printAccess();
 	process.exit(0);
 }
+dbg('no daemon detected; starting a fresh one with current env');
 
 // Start the daemon in the foreground. Inherit stdio so the user sees its logs
 // and Ctrl-C terminates it cleanly. bin/expediter-server.mjs is our TLS-capable
