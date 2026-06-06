@@ -24,6 +24,19 @@ const TITLE_VALUE = TITLE_IDX >= 0 ? process.argv[TITLE_IDX + 1] : null;
 const STEPS_IDX = process.argv.indexOf('--steps');
 const STEPS_RAW = STEPS_IDX !== -1 ? process.argv[STEPS_IDX + 1] : undefined;
 
+// Opt-in diagnostics for "phone can't connect" debugging. Gated on
+// DEBUG_EXPEDITER (NOT an EXPEDITER_* name — adapter-node's build/env.js throws
+// on any unknown EXPEDITER_* var, which would crash the daemon). Goes to stderr
+// so it never corrupts the QR/URL on stdout.
+const DEBUG = !!process.env.DEBUG_EXPEDITER;
+function dbg(...args) {
+	if (DEBUG) console.error('[expediter:debug]', ...args);
+}
+// Strip the token fragment so debug output is safe to paste into a chat.
+function redactUrl(u) {
+	return u ? u.replace(/#.*/, '#<token>') : u;
+}
+
 // `expediter update [--dev|--no-pull|...]` refreshes this install by running
 // update.sh in EXPEDITER_HOME and passing through any extra flags. Handled
 // before anything else so it never starts the daemon. update.sh pulls the
@@ -125,18 +138,38 @@ function score(addr) {
 	return 4;
 }
 
+// VPN / tunnel interfaces carry addresses a LAN phone can never route to: a Mac
+// on a WireGuard/Tailscale/corporate VPN gets a 10.x tunnel address that scores
+// as "standard LAN" and wins over the real Wi-Fi interface, so the QR advertises
+// a dead URL and the phone loads a blank page. Skip them by interface name —
+// utun*/ipsec*/ppp*/tun*/tap*/wg* — so only physically reachable addresses
+// remain.
+const TUNNEL_IFACE = /^(utun|ipsec|ppp|tun|tap|wg)\d*$/i;
+
 function pickTetherAddress() {
 	const ifaces = os.networkInterfaces();
 	const candidates = [];
-	for (const addrs of Object.values(ifaces)) {
+	for (const [name, addrs] of Object.entries(ifaces)) {
 		if (!addrs) continue;
+		if (TUNNEL_IFACE.test(name)) {
+			dbg(`pickTetherAddress: skipping tunnel interface ${name}`);
+			continue;
+		}
 		for (const a of addrs) {
 			if (a.family !== 'IPv4' || a.internal) continue;
 			candidates.push(a.address);
 		}
 	}
-	if (candidates.length === 0) return null;
+	if (candidates.length === 0) {
+		dbg('pickTetherAddress: no external IPv4 interfaces found');
+		return null;
+	}
 	candidates.sort((a, b) => score(a) - score(b));
+	dbg(
+		'pickTetherAddress candidates (lower score wins):',
+		candidates.map((a) => `${a}=${score(a)}`).join(' ')
+	);
+	dbg('pickTetherAddress picked:', candidates[0]);
 	return candidates[0];
 }
 
@@ -202,6 +235,7 @@ async function printAccess() {
 	}
 
 	const url = `http://${addr}:${PORT}/#${token}`;
+	dbg('advertised URL (token redacted):', redactUrl(url));
 	console.log('');
 	console.log('  Scan the QR with your phone:');
 	console.log('');
@@ -223,10 +257,15 @@ async function printAccess() {
 }
 
 // --- main ---
+dbg(`port=${PORT} (loopback probe http://127.0.0.1:${PORT}/)`);
 if (await isDaemonUp()) {
+	dbg(
+		'daemon already running — reusing it. Gate debug logging only appears if THAT process was started with DEBUG_EXPEDITER. Stop it (Ctrl-C in its terminal) and re-run to capture gate logs.'
+	);
 	await printAccess();
 	process.exit(0);
 }
+dbg('no daemon detected; starting a fresh one with current env');
 
 // Start the SvelteKit/adapter-node server in the foreground. Inherit stdio so
 // the user sees its logs and Ctrl-C terminates it cleanly.

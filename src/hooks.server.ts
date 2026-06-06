@@ -35,6 +35,17 @@ for (const key of DANGEROUS_ADAPTER_ENV) {
 
 const PORT = (process.env.EXPEDITER_PORT ?? '5179').trim();
 
+// Opt-in per-request gate tracing for "phone can't connect" debugging. Gated on
+// DEBUG_EXPEDITER — deliberately NOT an EXPEDITER_* name, since adapter-node's
+// build/env.js throws at import on any unknown EXPEDITER_* var and would crash
+// the daemon. Logs to stderr (inherited by the launcher terminal). When this is
+// silent for a phone request, the request never reached the daemon at all (DNS/
+// mDNS, firewall, wrong IP, or wrong network) — look at the launcher's URL log.
+const DEBUG = !!process.env.DEBUG_EXPEDITER;
+function dbg(...args: unknown[]) {
+	if (DEBUG) console.error('[gate:debug]', ...args);
+}
+
 type IpRule =
 	| { kind: 'exact'; value: string }
 	| { kind: 'cidr'; base: string; bits: number };
@@ -172,6 +183,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 			? `${pathname}?t=<redacted>`
 			: pathname;
 
+	// One line per inbound request, before any decision. This is the line that
+	// tells you a phone request actually arrived — and exactly which Host header
+	// and peer IP it presented, the two values the gate decides on.
+	dbg(
+		`IN ${event.request.method} path=${loggedPath} host=${host ?? '<none>'} ip=${ip ?? '<none>'} ` +
+			`hostAllowed=${isAllowedHost(host)} ipAllowed=${isAllowedIp(ip)} hasHeaderToken=${!!event.request.headers.get('x-expediter-token')}`
+	);
+
 	if (!isAllowedHost(host)) {
 		return reject('host-rejected', { host, ip, path: loggedPath });
 	}
@@ -180,12 +199,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// sent to the server, so the page must load to expose the fragment-grab
 	// snippet that stashes the token in sessionStorage.
 	if (!pathname.startsWith('/api/')) {
+		dbg(`ACCEPT path=${loggedPath} reason=public-asset`);
 		return frameDeny(await resolve(event));
 	}
 
 	// /api/token defers to its route handler, which does its own loopback check
 	// (the caller cannot provide a token before they have one).
 	if (pathname === '/api/token') {
+		dbg(`ACCEPT path=${loggedPath} reason=token-route (route does its own loopback check)`);
 		return frameDeny(await resolve(event));
 	}
 
@@ -195,6 +216,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// the user; the token gate's job is to extend trust selectively to the
 	// phone, not to defend against the user's own local processes.
 	if (pathname === '/api/hooks/event' && isAllowedIp(ip)) {
+		dbg(`ACCEPT path=${loggedPath} reason=loopback-hook`);
 		return frameDeny(await resolve(event));
 	}
 
@@ -207,5 +229,6 @@ export const handle: Handle = async ({ event, resolve }) => {
 		return reject('token-mismatch', { host, ip, path: loggedPath });
 	}
 
+	dbg(`ACCEPT path=${loggedPath} reason=token-ok`);
 	return frameDeny(await resolve(event));
 };
