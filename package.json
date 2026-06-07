@@ -36,6 +36,8 @@
 		"vite": "^8.0.7"
 	},
 	"dependencies": {
+		"livekit-client": "2.19.1",
+		"livekit-server-sdk": "2.15.4",
 		"qrcode-terminal": "^0.12.0"
 	}
 }

@@ -4,6 +4,7 @@
 	import { flip } from 'svelte/animate';
 	import { browser } from '$app/environment';
 	import { getClientToken, clearClientToken } from '$lib/clientToken';
+	import type { VoiceController, VoiceState } from '$lib/voice';
 
 	type EventType = 'Stop' | 'PermissionRequest' | 'Notification' | 'Idle';
 	// `title` may be empty string before the async topic refresh has run;
@@ -70,6 +71,14 @@
 	// Reactive: cleared when /api/ping returns 403 (token died, daemon restarted).
 	// Initial value is read from sessionStorage on the browser; null on the server.
 	let clientToken = $state<string | null>(browser ? getClientToken() : null);
+
+	// Voice: tap-to-talk to the oppie orchestrator over a LiveKit room. 'idle' →
+	// not connected; the rest mirror the controller's reported state. The
+	// controller (and livekit-client) is loaded with a dynamic import() inside
+	// toggleVoice so it never enters SSR or the entry bundle.
+	let voiceState = $state<'idle' | VoiceState>('idle');
+	let voiceDetail = $state<string>('');
+	let voiceCtl: VoiceController | null = null;
 
 	const mockLoaders = import.meta.glob<{ getMockTickets: () => Ticket[] }>(
 		'../../internal/fixtures/mocktickets.ts'
@@ -394,6 +403,46 @@
 		}, 600);
 	}
 
+	async function stopVoice(): Promise<void> {
+		const ctl = voiceCtl;
+		voiceCtl = null;
+		voiceState = 'idle';
+		voiceDetail = '';
+		if (ctl) {
+			try {
+				await ctl.hangUp();
+			} catch {
+				/* already torn down */
+			}
+		}
+	}
+
+	async function toggleVoice(): Promise<void> {
+		if (!clientToken) return;
+		// Live or mid-connect → hang up. Otherwise start a fresh session.
+		if (voiceState === 'live' || voiceState === 'connecting') {
+			await stopVoice();
+			return;
+		}
+		voiceDetail = '';
+		voiceState = 'connecting';
+		try {
+			const { startVoice } = await import('$lib/voice');
+			voiceCtl = await startVoice({
+				clientToken,
+				onState: (s, d) => {
+					voiceState = s;
+					if (d) voiceDetail = d;
+				}
+			});
+		} catch {
+			// startVoice already reported the specific reason via onState (which set a
+			// detail message); ensure the button lands in the error state regardless.
+			voiceCtl = null;
+			voiceState = 'error';
+		}
+	}
+
 	onMount(async () => {
 		if (browser && new URLSearchParams(window.location.search).has('mock')) {
 			const loader = Object.values(mockLoaders)[0];
@@ -416,6 +465,10 @@
 	});
 
 	onDestroy(() => {
+		if (voiceCtl) {
+			void voiceCtl.hangUp().catch(() => {});
+			voiceCtl = null;
+		}
 		if (eventSource) {
 			try {
 				eventSource.close();
@@ -460,6 +513,21 @@
 			<span class="brand-version">(v0.72)</span>
 		</div>
 		<div class="header-right">
+			{#if clientToken}
+				<button
+					type="button"
+					class="voice"
+					class:connecting={voiceState === 'connecting'}
+					class:live={voiceState === 'live'}
+					class:error={voiceState === 'error'}
+					aria-label="Talk to orchestrator"
+					aria-pressed={voiceState === 'live'}
+					title={voiceDetail || 'Talk to orchestrator'}
+					onclick={toggleVoice}
+				>
+					🎙
+				</button>
+			{/if}
 			{#if clientToken}
 				<button
 					type="button"
@@ -744,6 +812,51 @@
 	}
 	.gear.open {
 		transform: rotate(45deg);
+	}
+
+	/* Tap-to-talk mic. Idle = desaturated/quiet; connecting pulses; live goes
+	   green (matches the .conn LED); error goes the PermissionRequest red. */
+	.voice {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: 0;
+		padding: 4px;
+		margin: -4px;
+		font-size: 18px;
+		line-height: 1;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		filter: grayscale(1);
+		opacity: 0.5;
+		transition:
+			filter 150ms ease,
+			opacity 150ms ease,
+			transform 200ms ease;
+	}
+	.voice.connecting {
+		filter: none;
+		opacity: 1;
+		animation: voice-pulse 1s ease-in-out infinite;
+	}
+	.voice.live {
+		filter: none;
+		opacity: 1;
+		transform: scale(1.1);
+	}
+	.voice.error {
+		filter: none;
+		opacity: 1;
+	}
+	@keyframes voice-pulse {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.35;
+		}
 	}
 
 	/* Full-viewport blurred backdrop. Dims and blurs the dock behind the panel
