@@ -31,16 +31,26 @@
 	// page rather than vanishing to Detached.
 	const PAGES = ['attached', 'detached'] as const;
 	let pageIndex = $state(0);
+	// Slide direction for the page transition: +1 moving toward Detached, -1 back
+	// toward Attached. Drives the horizontal fly so a page switch reads as a slide
+	// rather than the cards flashing in place.
+	let pageDir = $state(1);
 	const page = $derived(PAGES[pageIndex]);
 	const attachedTickets = $derived(tickets.filter((t) => t.attached !== false));
 	const detachedTickets = $derived(tickets.filter((t) => t.attached === false));
 	const visibleTickets = $derived(pageIndex === 0 ? attachedTickets : detachedTickets);
 
 	function prevPage(): void {
-		if (pageIndex > 0) pageIndex -= 1;
+		if (pageIndex > 0) {
+			pageDir = -1;
+			pageIndex -= 1;
+		}
 	}
 	function nextPage(): void {
-		if (pageIndex < PAGES.length - 1) pageIndex += 1;
+		if (pageIndex < PAGES.length - 1) {
+			pageDir = 1;
+			pageIndex += 1;
+		}
 	}
 	let connected = $state(false);
 	// Sticky: flips true on the first successful onopen and never resets. Without
@@ -246,8 +256,30 @@
 		}
 	}
 
+	// Detached taps are gated so one tap spawns exactly one `tmux attach` window.
+	// A session is latched "attaching" from the tap until a fallback timeout (the
+	// card normally migrates to the Attached page within ~1-2s as the client-
+	// attached hook fires); re-taps while latched are ignored. Attached (focus)
+	// taps aren't gated — re-raising a window is harmless and idempotent.
+	let attaching = $state<Record<string, boolean>>({});
+
 	function onTicketTap(ticket: Ticket): void {
-		void tapSession(ticket, ticket.attached === false ? '/api/attach' : '/api/focus');
+		if (ticket.attached === false) {
+			if (attaching[ticket.session_id]) return; // already spawning — ignore the re-tap
+			const id = ticket.session_id;
+			attaching = { ...attaching, [id]: true };
+			void tapSession(ticket, '/api/attach');
+			// Fallback unlatch in case the attach fails and the card never migrates,
+			// so a later retry isn't permanently swallowed.
+			setTimeout(() => {
+				if (!attaching[id]) return;
+				const next = { ...attaching };
+				delete next[id];
+				attaching = next;
+			}, 3000);
+			return;
+		}
+		void tapSession(ticket, '/api/focus');
 	}
 
 	function projectLabel(cwd: string): string {
@@ -507,50 +539,54 @@
 			<span class="empty-label">Scan the QR code in your terminal to connect</span>
 		</div>
 	{:else}
-		<ul class="queue" class:disconnected={isDisconnected}>
-			{#each visibleTickets as ticket (ticket.session_id)}
-				<li
-					class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
-					class:pressing={focusing === ticket.session_id}
-					class:working={ticket.working}
-					class:tapped={lastTapped === ticket.session_id}
-					class:detached={ticket.attached === false}
-					animate:flip={{ duration: 220 }}
-					in:fly={{ y: -8, duration: 180 }}
-					out:fly={{ y: 8, duration: 140 }}
-				>
-					<button type="button" onclick={() => onTicketTap(ticket)}>
-						{#if ticket.working}
-							<div class="shimmer" aria-hidden="true">
-								<div class="shimmer-stripe"></div>
-							</div>
-						{/if}
-						<div class="stub">
-							<span class="project">{projectLabel(ticket.cwd)}</span>
-							<span class="type">{ticket.working ? 'COOKING' : typeLabel(ticket.event_type)}</span>
-							<span class="age">{formatAge(ticket.created_at, now)}</span>
-						</div>
-						<div class="perforation" aria-hidden="true"></div>
-						<div class="body">
-							{#if ticket.title}
-								<div class="title">{ticket.title}</div>
-							{/if}
-						</div>
-					</button>
-				</li>
-			{/each}
-		</ul>
+		{#key pageIndex}
+			<div class="page" in:fly={{ x: pageDir * 44, duration: 200 }}>
+				<ul class="queue" class:disconnected={isDisconnected}>
+					{#each visibleTickets as ticket (ticket.session_id)}
+						<li
+							class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
+							class:pressing={focusing === ticket.session_id || attaching[ticket.session_id]}
+							class:working={ticket.working}
+							class:tapped={lastTapped === ticket.session_id}
+							class:detached={ticket.attached === false}
+							animate:flip={{ duration: 220 }}
+							in:fly|local={{ y: -8, duration: 180 }}
+							out:fly|local={{ y: 8, duration: 140 }}
+						>
+							<button type="button" onclick={() => onTicketTap(ticket)}>
+								{#if ticket.working}
+									<div class="shimmer" aria-hidden="true">
+										<div class="shimmer-stripe"></div>
+									</div>
+								{/if}
+								<div class="stub">
+									<span class="project">{projectLabel(ticket.cwd)}</span>
+									<span class="type">{ticket.working ? 'COOKING' : typeLabel(ticket.event_type)}</span>
+									<span class="age">{formatAge(ticket.created_at, now)}</span>
+								</div>
+								<div class="perforation" aria-hidden="true"></div>
+								<div class="body">
+									{#if ticket.title}
+										<div class="title">{ticket.title}</div>
+									{/if}
+								</div>
+							</button>
+						</li>
+					{/each}
+				</ul>
 
-		{#if visibleTickets.length === 0 && !isDisconnected}
-			<div class="empty page-empty" aria-live="polite">
-				{#if page === 'attached'}
-					<span class="dot"></span>
-					<span class="empty-label">You have zero tickets!</span>
-				{:else}
-					<span class="empty-label">No detached sessions</span>
+				{#if visibleTickets.length === 0 && !isDisconnected}
+					<div class="empty page-empty" aria-live="polite">
+						{#if page === 'attached'}
+							<span class="dot"></span>
+							<span class="empty-label">You have zero tickets!</span>
+						{:else}
+							<span class="empty-label">No detached sessions</span>
+						{/if}
+					</div>
 				{/if}
 			</div>
-		{/if}
+		{/key}
 
 		{#if !isDisconnected}
 			<nav class="pager" aria-label="Pages">
@@ -888,6 +924,18 @@
 		text-transform: uppercase;
 		text-align: center;
 		padding: 0 24px;
+	}
+
+	/* Page wrapper for the Attached/Detached slide transition. Fills the space
+	   between the header and the fixed pager (flex: 1) and stacks its queue +
+	   empty state in a column, so the empty state still centers and the whole
+	   page can fly horizontally as one unit on a page switch. */
+	.page {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
 	}
 
 	.queue {
