@@ -1231,7 +1231,7 @@
 		z-index: 15;
 		display: flex;
 		align-items: center;
-		justify-content: center;
+		justify-content: space-between;
 		gap: 22px;
 		padding: 10px calc(env(safe-area-inset-right, 0) + 14px)
 			calc(env(safe-area-inset-bottom, 0) + 10px)
@@ -1242,7 +1242,7 @@
 		border-top: 1px solid #ead68f;
 	}
 	.pager-title {
-		min-width: 104px;
+		flex: 1;
 		text-align: center;
 		font-size: 13px;
 		font-weight: 600;
