@@ -10,6 +10,7 @@ import {
 	upsertPlaceholder,
 	runBootScan,
 	reconcile,
+	startReconcilePoll,
 	type PaneRow,
 	type BootScanDeps
 } from './bootScan';
@@ -413,4 +414,39 @@ test('reconcile light mode flips flags without seeding or GC', async () => {
 	expect(list().find((t) => t.session_id === 'present-sess')?.attached).toBe(false); // flipped
 	expect(list().find((t) => t.session_id === 'absent-sess')).toBeDefined(); // NOT GC'd
 	expect(list().find((t) => t.tmux_pane === '%92')).toBeUndefined(); // NOT seeded
+});
+
+// ─── slow poll ───────────────────────────────────────────────────────────────
+
+// Polls a predicate until true or timeout, so the interval-driven poll test
+// doesn't couple to exact setInterval timing.
+async function waitFor(pred: () => boolean, timeoutMs = 500): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (pred()) return;
+		await new Promise((r) => setTimeout(r, 5));
+	}
+	if (!pred()) throw new Error('waitFor timed out');
+}
+
+test('startReconcilePoll reflects a simulated detach after a tick', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('poll-sess'));
+
+	let attached = true;
+	const deps: BootScanDeps = {
+		listPanes: async () => [pane('%55', 5500, '/a', attached)],
+		readSessionMetas: async () => [{ pid: 5501, sessionId: 'poll-sess', name: 'poll', cwd: '/a' }],
+		parentPid: async (pid) => (pid === 5501 ? 5500 : null)
+	};
+
+	await runBootScan(deps); // initial full reconcile → attached
+	expect(list().find((t) => t.session_id === 'poll-sess')?.attached).toBe(true);
+
+	attached = false; // simulate a detach between ticks
+	const timer = startReconcilePoll(deps, 15);
+	cleanups.push(() => clearInterval(timer));
+
+	await waitFor(() => list().find((t) => t.session_id === 'poll-sess')?.attached === false);
+	expect(list().find((t) => t.session_id === 'poll-sess')?.attached).toBe(false);
 });

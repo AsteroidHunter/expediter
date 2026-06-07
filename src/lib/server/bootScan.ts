@@ -374,3 +374,22 @@ export function reconcile(
 export function runBootScan(deps: BootScanDeps = defaultDeps): Promise<void> {
 	return reconcile(deps, 'full');
 }
+
+// Slow-poll interval: a full reconcile every 5 minutes as a safety net for
+// missed tmux hooks and hard-crashed (no-SessionEnd) panes. The tmux-hook path
+// gives instant updates; this is the floor that self-heals anything they miss.
+export const RECONCILE_POLL_MS = 5 * 60 * 1000;
+
+// Start the slow poll. Returns the timer so callers/tests can stop it. unref'd
+// so it never keeps the process alive on its own. Each tick is a FULL reconcile
+// (not just GC) so a missed detach/attach self-heals too, not only dead cards.
+export function startReconcilePoll(
+	deps: BootScanDeps = defaultDeps,
+	intervalMs: number = RECONCILE_POLL_MS
+): ReturnType<typeof setInterval> {
+	const timer = setInterval(() => {
+		void reconcile(deps, 'full').catch((e) => console.warn('[reconcile:poll]', e));
+	}, intervalMs);
+	timer.unref?.();
+	return timer;
+}

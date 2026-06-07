@@ -2,7 +2,7 @@ import type { Handle } from '@sveltejs/kit';
 import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { getServerToken } from '$lib/token';
-import { runBootScan } from '$lib/server/bootScan';
+import { runBootScan, startReconcilePoll } from '$lib/server/bootScan';
 
 // Boot-time session enumeration. Runs once per server-module load so the dock
 // reflects every claude session currently in tmux at daemon start, not just
@@ -13,6 +13,11 @@ import { runBootScan } from '$lib/server/bootScan';
 // out to tmux.
 if (process.env.NODE_ENV !== 'test') {
 	void runBootScan().catch((e) => console.warn('[bootScan]', e));
+	// Slow-poll safety net: a full reconcile every RECONCILE_POLL_MS catches
+	// detach/attach transitions whose tmux hook was missed and clears cards for
+	// panes that died without a SessionEnd. unref'd so it never blocks process
+	// exit; gated out of tests so no stray timer fires or shells out to tmux.
+	startReconcilePoll();
 }
 
 // adapter-node honors EXPEDITER_* envs because svelte.config.js sets envPrefix.
