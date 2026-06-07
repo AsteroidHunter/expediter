@@ -9,11 +9,12 @@ import {
 	parseSessionMeta,
 	upsertPlaceholder,
 	runBootScan,
+	reconcile,
 	type PaneRow,
 	type BootScanDeps
 } from './bootScan';
 import { recordSession } from './sessionsStore';
-import { list, remove } from '$lib/ticketStore';
+import { list, remove, upsert, markWorking } from '$lib/ticketStore';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -260,9 +261,11 @@ test('runBootScan seeds a placeholder when neither metadata nor persistence matc
 	expect(list().find((t) => t.tmux_pane === '%99')?.session_id).toBe('pending:%99');
 });
 
-// Autospawn must skip detached sessions: an attached pane gets a ticket, a
-// detached pane in the same scan does not, even with matching live metadata.
-test('runBootScan skips detached panes but seeds attached ones', async () => {
+// Runtime detach awareness: a detached pane is now SEEDED as a detached ticket
+// (attached:false), not skipped; an attached pane in the same scan is seeded
+// attached:true. (Flipped from the old boot-time-snapshot behavior that dropped
+// detached panes entirely.)
+test('runBootScan seeds detached panes as detached, attached as attached', async () => {
 	useTempSessionsFile();
 	cleanups.push(() => {
 		remove('attached-sess');
@@ -285,7 +288,129 @@ test('runBootScan skips detached panes but seeds attached ones', async () => {
 
 	await runBootScan(deps);
 
-	expect(list().find((t) => t.tmux_pane === '%10')?.session_id).toBe('attached-sess');
-	expect(list().find((t) => t.tmux_pane === '%11')).toBeUndefined();
-	expect(list().find((t) => t.session_id === 'detached-sess')).toBeUndefined();
+	const attached = list().find((t) => t.tmux_pane === '%10');
+	const detached = list().find((t) => t.tmux_pane === '%11');
+	expect(attached?.session_id).toBe('attached-sess');
+	expect(attached?.attached).toBe(true);
+	expect(detached?.session_id).toBe('detached-sess');
+	expect(detached?.attached).toBe(false);
+});
+
+// A detached ticket flips back to attached when a later reconcile sees the
+// session re-attached — without being dropped or re-seeded in between.
+test('reconcile flips a detached ticket back to attached on re-attach', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('flip-sess');
+		remove('pending:%12');
+	});
+
+	const readSessionMetas = async () => [
+		{ pid: 3000, sessionId: 'flip-sess', name: 'flip', cwd: '/a' }
+	];
+	const parentPid = async (pid: number) => (pid === 3000 ? 1200 : null);
+
+	await runBootScan({
+		listPanes: async () => [pane('%12', 1200, '/a', false)],
+		readSessionMetas,
+		parentPid
+	});
+	expect(list().find((t) => t.session_id === 'flip-sess')?.attached).toBe(false);
+
+	await runBootScan({
+		listPanes: async () => [pane('%12', 1200, '/a', true)],
+		readSessionMetas,
+		parentPid
+	});
+	const t = list().find((x) => x.session_id === 'flip-sess');
+	expect(t?.attached).toBe(true);
+	expect(t?.event_type).toBe('Idle'); // preserved, not re-seeded
+});
+
+// A full reconcile GCs a ticket whose pane has vanished (claude exited / pane
+// died with no SessionEnd). The created_at guard only spares tickets younger
+// than the scan, so a pre-existing dead-pane ticket is removed.
+test('reconcile GCs a ticket whose pane is gone', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('gone-sess'));
+
+	upsert({
+		session_id: 'gone-sess',
+		tmux_pane: '%77',
+		cwd: '/a',
+		title: 'gone',
+		event_type: 'Stop',
+		created_at: Date.now() - 10_000 // predates the scan start → eligible for GC
+	});
+	expect(list().find((t) => t.session_id === 'gone-sess')).toBeDefined();
+
+	await runBootScan({
+		listPanes: async () => [],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	expect(list().find((t) => t.session_id === 'gone-sess')).toBeUndefined();
+});
+
+// The load-bearing invariant: a full reconcile must not disturb a live ticket's
+// event_type / working / title. It only refreshes the attach flag. A working
+// PermissionRequest ticket whose pane is still live survives untouched.
+test('reconcile preserves a live working ticket, updating only the attach flag', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('live-work'));
+
+	upsert({
+		session_id: 'live-work',
+		tmux_pane: '%88',
+		cwd: '/a',
+		title: 'busy session',
+		event_type: 'PermissionRequest',
+		created_at: Date.now()
+	});
+	markWorking('live-work'); // working=true, event_type stays PermissionRequest
+
+	// Pane still live, now reported detached → only the attach flag should move.
+	await runBootScan({
+		listPanes: async () => [pane('%88', 8800, '/a', false)],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	const t = list().find((x) => x.session_id === 'live-work');
+	expect(t?.working).toBe(true);
+	expect(t?.event_type).toBe('PermissionRequest');
+	expect(t?.title).toBe('busy session');
+	expect(t?.attached).toBe(false);
+});
+
+// The light path (tmux-hook trigger) flips attach flags on existing tickets but
+// never seeds a new pane and never GCs a vanished one — that is the full path's
+// job. A brand-new claude pane in the snapshot is ignored; an existing ticket
+// whose pane is absent is left alone; a present ticket's flag flips.
+test('reconcile light mode flips flags without seeding or GC', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('present-sess');
+		remove('absent-sess');
+	});
+
+	upsert({ session_id: 'present-sess', tmux_pane: '%90', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+	upsert({ session_id: 'absent-sess', tmux_pane: '%91', cwd: '/b', title: 't', event_type: 'Stop', created_at: Date.now() - 10_000 });
+
+	await reconcile(
+		{
+			listPanes: async () => [
+				pane('%90', 9000, '/a', false), // present ticket → flag flips to detached
+				pane('%92', 9200, '/c', true) // brand-new claude pane → must NOT be seeded
+			],
+			readSessionMetas: async () => [],
+			parentPid: async () => null
+		},
+		'light'
+	);
+
+	expect(list().find((t) => t.session_id === 'present-sess')?.attached).toBe(false); // flipped
+	expect(list().find((t) => t.session_id === 'absent-sess')).toBeDefined(); // NOT GC'd
+	expect(list().find((t) => t.tmux_pane === '%92')).toBeUndefined(); // NOT seeded
 });

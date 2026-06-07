@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import os from 'node:os';
 
-import { upsert, setCachedTitle } from '$lib/ticketStore';
+import { upsert, setCachedTitle, setAttached, list, remove, findByPane } from '$lib/ticketStore';
 import { whimsicalName } from '$lib/whimsicalName';
 import { getTitleSource } from '$lib/config';
 import { latestCustomTitle } from '$lib/transcript';
@@ -199,21 +199,34 @@ export type BootScanDeps = {
 	parentPid: (pid: number) => Promise<number | null>;
 };
 
-export async function runBootScan(
-	deps: BootScanDeps = { listPanes, readSessionMetas, parentPid }
-): Promise<void> {
+// Production defaults for the injectable side-effecting inputs. Tests pass their
+// own BootScanDeps; everything else uses the real tmux/ps/fs implementations.
+const defaultDeps: BootScanDeps = { listPanes, readSessionMetas, parentPid };
+
+// Full reconcile: read tmux truth, refresh the attach flag on existing tickets,
+// seed Idle tickets for claude panes that have none yet (attached OR detached),
+// and GC tickets whose pane is gone. Used by the boot scan and the slow poll —
+// the heavyweight path (reads ~/.claude/sessions metadata + a ps walk + disk).
+// It NEVER overwrites event_type / working / title on a ticket that already
+// exists: those belong to the hook-event pipeline, and re-seeding would race it.
+async function fullReconcile(deps: BootScanDeps): Promise<void> {
+	// Captured BEFORE the async tmux read so GC can spare any ticket the hook
+	// pipeline created while we were awaiting (its pane won't be in our snapshot,
+	// but it is younger than this scan). Mirrors the removeIfMatch created_at
+	// idiom and closes the reconcile-vs-hook GC race.
+	const start = Date.now();
+
 	let panes: PaneRow[];
 	try {
 		panes = await deps.listPanes();
 	} catch (err) {
-		console.warn('[bootScan] tmux list-panes failed (tmux not running?):', err);
+		console.warn('[reconcile] tmux list-panes failed (tmux not running?):', err);
 		return;
 	}
 	const claudePanes = panes.filter(isClaudePane);
 	// livePaneIds intentionally includes detached panes: a detached session is
 	// still alive (its claude process is running), so pruneStaleSessions must
-	// not drop its persisted record just because no client is attached. The
-	// attached check happens later, only when deciding whether to seed a ticket.
+	// not drop its persisted record just because no client is attached.
 	const livePaneIds = new Set(claudePanes.map((p) => p.pane_id));
 
 	const persisted = await loadSessions();
@@ -236,18 +249,21 @@ export async function runBootScan(
 	}
 
 	for (const pane of claudePanes) {
-		// Autospawn shows only sessions whose tmux session is currently
-		// attached. A detached session has no terminal window to bring forward,
-		// so its ticket would tap to nothing. This is a boot-time snapshot: a
-		// session detached after the daemon starts keeps its ticket until the
-		// next restart.
-		if (!pane.session_attached) continue;
-		// Metadata-first. The persisted entry can be stale: if the previous
-		// claude in this pane exited and a new one took its place, sessions.json
-		// still points to the dead session_id but the metadata file reflects
-		// the live one. Letting persisted win would key the dock ticket by the
-		// dead session_id, breaking markWorking lookups for the live claude's
-		// hook events.
+		// A ticket already bound to this pane (the steady-state poll case): only
+		// refresh its attach flag. Never re-seed — that would clobber
+		// event_type / working / title owned by the hook pipeline. Session-id
+		// divergence (a rewind, or a new claude in a reused pane) is healed by the
+		// hook pipeline's dropPaneTicketsExcept / rebindPaneTicket, not here.
+		const existing = findByPane(pane.pane_id);
+		if (existing) {
+			setAttached(existing.session_id, pane.session_attached);
+			continue;
+		}
+		// No ticket yet — seed one (attached OR detached) and set its real attach
+		// flag. Metadata-first: the persisted entry can be stale (the previous
+		// claude in this pane exited and a new one took its place), so the live
+		// metadata file wins to avoid keying the ticket by a dead session_id,
+		// which would break markWorking lookups for the live claude's hook events.
 		const meta = metaByShellPid.get(pane.pane_pid);
 		if (meta) {
 			const transcriptPath = path.join(
@@ -264,21 +280,97 @@ export async function runBootScan(
 				transcript_path: transcriptPath
 			};
 			await recordSession(entry).catch((e) =>
-				console.warn('[bootScan] recordSession failed', e)
+				console.warn('[reconcile] recordSession failed', e)
 			);
 			upsertIdle(entry, meta.name || bootScanInitialTitle(meta.sessionId));
+			setAttached(entry.session_id, pane.session_attached);
 			continue;
 		}
 		// Fallback: claude hasn't written a metadata file yet (older versions,
-		// or brand-new process). Use the persisted entry if we have one for
-		// this pane.
+		// or brand-new process). Use the persisted entry if we have one.
 		const persistedEntry = byPane.get(pane.pane_id);
 		if (persistedEntry) {
 			upsertIdle(persistedEntry, bootScanInitialTitle(persistedEntry.session_id));
+			setAttached(persistedEntry.session_id, pane.session_attached);
 			continue;
 		}
 		// Neither metadata nor persistence — the first real hook event will
-		// reconcile via reconcilePlaceholder.
+		// reconcile the placeholder via dropPaneTicketsExcept.
 		upsertPlaceholder(pane.pane_id, pane.pane_current_path);
+		setAttached(`pending:${pane.pane_id}`, pane.session_attached);
 	}
+
+	// GC: drop tickets whose pane is no longer a live claude pane (claude exited,
+	// or the pane died without a SessionEnd). The created_at guard spares tickets
+	// the hook pipeline created during the await above (younger than `start`).
+	for (const ticket of list()) {
+		if (!livePaneIds.has(ticket.tmux_pane) && ticket.created_at < start) {
+			remove(ticket.session_id);
+		}
+	}
+}
+
+// Light reconcile: refresh the attach flag on existing tickets and nothing else.
+// Used by the tmux client-attached/-detached hook path — a client attach/detach
+// only changes attach state, never creates or kills a pane, so this skips the
+// metadata/ps/disk seeding AND the GC. One tmux read, flag flips only.
+async function lightSync(deps: BootScanDeps): Promise<void> {
+	let panes: PaneRow[];
+	try {
+		panes = await deps.listPanes();
+	} catch (err) {
+		console.warn('[reconcile:light] tmux list-panes failed:', err);
+		return;
+	}
+	const attachedByPane = new Map<string, boolean>();
+	for (const p of panes) {
+		if (isClaudePane(p)) attachedByPane.set(p.pane_id, p.session_attached);
+	}
+	// Flag-flip only. A pane missing from the snapshot is left untouched for the
+	// next full reconcile (boot/poll) to seed or GC.
+	for (const ticket of list()) {
+		const attached = attachedByPane.get(ticket.tmux_pane);
+		if (attached !== undefined) setAttached(ticket.session_id, attached);
+	}
+}
+
+// Single-flight gate over the reconcile family. Every trigger (boot, tmux hooks,
+// slow poll) reads tmux truth asynchronously before mutating the store, so two
+// overlapping runs could write a stale attach flag. Serialize them: while one
+// runs, further requests collapse into a single queued rerun, and a queued full
+// subsumes a queued light (full updates attach flags too). The returned promise
+// resolves once the caller's requested work (plus any rerun it triggered) ends.
+let inFlight: Promise<void> | null = null;
+let queuedFull = false;
+let queuedLight = false;
+
+export function reconcile(
+	deps: BootScanDeps = defaultDeps,
+	mode: 'full' | 'light' = 'full'
+): Promise<void> {
+	if (inFlight) {
+		if (mode === 'full') queuedFull = true;
+		else queuedLight = true;
+		return inFlight;
+	}
+	inFlight = (async () => {
+		try {
+			await (mode === 'full' ? fullReconcile(deps) : lightSync(deps));
+			while (queuedFull || queuedLight) {
+				const runFull = queuedFull;
+				queuedFull = false;
+				queuedLight = false;
+				await (runFull ? fullReconcile(deps) : lightSync(deps));
+			}
+		} finally {
+			inFlight = null;
+		}
+	})();
+	return inFlight;
+}
+
+// Boot entry point, wired in hooks.server.ts. A full reconcile that repopulates
+// the in-memory store from tmux + sessions.json after a daemon (re)start.
+export function runBootScan(deps: BootScanDeps = defaultDeps): Promise<void> {
+	return reconcile(deps, 'full');
 }
