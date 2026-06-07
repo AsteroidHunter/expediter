@@ -557,3 +557,8 @@ printf '  %s2.%s Run one of these commands:\n\n' "$BOLD" "$RESET"
 printf '       %sexpediter%s     start the daemon and print the QR for linking your phone\n' "$BOLD" "$RESET"
 printf '       %sclaudex%s       open tmux with claude + expediter side-by-side\n' "$BOLD" "$RESET"
 printf '       %sclaudex uno%s   new to tmux or Claude Code? start here\n\n' "$BOLD" "$RESET"
+printf '  %s3.%s The connection uses %sHTTPS%s by default (needed for the microphone / voice\n' "$BOLD" "$RESET" "$BOLD" "$RESET"
+printf '     feature and to install Expediter to your home screen). The first time a phone\n'
+printf '     connects, the page walks you through a one-time certificate trust step in\n'
+printf '     Safari -- no files to move. Prefer plain HTTP with no certificate? Run\n'
+printf '     %sexpediter --http%s.\n\n' "$BOLD" "$RESET"

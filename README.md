@@ -66,7 +66,7 @@ If you're an opinionated tmux user, just run:
 expediter
 ```
 
-A QR code shows up in your terminal. Scan it with your phone's camera, open the link in Safari, and you're connected.
+A QR code shows up in your terminal. Scan it with your phone's camera and open the link in Safari. The first time a given phone connects, it does a quick one-time certificate-trust step (described just below); after that, scanning takes you straight in.
 
 However, there's another command if you want to start a fresh Claude Code session along with the Expediter daemon:
 
@@ -84,6 +84,21 @@ claudex uno
 
 That starts the daemon, prints the QR, and walks you through four numbered onboarding steps below it.
 
+### First connection: trust the certificate (one time)
+
+Expediter serves over HTTPS by default. Browsers only allow the microphone (for the voice feature) and home-screen install over a secure connection, so your phone needs to trust a certificate your Mac generates locally. You do this once per phone, entirely in the browser -- there are no files to move.
+
+When a new phone scans the QR, the setup page shows a **Download certificate** button:
+
+1. Tap **Download certificate**, then **Allow**.
+2. Open **Settings > General > VPN & Device Management**, tap the **Expediter Local CA** profile, and install it.
+3. Open **Settings > General > About > Certificate Trust Settings** and turn on full trust for **Expediter Local CA**.
+4. Return to the page. It connects automatically.
+
+This must be done in **Safari** -- other iOS browsers can't install the profile. Only the public certificate reaches your phone; the private keys never leave your Mac. Trust persists for years, so you won't repeat this on the same phone.
+
+Prefer to skip the certificate? Run `expediter --http` for a plain connection (the fallback for a phone that can't trust the certificate, or a network that blocks the secure path). The microphone/voice feature won't work over plain HTTP. The choice is sticky; switch back with `expediter --https`.
+
 ### Network requirements
 
 Expediter needs your phone to reach your Mac at its LAN IP. That's fine on home Wi-Fi and most office or coworking networks. Two situations where it won't work:
@@ -95,9 +110,9 @@ If you switch networks (say, coffee shop to home), your Mac gets a new IP and th
 
 ## Security & access control
 
-Expediter trusts your local network, like Plex, Sonos, or a Philips Hue bridge. Anyone on the same Wi-Fi can reach the daemon's HTTP port; a per-session token gate stops them from doing anything once they reach it.
+Expediter trusts your local network, like Plex, Sonos, or a Philips Hue bridge. Anyone on the same Wi-Fi can reach the daemon's port; a per-session token gate stops them from doing anything once they reach it.
 
-The token is 16 cryptographically random bytes, base64url-encoded (~22 characters), held only in the daemon's process memory -- there is no token file on disk. The QR you scan encodes the token in the URL fragment (`http://<host>:5179/#<token>`); browsers never transmit URL fragments to servers, so the token stays out of request logs, server access logs, and proxy logs. Your phone's inline page script reads the fragment, stashes it in `sessionStorage`, and immediately clears the address bar.
+The token is 16 cryptographically random bytes, base64url-encoded (~22 characters), held only in the daemon's process memory -- there is no token file on disk. The token rides in the URL fragment (`/#<token>`); browsers never transmit URL fragments to servers, so it stays out of request logs, server access logs, and proxy logs, and the HTTP cert-bootstrap step never sees it either. Your phone's inline page script reads the fragment, stashes it in `sessionStorage`, and immediately clears the address bar.
 
 Every time you stop and restart the daemon (Mac reboot, manual stop+start, crash + relaunch, `expediter` re-invocation), a fresh token is minted in the new process. The old QR stops working; your phone will prompt you to re-scan. There is no rotation ceremony beyond "restart the daemon."
 
