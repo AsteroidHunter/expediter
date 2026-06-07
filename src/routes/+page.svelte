@@ -1239,7 +1239,6 @@
 		background: rgba(255, 253, 245, 0.92);
 		-webkit-backdrop-filter: blur(8px);
 		backdrop-filter: blur(8px);
-		border-top: 1px solid #ead68f;
 	}
 	.pager-title {
 		flex: 1;
