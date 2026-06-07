@@ -450,3 +450,35 @@ test('startReconcilePoll reflects a simulated detach after a tick', async () => 
 	await waitFor(() => list().find((t) => t.session_id === 'poll-sess')?.attached === false);
 	expect(list().find((t) => t.session_id === 'poll-sess')?.attached).toBe(false);
 });
+
+// ─── tmux-hook (light) multi-client semantics ────────────────────────────────
+
+// tmux #{session_attached} is a CLIENT COUNT, mapped to a boolean by
+// parsePaneRows (count > 0), so a multi-client session stays attached until the
+// LAST client detaches. Exercised through the light path the tmux hook drives:
+// the pane reports attached while any client remains, detached only at zero.
+test('light reconcile keeps a multi-client session attached until the last client detaches', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('multi-sess'));
+
+	upsert({ session_id: 'multi-sess', tmux_pane: '%66', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+
+	const lightWith = (attached: boolean) =>
+		reconcile(
+			{
+				listPanes: async () => [pane('%66', 6600, '/a', attached)],
+				readSessionMetas: async () => [],
+				parentPid: async () => null
+			},
+			'light'
+		);
+
+	await lightWith(true); // 2 clients (count 2 → true): attached
+	expect(list().find((t) => t.session_id === 'multi-sess')?.attached).toBe(true);
+
+	await lightWith(true); // 1 client remaining (count 1 → true): still attached
+	expect(list().find((t) => t.session_id === 'multi-sess')?.attached).toBe(true);
+
+	await lightWith(false); // last client gone (count 0 → false): detached
+	expect(list().find((t) => t.session_id === 'multi-sess')?.attached).toBe(false);
+});
