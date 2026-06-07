@@ -2,7 +2,8 @@ import type { Handle } from '@sveltejs/kit';
 import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { getServerToken } from '$lib/token';
-import { runBootScan } from '$lib/server/bootScan';
+import { runBootScan, startReconcilePoll } from '$lib/server/bootScan';
+import { installTmuxHooks } from '$lib/server/tmuxHooks';
 
 // Boot-time session enumeration. Runs once per server-module load so the dock
 // reflects every claude session currently in tmux at daemon start, not just
@@ -13,6 +14,16 @@ import { runBootScan } from '$lib/server/bootScan';
 // out to tmux.
 if (process.env.NODE_ENV !== 'test') {
 	void runBootScan().catch((e) => console.warn('[bootScan]', e));
+	// Slow-poll safety net: a full reconcile every RECONCILE_POLL_MS catches
+	// detach/attach transitions whose tmux hook was missed and clears cards for
+	// panes that died without a SessionEnd. unref'd so it never blocks process
+	// exit; gated out of tests so no stray timer fires or shells out to tmux.
+	startReconcilePoll();
+	// Instant path: wire global tmux hooks so a client attach/detach pings the
+	// daemon (/api/tmux-event → light reconcile). Re-installed every boot —
+	// set-hook -g replaces, so hooks never stack. Best-effort: logs and no-ops if
+	// tmux isn't running or the bridge can't be located.
+	void installTmuxHooks().catch((e) => console.warn('[tmuxHooks]', e));
 }
 
 // adapter-node honors EXPEDITER_* envs because svelte.config.js sets envPrefix.
@@ -168,6 +179,10 @@ function constantTimeEqual(a: string, b: string): boolean {
 	return timingSafeEqual(aBuf, bBuf);
 }
 
+// API paths trusted purely by loopback origin (no session token): the local
+// hook bridges POST here. Keep this list tight — every entry is a token bypass.
+const LOOPBACK_HOOK_PATHS = new Set(['/api/hooks/event', '/api/tmux-event']);
+
 export const handle: Handle = async ({ event, resolve }) => {
 	const host = event.request.headers.get('host');
 	let ip: string | null = null;
@@ -210,12 +225,13 @@ export const handle: Handle = async ({ event, resolve }) => {
 		return frameDeny(await resolve(event));
 	}
 
-	// /api/hooks/event from loopback bypasses the token check — the hook script
-	// runs on the daemon's host and is trusted by virtue of loopback origin.
-	// Any process that can bind to 127.0.0.1 on this Mac is already running as
-	// the user; the token gate's job is to extend trust selectively to the
-	// phone, not to defend against the user's own local processes.
-	if (pathname === '/api/hooks/event' && isAllowedIp(ip)) {
+	// /api/hooks/event and /api/tmux-event from loopback bypass the token check —
+	// both are pinged by local hook scripts (claude hooks and tmux hooks) that run
+	// on the daemon's host and are trusted by virtue of loopback origin. Any
+	// process that can bind to 127.0.0.1 on this Mac is already running as the
+	// user; the token gate's job is to extend trust selectively to the phone, not
+	// to defend against the user's own local processes.
+	if (LOOPBACK_HOOK_PATHS.has(pathname) && isAllowedIp(ip)) {
 		dbg(`ACCEPT path=${loggedPath} reason=loopback-hook`);
 		return frameDeny(await resolve(event));
 	}

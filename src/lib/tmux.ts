@@ -330,3 +330,54 @@ export async function focusPane(pane: string): Promise<void> {
 	// const moved = pre !== post;
 	// console.log(`[focus] state post=${post} moved=${moved} wanted_tty=${tty ?? '<none>'}`);
 }
+
+// Re-attach a detached session by opening a NEW Terminal window running
+// `tmux attach -t <session>`, raised to the front. This is deliberately NOT a
+// reuse of focusPane's machinery: focusPane finds an existing client's tty and
+// raises that tab, but a detached session has no client and no tab to raise —
+// the whole point is that nothing is showing it. So we share only the pane→
+// session resolve and otherwise just spawn a fresh window via AppleScript
+// `do script` (no `in` clause → new window) + `activate`. The next reconcile
+// (the client-attached tmux hook fires as the new client attaches) flips the
+// card to Attached and it migrates pages on its own. Throws FocusError (→ 410
+// at the route) when the pane/session is gone, mirroring focusPane.
+export async function attachSession(pane: string): Promise<void> {
+	if (!pane || !/^%[0-9]+$/.test(pane)) {
+		throw new FocusError(`invalid pane id '${pane}'`);
+	}
+
+	let session: string;
+	try {
+		const { stdout } = await execFileAsync('tmux', [
+			'display-message',
+			'-p',
+			'-t',
+			pane,
+			'#{session_name}'
+		]);
+		session = stdout.trim();
+	} catch {
+		throw new FocusError(`pane '${pane}' no longer exists`);
+	}
+
+	if (!session) {
+		throw new FocusError(`pane '${pane}' resolved to empty session`);
+	}
+
+	// Escape for embedding in the AppleScript string literal, then wrap the
+	// session in shell quotes inside the command so a name with spaces still
+	// resolves. `do script` runs the command in a new Terminal window.
+	const escapedSession = session.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+	const script = `tell application "Terminal"
+	do script "tmux attach -t \\"${escapedSession}\\""
+	activate
+end tell`;
+
+	try {
+		await execFileAsync('osascript', ['-e', script]);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.log(`[attach] osascript threw: ${msg}`);
+		throw new FocusError('osascript Terminal.app attach failed');
+	}
+}
