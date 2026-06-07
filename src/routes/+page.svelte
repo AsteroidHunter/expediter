@@ -16,9 +16,32 @@
 		event_type: EventType;
 		created_at: number;
 		working: boolean;
+		// True when the tmux session has an attached client. Splits the dock into
+		// the Attached page (default) and the Detached page; detached cards render
+		// uniform grey and tap to re-attach. May be absent on an old SSE frame —
+		// treated as attached (the pre-feature default) via `!== false` below.
+		attached: boolean;
 	};
 
 	let tickets = $state<Ticket[]>([]);
+
+	// Two pages — Attached (default) and Detached — switched by the bottom pager
+	// bar (arrows only, no swipe). A ticket is attached unless explicitly false,
+	// so a frame from an older daemon that omits the field stays on the Attached
+	// page rather than vanishing to Detached.
+	const PAGES = ['attached', 'detached'] as const;
+	let pageIndex = $state(0);
+	const page = $derived(PAGES[pageIndex]);
+	const attachedTickets = $derived(tickets.filter((t) => t.attached !== false));
+	const detachedTickets = $derived(tickets.filter((t) => t.attached === false));
+	const visibleTickets = $derived(pageIndex === 0 ? attachedTickets : detachedTickets);
+
+	function prevPage(): void {
+		if (pageIndex > 0) pageIndex -= 1;
+	}
+	function nextPage(): void {
+		if (pageIndex < PAGES.length - 1) pageIndex += 1;
+	}
 	let connected = $state(false);
 	// Sticky: flips true on the first successful onopen and never resets. Without
 	// it, isDisconnected would flash on every page load and every wake-from-
@@ -193,7 +216,11 @@
 		deferredReacquireWakeLock();
 	}
 
-	async function focusSession(ticket: Ticket): Promise<void> {
+	// Tap a card: an attached session hits /api/focus (raise its existing
+	// terminal); a detached one hits /api/attach (open a fresh terminal running
+	// `tmux attach`). Same press feedback either way; the next reconcile migrates
+	// a re-attached card from the Detached page to the Attached page on its own.
+	async function tapSession(ticket: Ticket, endpoint: string): Promise<void> {
 		if (!clientToken) {
 			// No token in sessionStorage — the empty-state branch should be visible
 			// anyway, but if the user somehow taps a stale ticket without one, no-op.
@@ -202,7 +229,7 @@
 		focusing = ticket.session_id;
 		lastTapped = ticket.session_id;
 		try {
-			await fetch('/api/focus', {
+			await fetch(endpoint, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -211,12 +238,16 @@
 				body: JSON.stringify({ pane: ticket.tmux_pane })
 			});
 		} catch {
-			/* failure is shown only as a missed focus — daemon-side log is the record */
+			/* failure is shown only as a missed tap — daemon-side log is the record */
 		} finally {
 			setTimeout(() => {
 				if (focusing === ticket.session_id) focusing = null;
 			}, 80);
 		}
+	}
+
+	function onTicketTap(ticket: Ticket): void {
+		void tapSession(ticket, ticket.attached === false ? '/api/attach' : '/api/focus');
 	}
 
 	function projectLabel(cwd: string): string {
@@ -244,6 +275,8 @@
 	// PermissionRequest never fades (load-bearing red attention); working state
 	// owns its own pastel-green visual and skips fading too.
 	function staleClass(ticket: Ticket, now: number): string {
+		// Detached cards are uniform grey with no age-fade (see .ticket.detached).
+		if (ticket.attached === false) return '';
 		if (ticket.working) return '';
 		if (ticket.event_type === 'PermissionRequest') return '';
 		// Idle tickets are already fully desaturated via .type-idle CSS — stale
@@ -473,26 +506,20 @@
 		<div class="empty empty-no-token" aria-live="polite">
 			<span class="empty-label">Scan the QR code in your terminal to connect</span>
 		</div>
-	{:else if tickets.length === 0 && !isDisconnected}
-		<div class="empty" aria-live="polite">
-			<span class="dot"></span>
-			<span class="empty-label">You have zero tickets!</span>
-		</div>
-	{:else if tickets.length === 0}
-		<div class="empty" aria-live="polite"></div>
 	{:else}
 		<ul class="queue" class:disconnected={isDisconnected}>
-			{#each tickets as ticket (ticket.session_id)}
+			{#each visibleTickets as ticket (ticket.session_id)}
 				<li
 					class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
 					class:pressing={focusing === ticket.session_id}
 					class:working={ticket.working}
 					class:tapped={lastTapped === ticket.session_id}
+					class:detached={ticket.attached === false}
 					animate:flip={{ duration: 220 }}
 					in:fly={{ y: -8, duration: 180 }}
 					out:fly={{ y: 8, duration: 140 }}
 				>
-					<button type="button" onclick={() => focusSession(ticket)}>
+					<button type="button" onclick={() => onTicketTap(ticket)}>
 						{#if ticket.working}
 							<div class="shimmer" aria-hidden="true">
 								<div class="shimmer-stripe"></div>
@@ -513,6 +540,41 @@
 				</li>
 			{/each}
 		</ul>
+
+		{#if visibleTickets.length === 0 && !isDisconnected}
+			<div class="empty page-empty" aria-live="polite">
+				{#if page === 'attached'}
+					<span class="dot"></span>
+					<span class="empty-label">You have zero tickets!</span>
+				{:else}
+					<span class="empty-label">No detached sessions</span>
+				{/if}
+			</div>
+		{/if}
+
+		{#if !isDisconnected}
+			<nav class="pager" aria-label="Pages">
+				<button
+					type="button"
+					class="pager-arrow"
+					onclick={prevPage}
+					disabled={pageIndex === 0}
+					aria-label="Previous page"
+				>
+					‹
+				</button>
+				<span class="pager-title">{page === 'attached' ? 'Attached' : 'Detached'}</span>
+				<button
+					type="button"
+					class="pager-arrow"
+					onclick={nextPage}
+					disabled={pageIndex === PAGES.length - 1}
+					aria-label="Next page"
+				>
+					›
+				</button>
+			</nav>
+		{/if}
 	{/if}
 
 	{#if isDisconnected}
@@ -587,7 +649,7 @@
 		   phone. In portrait the left/right insets are ~0, so it stays at 14px. */
 		padding: calc(env(safe-area-inset-top, 0) + 14px)
 			calc(env(safe-area-inset-right, 0) + 14px)
-			calc(env(safe-area-inset-bottom, 0) + 14px)
+			calc(env(safe-area-inset-bottom, 0) + 72px)
 			calc(env(safe-area-inset-left, 0) + 14px);
 		display: flex;
 		flex-direction: column;
@@ -959,6 +1021,20 @@
 		--muted: #6b8a55;
 		--accent: #3a5e2a;
 	}
+	/* Detached cards: uniform grey, overriding the per-event-type palette AND the
+	   never-grey PermissionRequest rule — a detached session is parked, so it reads
+	   as inactive regardless of its last event. saturate(0) over the default
+	   ticket palette yields one consistent grey; staleClass already returns '' for
+	   detached, so there is no additional age-fade. Placed after .type-*, .stale-*,
+	   and .working so it wins on equal specificity via source order. */
+	.ticket.detached {
+		filter: saturate(0);
+		--bg: #fff1c9;
+		--border: #ead68f;
+		--title: #2a1f15;
+		--muted: #8a7a45;
+		--accent: #6e5a20;
+	}
 	.shimmer {
 		position: absolute;
 		inset: 0;
@@ -1092,6 +1168,58 @@
 		line-height: 1.4;
 		color: var(--title);
 		word-break: break-word;
+	}
+
+	/* Bottom pager: a fixed bar that switches the Attached / Detached pages.
+	   Centered page title with a minimal arrow on each side; no swipe. Translucent
+	   blurred background so dock content scrolls underneath. Hidden while
+	   disconnected (the overlay takes over); main reserves bottom padding so the
+	   last card never hides behind it. */
+	.pager {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 15;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 22px;
+		padding: 10px calc(env(safe-area-inset-right, 0) + 14px)
+			calc(env(safe-area-inset-bottom, 0) + 10px)
+			calc(env(safe-area-inset-left, 0) + 14px);
+		background: rgba(255, 253, 245, 0.92);
+		-webkit-backdrop-filter: blur(8px);
+		backdrop-filter: blur(8px);
+		border-top: 1px solid #ead68f;
+	}
+	.pager-title {
+		min-width: 104px;
+		text-align: center;
+		font-size: 13px;
+		font-weight: 600;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: #2a1f15;
+	}
+	.pager-arrow {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 40px;
+		min-height: 36px;
+		background: transparent;
+		border: 0;
+		color: #2a1f15;
+		font-size: 22px;
+		line-height: 1;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition: opacity 150ms ease;
+	}
+	.pager-arrow:disabled {
+		opacity: 0.22;
+		cursor: default;
 	}
 
 </style>
