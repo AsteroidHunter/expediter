@@ -25,6 +25,29 @@
 
 	let tickets = $state<Ticket[]>([]);
 
+	// ── Detach-by-hold gesture (Attached cards only) ──────────────────────────
+	// Swipe a card right-to-left to ~36%, then keep holding for 2s to detach: the
+	// card wipes away right→left over the hold; on commit it leaves the Attached
+	// page (others reflow) and the session detaches. Release early → snaps back,
+	// nothing vanished. One card at a time.
+	const DETACH_FRACTION = 0.36; // how far the card slides toward the middle
+	const DETACH_HOLD_MS = 2000; // hold-at-position duration to commit
+	let dragId = $state<string | null>(null); // card under an active horizontal drag
+	let dragOffset = $state(0); // px translateX, <= 0
+	let holdArmed = $state(false); // reached the 36% hold position; 2s timer running
+	let wipeProgress = $state(0); // 0..1 right→left wipe during the hold
+	let snapBack = $state(false); // animate offset→0 on early release
+	let detachingOut = $state<Record<string, boolean>>({}); // committed → hidden from Attached
+	// Non-reactive scratch for the in-flight gesture:
+	let dragStartX = 0;
+	let dragStartY = 0;
+	let dragWidth = 1;
+	let dragAxis: 'undecided' | 'h' | 'v' = 'undecided';
+	let dragMoved = false; // a real drag happened → suppress the focus click after it
+	let holdRaf: number | null = null;
+	let holdStart = 0;
+	let audioCtx: AudioContext | null = null;
+
 	// Two pages — Attached (default) and Detached — switched by the bottom pager
 	// bar (arrows only, no swipe). A ticket is attached unless explicitly false,
 	// so a frame from an older daemon that omits the field stays on the Attached
@@ -36,7 +59,9 @@
 	// rather than the cards flashing in place.
 	let pageDir = $state(1);
 	const page = $derived(PAGES[pageIndex]);
-	const attachedTickets = $derived(tickets.filter((t) => t.attached !== false));
+	const attachedTickets = $derived(
+		tickets.filter((t) => t.attached !== false && !detachingOut[t.session_id])
+	);
 	const detachedTickets = $derived(tickets.filter((t) => t.attached === false));
 	const visibleTickets = $derived(pageIndex === 0 ? attachedTickets : detachedTickets);
 
@@ -280,6 +305,167 @@
 			return;
 		}
 		void tapSession(ticket, '/api/focus');
+	}
+
+	// ── detach gesture handlers ───────────────────────────────────────────────
+	function cancelHold(): void {
+		if (holdRaf !== null) {
+			cancelAnimationFrame(holdRaf);
+			holdRaf = null;
+		}
+		holdArmed = false;
+		wipeProgress = 0;
+	}
+
+	function resetDrag(): void {
+		dragId = null;
+		dragOffset = 0;
+		dragAxis = 'undecided';
+		cancelHold();
+	}
+
+	function startHold(): void {
+		holdArmed = true;
+		holdStart = performance.now();
+		const tick = (now: number): void => {
+			wipeProgress = Math.min(1, (now - holdStart) / DETACH_HOLD_MS);
+			if (wipeProgress >= 1) {
+				holdRaf = null;
+				commitDetach();
+				return;
+			}
+			holdRaf = requestAnimationFrame(tick);
+		};
+		holdRaf = requestAnimationFrame(tick);
+	}
+
+	function commitDetach(): void {
+		const id = dragId;
+		resetDrag();
+		if (!id) return;
+		const ticket = tickets.find((t) => t.session_id === id);
+		if (!ticket || !clientToken) return;
+		playWhoosh();
+		// Hide from the Attached page immediately so the remaining cards reflow on
+		// the whoosh; SSE then moves it to the Detached page once detach lands.
+		detachingOut = { ...detachingOut, [id]: true };
+		const token = clientToken;
+		void fetch('/api/detach', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'x-expediter-token': token },
+			body: JSON.stringify({ pane: ticket.tmux_pane })
+		}).catch(() => {
+			// detach failed — un-hide so the card reappears on the Attached page
+			const next = { ...detachingOut };
+			delete next[id];
+			detachingOut = next;
+		});
+		// Drop the optimistic flag after SSE has had time to reflect the detach.
+		setTimeout(() => {
+			const next = { ...detachingOut };
+			delete next[id];
+			detachingOut = next;
+		}, 4000);
+	}
+
+	function onCardTouchStart(e: TouchEvent, ticket: Ticket): void {
+		if (ticket.attached === false) return; // detach gesture is Attached-only
+		if (dragId) return; // one card at a time
+		const t = e.touches[0];
+		if (!t) return;
+		dragId = ticket.session_id;
+		dragStartX = t.clientX;
+		dragStartY = t.clientY;
+		dragAxis = 'undecided';
+		dragOffset = 0;
+		dragMoved = false;
+		snapBack = false;
+		dragWidth = (e.currentTarget as HTMLElement).getBoundingClientRect().width || 1;
+	}
+
+	function onCardTouchMove(e: TouchEvent, ticket: Ticket): void {
+		if (dragId !== ticket.session_id) return;
+		const t = e.touches[0];
+		if (!t) return;
+		const dx = t.clientX - dragStartX;
+		const dy = t.clientY - dragStartY;
+		if (dragAxis === 'undecided') {
+			if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // wait for clear intent
+			dragAxis = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+			if (dragAxis === 'v') {
+				resetDrag(); // vertical = scroll; let the browser have it (touch-action: pan-y)
+				return;
+			}
+			dragMoved = true;
+		}
+		if (dragAxis !== 'h') return;
+		const max = DETACH_FRACTION * dragWidth;
+		dragOffset = Math.max(-max, Math.min(0, dx)); // leftward only, clamped at 36%
+		const atHold = -dragOffset >= max - 1;
+		if (atHold && !holdArmed) startHold();
+		else if (!atHold && holdArmed) cancelHold();
+	}
+
+	function onCardTouchEnd(ticket: Ticket): void {
+		if (dragId !== ticket.session_id) return;
+		if (holdArmed && wipeProgress >= 1) return; // already committed via the rAF tick
+		// Early release: cancel the hold, snap back to rest, leave nothing vanished.
+		cancelHold();
+		snapBack = true;
+		dragOffset = 0;
+		const id = ticket.session_id;
+		setTimeout(() => {
+			if (dragId === id) {
+				dragId = null;
+				dragAxis = 'undecided';
+			}
+			snapBack = false;
+		}, 180);
+	}
+
+	function cardStyle(ticket: Ticket): string {
+		if (dragId !== ticket.session_id) return '';
+		const transition = snapBack ? 'transition: transform 160ms ease;' : 'transition: none;';
+		const clip = holdArmed
+			? `clip-path: inset(0 ${wipeProgress * 100}% 0 0); -webkit-clip-path: inset(0 ${wipeProgress * 100}% 0 0);`
+			: '';
+		return `transform: translateX(${dragOffset}px); ${transition} ${clip}`;
+	}
+
+	// Synthesized whoosh (no asset): filtered noise sweep. Best-effort — iOS mutes
+	// web audio on the hardware silent switch, so the visual wipe is the real
+	// signal and this is a bonus.
+	function playWhoosh(): void {
+		if (!browser) return;
+		try {
+			const Ctor =
+				window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+			if (!Ctor) return;
+			audioCtx ??= new Ctor();
+			const ctx = audioCtx;
+			const dur = 0.45;
+			const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+			const data = buf.getChannelData(0);
+			for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+			const src = ctx.createBufferSource();
+			src.buffer = buf;
+			const bp = ctx.createBiquadFilter();
+			bp.type = 'bandpass';
+			bp.Q.value = 0.7;
+			bp.frequency.setValueAtTime(1800, ctx.currentTime);
+			bp.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + dur);
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+			gain.gain.exponentialRampToValueAtTime(0.32, ctx.currentTime + 0.06);
+			gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+			src.connect(bp);
+			bp.connect(gain);
+			gain.connect(ctx.destination);
+			src.start();
+			src.stop(ctx.currentTime + dur);
+		} catch {
+			/* audio blocked / silent switch — bonus only */
+		}
 	}
 
 	function projectLabel(cwd: string): string {
@@ -549,11 +735,25 @@
 							class:working={ticket.working}
 							class:tapped={lastTapped === ticket.session_id}
 							class:detached={ticket.attached === false}
+							style={cardStyle(ticket)}
 							animate:flip={{ duration: 220 }}
 							in:fly|local={{ y: -8, duration: 180 }}
 							out:fly|local={{ y: 8, duration: 140 }}
+							ontouchstart={(e) => onCardTouchStart(e, ticket)}
+							ontouchmove={(e) => onCardTouchMove(e, ticket)}
+							ontouchend={() => onCardTouchEnd(ticket)}
+							ontouchcancel={() => onCardTouchEnd(ticket)}
 						>
-							<button type="button" onclick={() => onTicketTap(ticket)}>
+							<button
+								type="button"
+								onclick={() => {
+									if (dragMoved) {
+										dragMoved = false;
+										return;
+									}
+									onTicketTap(ticket);
+								}}
+							>
 								{#if ticket.working}
 									<div class="shimmer" aria-hidden="true">
 										<div class="shimmer-stripe"></div>
@@ -990,6 +1190,9 @@
 		background: var(--bg);
 		border: 1px solid var(--border);
 		border-radius: 0;
+		/* Vertical scroll stays native; horizontal is the detach drag's to handle,
+		   so we never need a non-passive preventDefault on touchmove. */
+		touch-action: pan-y;
 		box-shadow:
 			0 1px 0 rgba(80, 60, 30, 0.04),
 			0 2px 10px rgba(80, 60, 30, 0.06);

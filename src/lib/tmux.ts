@@ -381,3 +381,43 @@ end tell`;
 		throw new FocusError('osascript Terminal.app attach failed');
 	}
 }
+
+// Detach a session from the phone: resolve the pane to its session, then
+// `tmux detach-client -s <session>` (drops ALL clients of that session, matching
+// the whole-session model of attach). No Terminal/osascript — detach is pure
+// tmux. Throws FocusError (→ 410) when the pane/session is already gone. The
+// detach-client call itself is best-effort: it can exit non-zero when the
+// session has no attached client (already detached), which is the desired end
+// state anyway, so we swallow that — the next reconcile reflects the truth and
+// moves the card to the Detached page.
+export async function detachSession(pane: string): Promise<void> {
+	if (!pane || !/^%[0-9]+$/.test(pane)) {
+		throw new FocusError(`invalid pane id '${pane}'`);
+	}
+
+	let session: string;
+	try {
+		const { stdout } = await execFileAsync('tmux', [
+			'display-message',
+			'-p',
+			'-t',
+			pane,
+			'#{session_name}'
+		]);
+		session = stdout.trim();
+	} catch {
+		throw new FocusError(`pane '${pane}' no longer exists`);
+	}
+
+	if (!session) {
+		throw new FocusError(`pane '${pane}' resolved to empty session`);
+	}
+
+	try {
+		await execFileAsync('tmux', ['detach-client', '-s', session]);
+	} catch (err) {
+		// Non-zero usually means "no client attached to that session" — already in
+		// the desired (detached) state. Log under DEBUG_FOCUS and treat as success.
+		debugFocus(`[detach] detach-client -s ${session} non-zero (already detached?): ${err}`);
+	}
+}
