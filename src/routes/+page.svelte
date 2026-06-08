@@ -326,6 +326,13 @@
 
 	function startHold(): void {
 		holdArmed = true;
+		// Haptic tick at the 36% lock. navigator.vibrate is Android-only — iOS
+		// Safari doesn't implement the Vibration API, so iPhones won't buzz.
+		try {
+			navigator.vibrate?.(15);
+		} catch {
+			/* no vibration support */
+		}
 		holdStart = performance.now();
 		const tick = (now: number): void => {
 			wipeProgress = Math.min(1, (now - holdStart) / DETACH_HOLD_MS);
@@ -399,9 +406,12 @@
 			dragMoved = true;
 		}
 		if (dragAxis !== 'h') return;
-		const max = DETACH_FRACTION * dragWidth;
-		dragOffset = Math.max(-max, Math.min(0, dx)); // leftward only, clamped at 36%
-		const atHold = -dragOffset >= max - 1;
+		const armDistance = DETACH_FRACTION * dragWidth;
+		const raw = Math.max(0, -dx); // leftward finger travel
+		const t2 = Math.min(1, raw / armDistance);
+		const eased = 1 - Math.pow(1 - t2, 3); // easeOutCubic — decelerates into the lock
+		dragOffset = -armDistance * eased; // springy, not 1:1 linear; caps at 36%
+		const atHold = t2 >= 1;
 		if (atHold && !holdArmed) startHold();
 		else if (!atHold && holdArmed) cancelHold();
 	}
@@ -420,16 +430,28 @@
 				dragAxis = 'undecided';
 			}
 			snapBack = false;
-		}, 180);
+		}, 340);
 	}
 
 	function cardStyle(ticket: Ticket): string {
 		if (dragId !== ticket.session_id) return '';
-		const transition = snapBack ? 'transition: transform 160ms ease;' : 'transition: none;';
-		const clip = holdArmed
-			? `clip-path: inset(0 ${wipeProgress * 100}% 0 0); -webkit-clip-path: inset(0 ${wipeProgress * 100}% 0 0);`
-			: '';
-		return `transform: translateX(${dragOffset}px); ${transition} ${clip}`;
+		// Springy easeOutBack on release; instant follow while dragging.
+		const transition = snapBack
+			? 'transition: transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1);'
+			: 'transition: none;';
+		// Soft gradient wipe (right→left) instead of a hard clip edge: an opaque→
+		// transparent mask whose feathered boundary sweeps left as the hold runs.
+		// Stops run past 100% / below 0% so the card is fully opaque at progress 0
+		// and fully gone at 1, with a ~22% feathered edge in between.
+		let mask = '';
+		if (holdArmed) {
+			const band = 22;
+			const edge = (1 - wipeProgress) * (100 + band);
+			const solid = edge - band;
+			const g = `linear-gradient(to right, #000 ${solid}%, transparent ${edge}%)`;
+			mask = `-webkit-mask-image: ${g}; mask-image: ${g};`;
+		}
+		return `transform: translateX(${dragOffset}px); ${transition} ${mask}`;
 	}
 
 	// Synthesized whoosh (no asset): filtered noise sweep. Best-effort — iOS mutes
