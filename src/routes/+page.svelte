@@ -405,7 +405,7 @@
 		if (dragAxis !== 'h') return;
 		const raw = Math.max(0, dx); // rightward finger travel (left-to-right swipe)
 		const t2 = Math.min(1, raw / (DETACH_FINGER * dragWidth)); // needs a longer push than it moves
-		const eased = t2 * t2 * t2; // easeIn (cubic) — strong resistance at the start
+		const eased = Math.pow(t2, 2.5); // easeIn (t^2.5) — between quadratic and cubic
 		dragOffset = DETACH_FRACTION * dragWidth * eased; // card moves slower than the finger; caps at 30%
 		const atHold = t2 >= 1;
 		if (atHold && !holdArmed) startHold();
