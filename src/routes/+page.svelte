@@ -26,19 +26,19 @@
 	let tickets = $state<Ticket[]>([]);
 
 	// ── Detach-by-hold gesture (Attached cards only) ──────────────────────────
-	// Swipe a card left-to-right to ~30%, then keep holding for 2s to detach: the
-	// card wipes away right→left over the hold; on commit it leaves the Attached
-	// page (others reflow) and the session detaches. Release early → snaps back,
-	// nothing vanished. One card at a time.
+	// Swipe a card left-to-right to ~30%, then keep holding ~1.75s to detach: the
+	// whole card fades uniformly to nothing over the hold; on commit it leaves the
+	// Attached page (others reflow) and the session detaches. Release early → snaps
+	// back, nothing vanished. One card at a time.
 	const DETACH_FRACTION = 0.3; // visual lock: the card slides this far (of its width)
 	const DETACH_FINGER = 0.65; // finger travel (of card width) to reach the lock — the
 	// resistance: you drag further than the card moves, easing in so it takes a
 	// deliberate push to start rather than triggering on a light flick.
-	const DETACH_HOLD_MS = 2000; // hold-at-position duration to commit
+	const DETACH_HOLD_MS = 1750; // hold duration: the card fades to nothing over this, then commits
 	let dragId = $state<string | null>(null); // card under an active horizontal drag
 	let dragOffset = $state(0); // px translateX, >= 0 (card slides right)
 	let holdArmed = $state(false); // reached the 30% lock; 2s timer running
-	let wipeProgress = $state(0); // 0..1 right→left wipe during the hold
+	let fadeProgress = $state(0); // 0..1 right→left wipe during the hold
 	let snapBack = $state(false); // animate offset→0 on early release
 	let detachingOut = $state<Record<string, boolean>>({}); // committed → hidden from Attached
 	// Non-reactive scratch for the in-flight gesture:
@@ -317,7 +317,7 @@
 			holdRaf = null;
 		}
 		holdArmed = false;
-		wipeProgress = 0;
+		fadeProgress = 0;
 	}
 
 	function resetDrag(): void {
@@ -332,8 +332,8 @@
 		tapHaptic(); // buzz at the lock
 		holdStart = performance.now();
 		const tick = (now: number): void => {
-			wipeProgress = Math.min(1, (now - holdStart) / DETACH_HOLD_MS);
-			if (wipeProgress >= 1) {
+			fadeProgress = Math.min(1, (now - holdStart) / DETACH_HOLD_MS);
+			if (fadeProgress >= 1) {
 				holdRaf = null;
 				commitDetach();
 				return;
@@ -414,7 +414,7 @@
 
 	function onCardTouchEnd(ticket: Ticket): void {
 		if (dragId !== ticket.session_id) return;
-		if (holdArmed && wipeProgress >= 1) return; // already committed via the rAF tick
+		if (holdArmed && fadeProgress >= 1) return; // already committed via the rAF tick
 		// Early release: cancel the hold, snap back to rest, leave nothing vanished.
 		cancelHold();
 		snapBack = true;
@@ -431,23 +431,15 @@
 
 	function cardStyle(ticket: Ticket): string {
 		if (dragId !== ticket.session_id) return '';
-		// Springy easeOutBack on release; instant follow while dragging.
+		// Springy easeOutBack on release; instant follow while dragging. On release,
+		// opacity also eases back so a half-faded card doesn't snap to full.
 		const transition = snapBack
-			? 'transition: transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1);'
+			? 'transition: transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 200ms ease;'
 			: 'transition: none;';
-		// Soft gradient wipe (right→left) instead of a hard clip edge: an opaque→
-		// transparent mask whose feathered boundary sweeps left as the hold runs.
-		// Stops run past 100% / below 0% so the card is fully opaque at progress 0
-		// and fully gone at 1, with a ~22% feathered edge in between.
-		let mask = '';
-		if (holdArmed) {
-			const band = 22;
-			const edge = (1 - wipeProgress) * (100 + band);
-			const solid = edge - band;
-			const g = `linear-gradient(to right, #000 ${solid}%, transparent ${edge}%)`;
-			mask = `-webkit-mask-image: ${g}; mask-image: ${g};`;
-		}
-		return `transform: translateX(${dragOffset}px); ${transition} ${mask}`;
+		// While holding, the whole card fades uniformly to nothing over the hold
+		// (opacity 1→0); startHold's rAF drives fadeProgress across DETACH_HOLD_MS.
+		const opacity = holdArmed ? `opacity: ${1 - fadeProgress};` : '';
+		return `transform: translateX(${dragOffset}px); ${transition} ${opacity}`;
 	}
 
 	// Haptic tick at the lock — Android only (navigator.vibrate). iOS Safari has no
