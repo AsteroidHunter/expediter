@@ -877,6 +877,10 @@
 		font-size: 16px;
 		-webkit-font-smoothing: antialiased;
 		overscroll-behavior: none;
+		/* The detach drag slides a card right by ~30% of its width; that transform
+		   pushes past the viewport edge and would otherwise add a horizontal
+		   scrollbar. Clip it — vertical scroll (overflow-y) is unaffected. */
+		overflow-x: hidden;
 	}
 
 	:global(*) {
