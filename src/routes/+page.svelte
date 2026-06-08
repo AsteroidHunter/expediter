@@ -26,15 +26,18 @@
 	let tickets = $state<Ticket[]>([]);
 
 	// ── Detach-by-hold gesture (Attached cards only) ──────────────────────────
-	// Swipe a card left-to-right to ~36%, then keep holding for 2s to detach: the
+	// Swipe a card left-to-right to ~30%, then keep holding for 2s to detach: the
 	// card wipes away right→left over the hold; on commit it leaves the Attached
 	// page (others reflow) and the session detaches. Release early → snaps back,
 	// nothing vanished. One card at a time.
-	const DETACH_FRACTION = 0.36; // how far the card slides toward the middle
+	const DETACH_FRACTION = 0.3; // visual lock: the card slides this far (of its width)
+	const DETACH_FINGER = 0.5; // finger travel (of card width) to reach the lock — the
+	// resistance: you drag further than the card moves, easing in so it takes a
+	// deliberate push to start rather than triggering on a light flick.
 	const DETACH_HOLD_MS = 2000; // hold-at-position duration to commit
 	let dragId = $state<string | null>(null); // card under an active horizontal drag
-	let dragOffset = $state(0); // px translateX, <= 0
-	let holdArmed = $state(false); // reached the 36% hold position; 2s timer running
+	let dragOffset = $state(0); // px translateX, >= 0 (card slides right)
+	let holdArmed = $state(false); // reached the 30% lock; 2s timer running
 	let wipeProgress = $state(0); // 0..1 right→left wipe during the hold
 	let snapBack = $state(false); // animate offset→0 on early release
 	let detachingOut = $state<Record<string, boolean>>({}); // committed → hidden from Attached
@@ -47,6 +50,8 @@
 	let holdRaf: number | null = null;
 	let holdStart = 0;
 	let audioCtx: AudioContext | null = null;
+	let hapticLabel = $state<HTMLLabelElement | null>(null); // iOS 17.4+ haptic hack target
+	let hapticInput = $state<HTMLInputElement | null>(null);
 
 	// Two pages — Attached (default) and Detached — switched by the bottom pager
 	// bar (arrows only, no swipe). A ticket is attached unless explicitly false,
@@ -326,13 +331,7 @@
 
 	function startHold(): void {
 		holdArmed = true;
-		// Haptic tick at the 36% lock. navigator.vibrate is Android-only — iOS
-		// Safari doesn't implement the Vibration API, so iPhones won't buzz.
-		try {
-			navigator.vibrate?.(15);
-		} catch {
-			/* no vibration support */
-		}
+		tapHaptic(); // buzz at the lock
 		holdStart = performance.now();
 		const tick = (now: number): void => {
 			wipeProgress = Math.min(1, (now - holdStart) / DETACH_HOLD_MS);
@@ -406,11 +405,10 @@
 			dragMoved = true;
 		}
 		if (dragAxis !== 'h') return;
-		const armDistance = DETACH_FRACTION * dragWidth;
 		const raw = Math.max(0, dx); // rightward finger travel (left-to-right swipe)
-		const t2 = Math.min(1, raw / armDistance);
-		const eased = 1 - Math.pow(1 - t2, 3); // easeOutCubic — decelerates into the lock
-		dragOffset = armDistance * eased; // card slides right; springy, not 1:1; caps at 36%
+		const t2 = Math.min(1, raw / (DETACH_FINGER * dragWidth)); // needs a longer push than it moves
+		const eased = t2 * t2; // easeIn — resists at the start, so a light flick won't trigger it
+		dragOffset = DETACH_FRACTION * dragWidth * eased; // card moves slower than the finger; caps at 30%
 		const atHold = t2 >= 1;
 		if (atHold && !holdArmed) startHold();
 		else if (!atHold && holdArmed) cancelHold();
@@ -452,6 +450,24 @@
 			mask = `-webkit-mask-image: ${g}; mask-image: ${g};`;
 		}
 		return `transform: translateX(${dragOffset}px); ${transition} ${mask}`;
+	}
+
+	// Haptic tick at the lock. Android: navigator.vibrate. iOS Safari has no
+	// Vibration API, so we use the only web-haptic it offers — programmatically
+	// toggling a hidden <input switch> via its label emits a light haptic on
+	// iOS 17.4+. Both are best-effort; if neither fires, the spring + wipe still
+	// signal the lock.
+	function tapHaptic(): void {
+		try {
+			navigator.vibrate?.(15);
+		} catch {
+			/* no Vibration API */
+		}
+		try {
+			hapticLabel?.click();
+		} catch {
+			/* no switch-haptic support */
+		}
 	}
 
 	// Synthesized whoosh (no asset): filtered noise sweep. Best-effort — iOS mutes
@@ -603,6 +619,9 @@
 	}
 
 	onMount(async () => {
+		// Safari-only `switch` attribute set imperatively so svelte-check doesn't
+		// reject it; turns the hidden checkbox into the iOS haptic switch.
+		hapticInput?.setAttribute('switch', '');
 		if (browser && new URLSearchParams(window.location.search).has('mock')) {
 			const loader = Object.values(mockLoaders)[0];
 			if (loader) {
@@ -662,6 +681,12 @@
 </svelte:head>
 
 <main>
+	<!-- iOS 17.4+ haptic hack: tapHaptic() clicks this label, toggling the hidden
+	     <input switch> (its `switch` attr is set in onMount) to emit a light haptic
+	     — the only web-haptic iOS Safari offers (it has no Vibration API). -->
+	<label bind:this={hapticLabel} class="haptic" aria-hidden="true">
+		<input bind:this={hapticInput} type="checkbox" tabindex="-1" />
+	</label>
 	<header>
 		<div class="brand">
 			<span class="brand-name">Expediter</span>
@@ -895,6 +920,19 @@
 		pointer-events: none;
 		border: 0;
 		z-index: -1;
+	}
+
+	/* iOS haptic switch: present in the DOM (so its toggle can fire a haptic) but
+	   visually hidden and inert. */
+	.haptic {
+		position: fixed;
+		left: 0;
+		top: 0;
+		width: 1px;
+		height: 1px;
+		opacity: 0;
+		pointer-events: none;
+		overflow: hidden;
 	}
 
 	main {
