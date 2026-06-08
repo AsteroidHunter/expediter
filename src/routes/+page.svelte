@@ -26,7 +26,7 @@
 	let tickets = $state<Ticket[]>([]);
 
 	// ── Detach-by-hold gesture (Attached cards only) ──────────────────────────
-	// Swipe a card right-to-left to ~36%, then keep holding for 2s to detach: the
+	// Swipe a card left-to-right to ~36%, then keep holding for 2s to detach: the
 	// card wipes away right→left over the hold; on commit it leaves the Attached
 	// page (others reflow) and the session detaches. Release early → snaps back,
 	// nothing vanished. One card at a time.
@@ -407,10 +407,10 @@
 		}
 		if (dragAxis !== 'h') return;
 		const armDistance = DETACH_FRACTION * dragWidth;
-		const raw = Math.max(0, -dx); // leftward finger travel
+		const raw = Math.max(0, dx); // rightward finger travel (left-to-right swipe)
 		const t2 = Math.min(1, raw / armDistance);
 		const eased = 1 - Math.pow(1 - t2, 3); // easeOutCubic — decelerates into the lock
-		dragOffset = -armDistance * eased; // springy, not 1:1 linear; caps at 36%
+		dragOffset = armDistance * eased; // card slides right; springy, not 1:1; caps at 36%
 		const atHold = t2 >= 1;
 		if (atHold && !holdArmed) startHold();
 		else if (!atHold && holdArmed) cancelHold();
