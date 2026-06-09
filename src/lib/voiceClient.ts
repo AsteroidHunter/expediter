@@ -2,10 +2,10 @@
 // backends behind one VoiceSession interface so the gesture FSM in +page.svelte is
 // backend-agnostic (5.6):
 //
-//   - 'voice'   — built-in Claude Code /voice (laptop mic). The phone has no local
-//                 audio; it just POSTs start/stop/cancel to the daemon, which drives
-//                 the pane. The recording indicator is the SSE `recording` flag, not
-//                 anything here, so onAmplitude is never called.
+//   - 'voice'   — built-in Claude Code /voice (laptop mic does the transcription).
+//                 The phone POSTs start/stop/cancel to the daemon AND opens its own
+//                 mic via startMicMeter purely to drive the waveform (audio not
+//                 transmitted), so the indicator is the same real waveform as Baseten.
 //   - 'baseten' — phone mic. getUserMedia → AudioContext(16 kHz) → pcm-worklet →
 //                 PCM frames over a WebSocket to the daemon, which proxies Baseten
 //                 and types the transcript into the pane. onAmplitude drives the
@@ -43,35 +43,85 @@ async function postVoice(path: string, pane: string, token: string): Promise<voi
 	});
 }
 
-// Built-in /voice: the laptop mic records; the phone only drives start/stop/cancel.
-// release/resume are no-ops (the daemon's /voice keeps recording until send/cancel,
-// so the 3s drain just delays the stop — see the plan's drain semantics).
-function startVoiceBackend(pane: string, token: string, handlers: VoiceHandlers): VoiceSession {
+// Open the phone mic purely to drive the waveform meter (RMS → onAmplitude, with a
+// noise gate so silence reads flat). Used by both backends so there's ONE waveform.
+// On /voice the audio is NOT transmitted — the laptop mic does the actual
+// transcription — this is only so the indicator reflects real speech.
+async function startMicMeter(
+	handlers: VoiceHandlers
+): Promise<{ setPaused: (p: boolean) => void; stop: () => void }> {
+	const stream = await navigator.mediaDevices.getUserMedia({
+		audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+	});
+	const ctx = new AudioContext();
+	const source = ctx.createMediaStreamSource(stream);
+	const analyser = ctx.createAnalyser();
+	analyser.fftSize = 512;
+	source.connect(analyser);
+
+	const timeData = new Float32Array(analyser.fftSize);
+	let paused = false;
+	let raf = 0;
+	const loop = () => {
+		if (!paused) {
+			analyser.getFloatTimeDomainData(timeData);
+			let sum = 0;
+			for (let i = 0; i < timeData.length; i++) sum += timeData[i] * timeData[i];
+			const rms = Math.sqrt(sum / timeData.length);
+			const NOISE_FLOOR = 0.02;
+			handlers.onAmplitude?.(rms <= NOISE_FLOOR ? 0 : Math.min(1, (rms - NOISE_FLOOR) * 6));
+		}
+		raf = requestAnimationFrame(loop);
+	};
+	raf = requestAnimationFrame(loop);
+
+	return {
+		setPaused(p: boolean): void {
+			paused = p;
+			if (p) handlers.onAmplitude?.(0);
+		},
+		stop(): void {
+			cancelAnimationFrame(raf);
+			for (const track of stream.getTracks()) track.stop();
+			void ctx.close().catch(() => {});
+		}
+	};
+}
+
+// Built-in /voice: the laptop mic does the transcription; the phone POSTs
+// start/stop/cancel and opens its own mic only for the shared waveform meter (best
+// effort — a denied phone-mic permission just means no waveform, /voice still works).
+async function startVoiceBackend(
+	pane: string,
+	token: string,
+	handlers: VoiceHandlers
+): Promise<VoiceSession> {
 	void postVoice('/api/voice/start', pane, token).catch(() =>
 		handlers.onError?.('Could not start /voice')
 	);
+	const meter = await startMicMeter(handlers).catch(() => null);
 	let done = false;
+	const finish = (path: string): void => {
+		if (done) return;
+		done = true;
+		meter?.stop();
+		void postVoice(path, pane, token).catch(() => {});
+	};
 	return {
 		release() {
-			/* keep recording through the drain; nothing to pause on the phone */
+			meter?.setPaused(true); // recording continues on the laptop; just pause the meter
 		},
 		resume() {
-			/* still recording */
+			meter?.setPaused(false);
 		},
 		send() {
-			if (done) return;
-			done = true;
-			void postVoice('/api/voice/stop', pane, token).catch(() => {});
+			finish('/api/voice/stop');
 		},
 		cancel() {
-			if (done) return;
-			done = true;
-			void postVoice('/api/voice/cancel', pane, token).catch(() => {});
+			finish('/api/voice/cancel');
 		},
 		dispose() {
-			if (done) return;
-			done = true;
-			void postVoice('/api/voice/cancel', pane, token).catch(() => {});
+			finish('/api/voice/cancel');
 		}
 	};
 }
