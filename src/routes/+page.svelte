@@ -343,6 +343,8 @@
 		dragOffset = 0;
 		dragAxis = 'undecided';
 		cancelHold();
+		// Detach drag over — apply any SSE snapshot held back during it.
+		flushPendingTickets();
 	}
 
 	function startHold(): void {
@@ -573,11 +575,11 @@
 		return voicePhase !== 'idle' && voiceTicketId === ticket.session_id;
 	}
 
-	// The dock layout is held still (incoming SSE snapshots buffered) while a voice
-	// gesture is active, so a ticket can't reorder out from under the finger.
-	// NOTE: when this lands alongside the detach gesture, also OR-in `dragId !== null`.
+	// The dock layout is held still (incoming SSE snapshots buffered) while a gesture
+	// is in flight — a voice recording/review OR a detach drag — so a ticket can't
+	// reorder out from under the finger.
 	function layoutFrozen(): boolean {
-		return voicePhase !== 'idle';
+		return voicePhase !== 'idle' || dragId !== null;
 	}
 
 	function flushPendingTickets(): void {
