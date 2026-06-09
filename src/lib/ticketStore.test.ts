@@ -17,6 +17,7 @@ import {
 	findByPane,
 	dropPaneTicketsExcept,
 	rebindPaneTicket,
+	setRecording,
 	subscribe,
 	type Ticket
 } from './ticketStore';
@@ -718,4 +719,52 @@ test('dropPaneTicketsExcept does not notify subscribers when nothing is removed'
 
 	unsub();
 	remove('only-keeper');
+});
+
+// setRecording (speech-to-prompt) ───────────────────────────────────────────
+
+test('a freshly upserted ticket defaults recording=false', () => {
+	const id = nextId();
+	upsert({ session_id: id, tmux_pane: '%70', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+	expect(list().find((t) => t.session_id === id)?.recording).toBe(false);
+	remove(id);
+});
+
+test('setRecording flips the flag and is reflected in the snapshot', () => {
+	const id = nextId();
+	upsert({ session_id: id, tmux_pane: '%71', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+
+	expect(setRecording(id, true)).toBe(true);
+	expect(list().find((t) => t.session_id === id)?.recording).toBe(true);
+	expect(setRecording(id, false)).toBe(true);
+	expect(list().find((t) => t.session_id === id)?.recording).toBe(false);
+	remove(id);
+});
+
+test('setRecording no-ops (returns false, no notify) when the value is unchanged', () => {
+	const id = nextId();
+	upsert({ session_id: id, tmux_pane: '%72', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+
+	const snaps: Ticket[][] = [];
+	const unsub = subscribe((s) => snaps.push(s));
+	expect(setRecording(id, false)).toBe(false); // already false
+	expect(snaps.length).toBe(0);
+
+	unsub();
+	remove(id);
+});
+
+test('setRecording returns false for a session with no ticket', () => {
+	expect(setRecording('no-such-session', true)).toBe(false);
+});
+
+test('recording is preserved across a re-upsert (owned by the voice routes, not the event pipeline)', () => {
+	const id = nextId();
+	upsert({ session_id: id, tmux_pane: '%73', cwd: '/a', title: 't', event_type: 'Stop', created_at: Date.now() });
+	setRecording(id, true);
+
+	// A fresh event for the same session re-upserts; recording must survive it.
+	upsert({ session_id: id, tmux_pane: '%73', cwd: '/a', title: 't2', event_type: 'PermissionRequest', created_at: Date.now() });
+	expect(list().find((t) => t.session_id === id)?.recording).toBe(true);
+	remove(id);
 });
