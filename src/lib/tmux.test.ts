@@ -9,8 +9,10 @@ import {
 	FocusError,
 	sendKeysArgs,
 	pasteBufferArgs,
+	sendTextArgs,
 	parsePaneReadiness,
 	sendKeys,
+	sendText,
 	submitPrompt,
 	paneAcceptsInput,
 	InjectError,
@@ -337,6 +339,21 @@ test('pasteBufferArgs builds the bracketed self-deleting paste argv on the injec
 	]);
 });
 
+// sendTextArgs ──────────────────────────────────────────────────────────────
+
+// -l sends literal text (no key-name lookup) and -- ends flag parsing so a suffix
+// beginning with '-' isn't read as a flag — both matter for live-typing transcripts.
+test('sendTextArgs builds a literal send-keys argv terminated with --', () => {
+	expect(sendTextArgs('%5', 'hello world')).toEqual([
+		'send-keys',
+		'-t',
+		'%5',
+		'-l',
+		'--',
+		'hello world'
+	]);
+});
+
 // parsePaneReadiness ────────────────────────────────────────────────────────
 
 test('parsePaneReadiness is ready when Claude Code is foreground and not in a mode', () => {
@@ -392,6 +409,15 @@ test('sendKeys rejects an empty key list with InjectError', async () => {
 
 test('submitPrompt rejects an invalid pane id with InjectError', async () => {
 	expect(await captureThrow(() => submitPrompt('%', 'hello world'))).toBeInstanceOf(InjectError);
+});
+
+test('sendText rejects an invalid pane id with InjectError', async () => {
+	expect(await captureThrow(() => sendText('14', 'hi'))).toBeInstanceOf(InjectError);
+});
+
+test('sendText is a no-op for empty text on a valid pane (no tmux call, no throw)', async () => {
+	// Empty text short-circuits before shelling out, so a valid pane id resolves cleanly.
+	expect(await captureThrow(() => sendText('%5', ''))).toBeUndefined();
 });
 
 // paneAcceptsInput returns a verdict (never throws) for a bad id ─────────────

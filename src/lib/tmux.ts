@@ -452,6 +452,26 @@ export async function sendKeys(pane: string, keys: string[]): Promise<void> {
 	}
 }
 
+// Build the argv for `tmux send-keys -l` sending LITERAL text (no key-name lookup)
+// to a pane — used to live-type Baseten transcript suffixes as they stream in.
+// `--` terminates flag parsing so a suffix starting with '-' isn't read as a flag.
+// Pure for unit-testing the command shape.
+export function sendTextArgs(pane: string, text: string): string[] {
+	return ['send-keys', '-t', pane, '-l', '--', text];
+}
+
+// Type literal text into a pane (no Enter) for incremental live transcription.
+// Empty text is a no-op. Throws InjectError on a bad pane id or tmux failure.
+export async function sendText(pane: string, text: string): Promise<void> {
+	if (!isValidPane(pane)) throw new InjectError(`invalid pane id '${pane}'`);
+	if (text.length === 0) return;
+	try {
+		await execFileAsync('tmux', sendTextArgs(pane, text));
+	} catch {
+		throw new InjectError(`tmux send-keys -l failed for pane '${pane}'`);
+	}
+}
+
 // The dedicated tmux paste buffer the daemon loads transcript text into. Named
 // (not the anonymous default stack) so injecting never disturbs whatever the user
 // keeps in their own paste buffers; paste-buffer -d deletes it right after use.
