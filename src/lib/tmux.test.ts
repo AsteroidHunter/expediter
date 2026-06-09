@@ -7,6 +7,13 @@ import {
 	pickTtyForWindow,
 	focusPane,
 	FocusError,
+	sendKeysArgs,
+	pasteBufferArgs,
+	parsePaneReadiness,
+	sendKeys,
+	submitPrompt,
+	paneAcceptsInput,
+	InjectError,
 	type TabLocation
 } from './tmux';
 
@@ -293,4 +300,103 @@ test('focusPane rejects bare %', async () => {
 
 test('focusPane rejects mixed body', async () => {
 	expect(await captureThrow(() => focusPane('%1a'))).toBeInstanceOf(FocusError);
+});
+
+// sendKeysArgs ──────────────────────────────────────────────────────────────
+
+test('sendKeysArgs builds send-keys argv with a single named key', () => {
+	expect(sendKeysArgs('%5', ['Space'])).toEqual(['send-keys', '-t', '%5', 'Space']);
+});
+
+test('sendKeysArgs appends every key after the target in order', () => {
+	expect(sendKeysArgs('%12', ['C-u', 'Enter'])).toEqual([
+		'send-keys',
+		'-t',
+		'%12',
+		'C-u',
+		'Enter'
+	]);
+});
+
+// pasteBufferArgs ───────────────────────────────────────────────────────────
+
+// -d (delete after paste), -p (bracketed paste), -r (no LF→CR) and the named
+// inject buffer are all load-bearing: -p/-r keep multi-line/special transcript
+// text literal instead of submitting early, and the named buffer + -d keep the
+// user's own paste buffers untouched.
+test('pasteBufferArgs builds the bracketed self-deleting paste argv on the inject buffer', () => {
+	expect(pasteBufferArgs('%5')).toEqual([
+		'paste-buffer',
+		'-d',
+		'-p',
+		'-r',
+		'-b',
+		'expediter-voice',
+		'-t',
+		'%5'
+	]);
+});
+
+// parsePaneReadiness ────────────────────────────────────────────────────────
+
+test('parsePaneReadiness is ready when Claude Code is foreground and not in a mode', () => {
+	expect(parsePaneReadiness('claude.exe|0')).toEqual({ ready: true });
+});
+
+test('parsePaneReadiness accepts the bare "claude" command name too', () => {
+	expect(parsePaneReadiness('claude|0')).toEqual({ ready: true });
+});
+
+test('parsePaneReadiness refuses a non-Claude foreground process', () => {
+	const r = parsePaneReadiness('zsh|0');
+	expect(r.ready).toBe(false);
+	if (!r.ready) expect(r.reason).toContain('zsh');
+});
+
+test('parsePaneReadiness refuses a pane in copy-mode', () => {
+	const r = parsePaneReadiness('claude.exe|1');
+	expect(r.ready).toBe(false);
+	if (!r.ready) expect(r.reason).toContain('copy-mode');
+});
+
+test('parsePaneReadiness trims surrounding whitespace before matching', () => {
+	expect(parsePaneReadiness('  claude.exe|0\n')).toEqual({ ready: true });
+});
+
+test('parsePaneReadiness fails closed on output missing the separator', () => {
+	expect(parsePaneReadiness('claude.exe').ready).toBe(false);
+});
+
+test('parsePaneReadiness fails closed on empty output', () => {
+	expect(parsePaneReadiness('').ready).toBe(false);
+});
+
+test('parsePaneReadiness fails closed when the in-mode field is not a clean 0/1', () => {
+	expect(parsePaneReadiness('claude.exe|').ready).toBe(false);
+});
+
+test('parsePaneReadiness honors a custom accepted-commands list', () => {
+	expect(parsePaneReadiness('node|0', ['node'])).toEqual({ ready: true });
+	expect(parsePaneReadiness('claude.exe|0', ['node']).ready).toBe(false);
+});
+
+// sendKeys / submitPrompt validation (invalid ids short-circuit before tmux) ──
+
+test('sendKeys rejects an invalid pane id with InjectError', async () => {
+	expect(await captureThrow(() => sendKeys('14', ['Space']))).toBeInstanceOf(InjectError);
+});
+
+test('sendKeys rejects an empty key list with InjectError', async () => {
+	expect(await captureThrow(() => sendKeys('%5', []))).toBeInstanceOf(InjectError);
+});
+
+test('submitPrompt rejects an invalid pane id with InjectError', async () => {
+	expect(await captureThrow(() => submitPrompt('%', 'hello world'))).toBeInstanceOf(InjectError);
+});
+
+// paneAcceptsInput returns a verdict (never throws) for a bad id ─────────────
+
+test('paneAcceptsInput returns not-ready for an invalid pane id without throwing', async () => {
+	const r = await paneAcceptsInput('nope');
+	expect(r.ready).toBe(false);
 });
