@@ -25,6 +25,7 @@ import process from 'node:process';
 import { handler } from '../build/handler.js';
 import { ensureCerts, localIPv4s } from '../src/lib/server/cert.ts';
 import { createDoormatHandler } from '../src/lib/server/doormat.ts';
+import { attachVoiceSocket } from '../src/lib/server/voiceSocket.ts';
 
 const useHttps = !process.argv.includes('--http');
 const host = process.env.EXPEDITER_HOST || '0.0.0.0';
@@ -64,6 +65,12 @@ if (useHttps) {
 } else {
 	server = http.createServer(handler);
 }
+
+// Attach the Baseten audio WebSocket to the app server's `upgrade` event (the
+// doormat is plaintext cert-bootstrap only, so audio never rides it). adapter-node's
+// handler can't speak WS, so this is server-level, not a route. Its own inline
+// token check runs here because hooks.server.ts never sees an upgrade.
+attachVoiceSocket(server);
 
 server.listen(port, host, () => {
 	const scheme = useHttps ? 'https' : 'http';
