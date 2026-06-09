@@ -152,8 +152,11 @@ async function startBasetenBackend(
 			let sum = 0;
 			for (let i = 0; i < timeData.length; i++) sum += timeData[i] * timeData[i];
 			const rms = Math.sqrt(sum / timeData.length);
-			// Light compression so quiet speech still moves the meter; clamp to 0..1.
-			handlers.onAmplitude?.(Math.min(1, rms * 4));
+			// Gate the noise floor so silence reads flat instead of bouncing on ambient
+			// hiss, then scale so speech fills the meter; clamp to 0..1.
+			const NOISE_FLOOR = 0.02;
+			const level = rms <= NOISE_FLOOR ? 0 : Math.min(1, (rms - NOISE_FLOOR) * 6);
+			handlers.onAmplitude?.(level);
 		}
 		raf = requestAnimationFrame(meter);
 	};

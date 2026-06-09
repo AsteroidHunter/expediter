@@ -911,18 +911,15 @@
 							</button>
 
 							{#if isVoiceActive(ticket)}
-								<!-- Orange-red wash: full cover while recording; on the drain it wipes
-								     right→left, revealing the ticket's prior color. Keyed by drainNonce
-								     so a resume restarts the wipe. pointer-events:none so the ticket
-								     button keeps receiving the gesture. -->
-								{#key drainNonce}
-									<div
-										class="voice-wash"
-										class:draining={voicePhase === 'draining'}
-										aria-hidden="true"
-									></div>
-								{/key}
+								<!-- Recording UI. The ticket itself turns orange-red via CSS vars
+								     (.recording/.draining) — no full-cover overlay, so the perforation
+								     notch stays cut out and the idle/detached desaturation can't grey it.
+								     On the drain a thin bar counts down to send and the circle becomes a
+								     cancel button. -->
 								{#if voicePhase === 'draining'}
+									{#key drainNonce}
+										<div class="voice-drain-bar" aria-hidden="true"></div>
+									{/key}
 									<button
 										type="button"
 										class="voice-cancel"
@@ -936,9 +933,7 @@
 											<span class="bar" style="height:{5 + amplitude * 26}px"></span>
 											<span class="bar" style="height:{6 + amplitude * 20}px"></span>
 										{:else}
-											<span class="bar mock"></span>
-											<span class="bar mock"></span>
-											<span class="bar mock"></span>
+											<span class="rec-dot"></span>
 										{/if}
 									</div>
 								{/if}
@@ -1701,52 +1696,64 @@
 
 	/* ─── Speech-to-prompt recording UI (Phase 5) ───────────────────────────── */
 
-	/* Raised ticket while recording or draining. Placed after .working/.pressing so
-	   it wins the transform on equal specificity. */
+	/* Recording / draining ticket: turn the whole card orange-red via the SAME CSS
+	   variables the working/permission states use — not an overlay — so the
+	   perforation notch (var(--page-bg)) stays cut out. filter:none defeats the
+	   idle/detached/stale saturate(0) that otherwise greyed the card. Raised and
+	   above its neighbors; placed after .working/.detached so it wins on source order. */
 	.ticket.recording,
 	.ticket.draining {
+		--bg: #ff5436;
+		--border: #e23d1f;
+		--title: #fff4f0;
+		--muted: #ffd7cc;
+		--accent: #ffffff;
+		filter: none;
 		transform: translateY(-3px) scale(1.012);
-		box-shadow: 0 6px 18px rgba(150, 50, 20, 0.28);
+		box-shadow: 0 6px 18px rgba(150, 50, 20, 0.3);
 		z-index: 3;
 	}
 
-	/* Punchy orange-red wash, distinct from the permission/notification shades. Sits
-	   above the ticket fill (z-index 0) but below the text (.stub/.body are z-index
-	   1), so the transcript-less card just glows orange-red. On the drain it wipes
-	   right→left via clip-path, revealing the ticket's prior color from the right. The
+	/* Drain countdown: a thin bar pinned to the ticket's bottom edge that shrinks
+	   right→left over the drain (scaleX 1→0 from the right) — it's the time left
+	   before the transcript sends. Keyed by drainNonce so a resume restarts it; the
 	   3s duration is coupled to DRAIN_MS in the script. */
-	.voice-wash {
+	.voice-drain-bar {
 		position: absolute;
-		inset: 0;
-		z-index: 0;
-		background: rgba(255, 84, 54, 0.93);
-		pointer-events: none;
-	}
-	.voice-wash.draining {
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 3px;
+		background: rgba(255, 255, 255, 0.9);
+		transform-origin: right center;
 		animation: voice-drain 3s linear forwards;
+		pointer-events: none;
+		z-index: 2;
 	}
 	@keyframes voice-drain {
 		from {
-			clip-path: inset(0 0 0 0);
+			transform: scaleX(1);
 		}
 		to {
-			clip-path: inset(0 100% 0 0);
+			transform: scaleX(0);
 		}
 	}
 
-	/* Right-end indicator circle. Recording: a small waveform (real amplitude bars on
-	   Baseten, a looping mock on /voice). Both sit above the wash and text (z-index
-	   2). pointer-events:none so the hold gesture passes through to the ticket. */
+	/* Right-end indicator circle. Baseten: real amplitude bars (height = loudness).
+	   /voice: a pulsing dot — the phone has no audio on that path, so it honestly
+	   signals "recording is on" rather than faking a bouncing waveform.
+	   pointer-events:none so the hold gesture passes through to the ticket. */
 	.voice-indicator {
 		position: absolute;
 		top: 50%;
 		right: 14px;
 		transform: translateY(-50%);
 		z-index: 2;
+		box-sizing: border-box;
 		width: 34px;
 		height: 34px;
 		border-radius: 50%;
-		background: rgba(255, 253, 245, 0.94);
+		background: rgba(255, 253, 245, 0.95);
 		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
 		display: flex;
 		align-items: center;
@@ -1761,41 +1768,41 @@
 		background: #d33a1c;
 		transition: height 70ms linear;
 	}
-	/* /voice has no phone-side audio, so its indicator is a looping mock wave that
-	   only signals "recording is on", not amplitude. */
-	.voice-indicator .bar.mock {
-		height: 10px;
-		animation: voice-mock-wave 0.9s ease-in-out infinite;
+	.voice-indicator .rec-dot {
+		width: 11px;
+		height: 11px;
+		border-radius: 50%;
+		background: #d33a1c;
+		animation: rec-pulse 1.2s ease-in-out infinite;
 	}
-	.voice-indicator .bar.mock:nth-child(2) {
-		animation-delay: 0.15s;
-	}
-	.voice-indicator .bar.mock:nth-child(3) {
-		animation-delay: 0.3s;
-	}
-	@keyframes voice-mock-wave {
+	@keyframes rec-pulse {
 		0%,
 		100% {
-			height: 7px;
+			opacity: 1;
+			transform: scale(1);
 		}
 		50% {
-			height: 24px;
+			opacity: 0.4;
+			transform: scale(0.7);
 		}
 	}
 
-	/* During the drain the circle becomes a cancel button. pointer-events:auto (it
-	   overrides the indicator) so a tap on it discards the dictation. */
+	/* During the drain the circle becomes a cancel button. box-sizing + fixed size +
+	   padding:0 keep it a clean circle (no UA button padding making it an oval).
+	   pointer-events default (auto) so a tap discards the dictation. */
 	.voice-cancel {
 		position: absolute;
 		top: 50%;
 		right: 14px;
 		transform: translateY(-50%);
-		z-index: 2;
+		z-index: 3;
+		box-sizing: border-box;
 		width: 34px;
 		height: 34px;
-		border-radius: 50%;
+		padding: 0;
 		border: 0;
-		background: rgba(255, 253, 245, 0.96);
+		border-radius: 50%;
+		background: rgba(255, 253, 245, 0.97);
 		color: #b3301a;
 		font-size: 20px;
 		line-height: 1;
