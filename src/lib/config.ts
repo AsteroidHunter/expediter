@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 const DEFAULT_REFRESH_EVERY = 5;
 const DEFAULT_CONFIG_PATH = join(homedir(), '.expediter', 'config.json');
@@ -109,6 +109,27 @@ export function getBasetenModelId(configPath: string = DEFAULT_CONFIG_PATH): str
 	const value = (parsed as { baseten_model_id?: unknown }).baseten_model_id;
 	if (typeof value === 'string' && value.trim().length > 0) return value.trim();
 	return null;
+}
+
+// Persist the STT backend choice into config.json, merging so other settings
+// (title_source, title_refresh_every, baseten_model_id) survive. Reads the current
+// file, overwrites just stt_backend, writes it back pretty-printed. Creates the
+// ~/.expediter dir if missing. Used by the settings UI's POST /api/voice/config
+// (the daemon writes; the phone never touches the file directly). Throws on a
+// write failure so the route can report it.
+export function setSttBackend(backend: SttBackend, configPath: string = DEFAULT_CONFIG_PATH): void {
+	let parsed: Record<string, unknown> = {};
+	try {
+		const obj: unknown = JSON.parse(readFileSync(configPath, 'utf8'));
+		if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+			parsed = obj as Record<string, unknown>;
+		}
+	} catch {
+		/* missing or corrupt file → start from an empty object */
+	}
+	parsed.stt_backend = backend;
+	mkdirSync(dirname(configPath), { recursive: true });
+	writeFileSync(configPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
 }
 
 // Baseten API key, read from the environment and NEVER from config.json — it must

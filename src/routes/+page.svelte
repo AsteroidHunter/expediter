@@ -412,6 +412,23 @@
 		}
 	}
 
+	// Settings UI (6.1): persist the backend choice. Optimistic — revert on failure.
+	async function setBackend(b: VoiceBackend): Promise<void> {
+		if (!clientToken || b === sttBackend) return;
+		const prev = sttBackend;
+		sttBackend = b;
+		try {
+			const res = await fetch('/api/voice/config', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'x-expediter-token': clientToken },
+				body: JSON.stringify({ backend: b })
+			});
+			if (!res.ok) sttBackend = prev;
+		} catch {
+			sttBackend = prev;
+		}
+	}
+
 	function resetVoice(dispose = false): void {
 		clearHoldTimer();
 		clearDrainTimer();
@@ -782,6 +799,29 @@
 			onclick={closeSettings}
 		></div>
 		<div class="settings-panel" role="menu">
+			<div class="settings-section">
+				<span class="settings-section-label">Voice backend</span>
+				<div class="backend-toggle" role="group" aria-label="Speech-to-text backend">
+					<button
+						type="button"
+						class="backend-opt"
+						class:active={sttBackend === 'baseten'}
+						aria-pressed={sttBackend === 'baseten'}
+						onclick={() => setBackend('baseten')}
+					>
+						Baseten
+					</button>
+					<button
+						type="button"
+						class="backend-opt"
+						class:active={sttBackend === 'voice'}
+						aria-pressed={sttBackend === 'voice'}
+						onclick={() => setBackend('voice')}
+					>
+						/voice
+					</button>
+				</div>
+			</div>
 			<button
 				type="button"
 				class="settings-action danger"
@@ -1132,6 +1172,50 @@
 			transform: translate(-50%, -50%) scale(1);
 		}
 	}
+	/* Backend selector in the settings panel (6.1). A label over a two-option
+	   segmented toggle, styled to sit above the destructive shutdown action. */
+	.settings-section {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 14px 16px 10px;
+	}
+	.settings-section-label {
+		font-size: 11px;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: rgba(42, 31, 21, 0.5);
+	}
+	.backend-toggle {
+		display: flex;
+		gap: 4px;
+		background: rgba(201, 189, 154, 0.22);
+		border-radius: 3px;
+		padding: 3px;
+	}
+	.backend-opt {
+		flex: 1;
+		background: transparent;
+		border: 0;
+		color: #6b5a3a;
+		font: inherit;
+		font-size: 13px;
+		letter-spacing: 0.04em;
+		padding: 8px 10px;
+		border-radius: 2px;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition:
+			background 120ms ease,
+			color 120ms ease;
+	}
+	.backend-opt.active {
+		background: #fffdf5;
+		color: #2a1f15;
+		font-weight: 600;
+		box-shadow: 0 1px 3px rgba(80, 60, 30, 0.18);
+	}
+
 	.settings-action {
 		display: flex;
 		align-items: center;

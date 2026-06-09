@@ -2,7 +2,15 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getRefreshInterval, getTitleSource, getSttBackend, getBasetenModelId, getBasetenApiKey } from './config';
+import { readFileSync } from 'node:fs';
+import {
+	getRefreshInterval,
+	getTitleSource,
+	getSttBackend,
+	getBasetenModelId,
+	getBasetenApiKey,
+	setSttBackend
+} from './config';
 
 let tmpDir: string;
 let configFile: string;
@@ -209,4 +217,33 @@ test('getBasetenApiKey reads BASETEN_API_KEY from the environment, null when uns
 		if (saved === undefined) delete process.env.BASETEN_API_KEY;
 		else process.env.BASETEN_API_KEY = saved;
 	}
+});
+
+// setSttBackend (settings UI write path) ────────────────────────────────────
+
+test('setSttBackend writes a backend that getSttBackend reads back (round-trip)', () => {
+	setSttBackend('baseten', configFile);
+	expect(getSttBackend(configFile)).toBe('baseten');
+	setSttBackend('voice', configFile);
+	expect(getSttBackend(configFile)).toBe('voice');
+});
+
+test('setSttBackend merges, preserving other settings in the file', () => {
+	writeFileSync(
+		configFile,
+		JSON.stringify({ title_source: 'haiku', title_refresh_every: 9, baseten_model_id: 'm1' }),
+		'utf8'
+	);
+	setSttBackend('baseten', configFile);
+	expect(getSttBackend(configFile)).toBe('baseten');
+	expect(getTitleSource(configFile)).toBe('haiku');
+	expect(getRefreshInterval(configFile)).toBe(9);
+	expect(getBasetenModelId(configFile)).toBe('m1');
+});
+
+test('setSttBackend creates a clean object when the existing file is corrupt', () => {
+	writeFileSync(configFile, '{not valid json', 'utf8');
+	setSttBackend('voice', configFile);
+	const parsed = JSON.parse(readFileSync(configFile, 'utf8'));
+	expect(parsed).toEqual({ stt_backend: 'voice' });
 });
