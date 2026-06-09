@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getRefreshInterval, getTitleSource } from './config';
+import { getRefreshInterval, getTitleSource, getSttBackend, getBasetenModelId, getBasetenApiKey } from './config';
 
 let tmpDir: string;
 let configFile: string;
@@ -119,4 +119,94 @@ test('getTitleSource and getRefreshInterval coexist in the same config file', ()
 	);
 	expect(getTitleSource(configFile)).toBe('haiku');
 	expect(getRefreshInterval(configFile)).toBe(9);
+});
+
+// getSttBackend ─────────────────────────────────────────────────────────────
+
+test('getSttBackend defaults to "voice" when the file does not exist', () => {
+	expect(getSttBackend(configFile)).toBe('voice');
+});
+
+test('getSttBackend returns "baseten" when set explicitly', () => {
+	writeFileSync(configFile, JSON.stringify({ stt_backend: 'baseten' }), 'utf8');
+	expect(getSttBackend(configFile)).toBe('baseten');
+});
+
+test('getSttBackend returns "voice" when set explicitly', () => {
+	writeFileSync(configFile, JSON.stringify({ stt_backend: 'voice' }), 'utf8');
+	expect(getSttBackend(configFile)).toBe('voice');
+});
+
+test('getSttBackend defaults to "voice" when JSON is malformed', () => {
+	writeFileSync(configFile, '{stt_backend: "baseten"', 'utf8');
+	expect(getSttBackend(configFile)).toBe('voice');
+});
+
+test('getSttBackend defaults to "voice" on an unknown backend string', () => {
+	writeFileSync(configFile, JSON.stringify({ stt_backend: 'deepgram' }), 'utf8');
+	expect(getSttBackend(configFile)).toBe('voice');
+});
+
+test('getSttBackend defaults to "voice" when value is not a string', () => {
+	writeFileSync(configFile, JSON.stringify({ stt_backend: 1 }), 'utf8');
+	expect(getSttBackend(configFile)).toBe('voice');
+});
+
+test('getSttBackend defaults to "voice" when JSON is not an object', () => {
+	writeFileSync(configFile, JSON.stringify(['baseten']), 'utf8');
+	expect(getSttBackend(configFile)).toBe('voice');
+});
+
+// getBasetenModelId ─────────────────────────────────────────────────────────
+
+test('getBasetenModelId returns null when the file does not exist', () => {
+	expect(getBasetenModelId(configFile)).toBeNull();
+});
+
+test('getBasetenModelId returns the id when set', () => {
+	writeFileSync(configFile, JSON.stringify({ baseten_model_id: 'abcd1234' }), 'utf8');
+	expect(getBasetenModelId(configFile)).toBe('abcd1234');
+});
+
+test('getBasetenModelId trims surrounding whitespace', () => {
+	writeFileSync(configFile, JSON.stringify({ baseten_model_id: '  abcd1234  ' }), 'utf8');
+	expect(getBasetenModelId(configFile)).toBe('abcd1234');
+});
+
+test('getBasetenModelId returns null on a blank string', () => {
+	writeFileSync(configFile, JSON.stringify({ baseten_model_id: '   ' }), 'utf8');
+	expect(getBasetenModelId(configFile)).toBeNull();
+});
+
+test('getBasetenModelId returns null when value is not a string', () => {
+	writeFileSync(configFile, JSON.stringify({ baseten_model_id: 42 }), 'utf8');
+	expect(getBasetenModelId(configFile)).toBeNull();
+});
+
+test('stt settings coexist with the title settings in one file', () => {
+	writeFileSync(
+		configFile,
+		JSON.stringify({ stt_backend: 'baseten', baseten_model_id: 'm1', title_source: 'haiku' }),
+		'utf8'
+	);
+	expect(getSttBackend(configFile)).toBe('baseten');
+	expect(getBasetenModelId(configFile)).toBe('m1');
+	expect(getTitleSource(configFile)).toBe('haiku');
+});
+
+// getBasetenApiKey (env-backed, not config.json) ─────────────────────────────
+
+test('getBasetenApiKey reads BASETEN_API_KEY from the environment, null when unset', () => {
+	const saved = process.env.BASETEN_API_KEY;
+	try {
+		delete process.env.BASETEN_API_KEY;
+		expect(getBasetenApiKey()).toBeNull();
+		process.env.BASETEN_API_KEY = '  secret-key  ';
+		expect(getBasetenApiKey()).toBe('secret-key');
+		process.env.BASETEN_API_KEY = '   ';
+		expect(getBasetenApiKey()).toBeNull();
+	} finally {
+		if (saved === undefined) delete process.env.BASETEN_API_KEY;
+		else process.env.BASETEN_API_KEY = saved;
+	}
 });
