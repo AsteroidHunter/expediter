@@ -30,6 +30,9 @@
 	};
 
 	let tickets = $state<Ticket[]>([]);
+	// Latest SSE snapshot held back while a gesture is in flight (see layoutFrozen),
+	// applied when the gesture ends so the list can't re-sort under the user's finger.
+	let pendingTickets: Ticket[] | null = null;
 
 	// ── Detach-by-hold gesture (Attached cards only) ──────────────────────────
 	// Swipe a card left-to-right to ~30%, then keep holding ~1.75s to detach: the
@@ -224,7 +227,13 @@
 		eventSource.onmessage = (e: MessageEvent) => {
 			try {
 				const parsed = JSON.parse(e.data) as Ticket[];
-				if (Array.isArray(parsed)) tickets = parsed;
+				if (!Array.isArray(parsed)) return;
+				// Hold the layout still while a gesture is in flight (recording, the
+				// review state, or a detach drag) so another session finishing doesn't
+				// re-sort the list and yank the ticket out from under your finger. The
+				// latest snapshot is buffered and applied when the gesture ends.
+				if (layoutFrozen()) pendingTickets = parsed;
+				else tickets = parsed;
 			} catch {
 				/* ignore malformed frame */
 			}
@@ -502,15 +511,11 @@
 
 	// ─── Speech-to-prompt gesture (Phase 5) ─────────────────────────────────
 	// Press-and-hold a ticket ~HOLD_MS to start dictation (RECORDING); release to
-	// start a DRAIN — a 3s right→left wipe. If the drain completes untouched the
-	// transcript is sent; tapping the circle cancels; tap-and-hold resumes. A press
-	// shorter than HOLD_MS (or one that moves past the slop) falls through to the
-	// normal tap (focus/attach). One recording at a time (v1).
-	//
-	// NOT verifiable without a real touch device + mic + HTTPS; thresholds and the
-	// two sounds are sensible defaults (OQ4/OQ5), tunable here.
+	// enter REVIEW, where you explicitly tap ✓ to send or ✗ to discard (or hold again
+	// to resume) — nothing sends on a timer. A press shorter than HOLD_MS (or one that
+	// moves past the slop) falls through to the normal tap (focus/attach). One
+	// recording at a time (v1).
 	const HOLD_MS = 1000; // press duration to arm recording (~1–2s per the plan)
-	const DRAIN_MS = 3000; // post-release wipe before auto-send
 	const SLOP = 10; // px of movement that reclassifies a hold as a scroll
 
 	let sttBackend = $state<VoiceBackend>('voice');
@@ -519,7 +524,6 @@
 	let amplitude = $state(0); // 0..1 mic loudness (Baseten waveform)
 	let voiceError = $state<string | null>(null);
 	let voiceErrorTimer: ReturnType<typeof setTimeout> | null = null;
-	let drainNonce = $state(0); // bumped to (re)start the drain wipe animation
 
 	// A completed long-press (or a tap during the drain) is followed by a synthetic
 	// click; this flag lets the ticket's onclick swallow that one click so a voice
@@ -567,6 +571,20 @@
 
 	function isVoiceActive(ticket: Ticket): boolean {
 		return voicePhase !== 'idle' && voiceTicketId === ticket.session_id;
+	}
+
+	// The dock layout is held still (incoming SSE snapshots buffered) while a voice
+	// gesture is active, so a ticket can't reorder out from under the finger.
+	// NOTE: when this lands alongside the detach gesture, also OR-in `dragId !== null`.
+	function layoutFrozen(): boolean {
+		return voicePhase !== 'idle';
+	}
+
+	function flushPendingTickets(): void {
+		if (pendingTickets) {
+			tickets = pendingTickets;
+			pendingTickets = null;
+		}
 	}
 
 	function clearHoldTimer(): void {
@@ -662,6 +680,8 @@
 		voiceTicketId = null;
 		amplitude = 0;
 		pointerIsResume = false;
+		// Gesture over — apply any SSE snapshot we held back so the dock catches up.
+		flushPendingTickets();
 	}
 
 	async function beginRecording(ticket: Ticket): Promise<void> {
@@ -698,13 +718,10 @@
 	}
 
 	function startDrain(): void {
+		// Release → "review": recording stops but NOTHING sends on its own. The user
+		// taps ✓ to send or ✗ to discard (or holds again to resume). No timer.
 		setVoicePhase('draining');
-		drainNonce += 1; // remount the wash so the wipe animation (re)starts
 		clearDrainTimer();
-		drainTimer = setTimeout(() => {
-			drainTimer = null;
-			doSend();
-		}, DRAIN_MS);
 	}
 
 	function enterDrain(): void {
@@ -1157,30 +1174,29 @@
 							</button>
 
 							{#if isVoiceActive(ticket)}
-								<!-- Recording UI. The ticket itself turns orange-red via CSS vars
-								     (.recording/.draining) — no full-cover overlay, so the perforation
-								     notch stays cut out and the idle/detached desaturation can't grey it.
-								     On the drain a thin bar counts down to send and the circle becomes a
-								     cancel button. -->
+								<!-- Recording UI. The ticket turns orange-red via CSS vars
+								     (.recording/.draining) — no overlay, so the perforation notch stays
+								     cut out. Recording shows a live amplitude waveform off the phone mic
+								     (same for both backends); release shows ✓ send / ✗ discard — nothing
+								     auto-sends. -->
 								{#if voicePhase === 'draining'}
-									{#key drainNonce}
-										<div class="voice-drain-bar" aria-hidden="true"></div>
-									{/key}
+									<button
+										type="button"
+										class="voice-send"
+										aria-label="Send dictation"
+										onclick={doSend}>✓</button
+									>
 									<button
 										type="button"
 										class="voice-cancel"
-										aria-label="Cancel dictation"
-										onclick={doCancel}>×</button
+										aria-label="Discard dictation"
+										onclick={doCancel}>✕</button
 									>
 								{:else}
 									<div class="voice-indicator" aria-hidden="true">
-										{#if sttBackend === 'baseten'}
-											<span class="bar" style="height:{6 + amplitude * 20}px"></span>
-											<span class="bar" style="height:{5 + amplitude * 26}px"></span>
-											<span class="bar" style="height:{6 + amplitude * 20}px"></span>
-										{:else}
-											<span class="rec-dot"></span>
-										{/if}
+										<span class="bar" style="height:{6 + amplitude * 20}px"></span>
+										<span class="bar" style="height:{5 + amplitude * 26}px"></span>
+										<span class="bar" style="height:{6 + amplitude * 20}px"></span>
 									</div>
 								{/if}
 							{/if}
@@ -1963,34 +1979,8 @@
 		z-index: 3;
 	}
 
-	/* Drain countdown: a thin bar pinned to the ticket's bottom edge that shrinks
-	   right→left over the drain (scaleX 1→0 from the right) — it's the time left
-	   before the transcript sends. Keyed by drainNonce so a resume restarts it; the
-	   3s duration is coupled to DRAIN_MS in the script. */
-	.voice-drain-bar {
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		height: 3px;
-		background: rgba(255, 255, 255, 0.9);
-		transform-origin: right center;
-		animation: voice-drain 3s linear forwards;
-		pointer-events: none;
-		z-index: 2;
-	}
-	@keyframes voice-drain {
-		from {
-			transform: scaleX(1);
-		}
-		to {
-			transform: scaleX(0);
-		}
-	}
-
-	/* Right-end indicator circle. Baseten: real amplitude bars (height = loudness).
-	   /voice: a pulsing dot — the phone has no audio on that path, so it honestly
-	   signals "recording is on" rather than faking a bouncing waveform.
+	/* Right-end indicator circle: a live amplitude waveform off the phone mic (same
+	   for both backends — silence reads flat thanks to the noise gate in voiceClient).
 	   pointer-events:none so the hold gesture passes through to the ticket. */
 	.voice-indicator {
 		position: absolute;
@@ -2017,32 +2007,14 @@
 		background: #d33a1c;
 		transition: height 70ms linear;
 	}
-	.voice-indicator .rec-dot {
-		width: 11px;
-		height: 11px;
-		border-radius: 50%;
-		background: #d33a1c;
-		animation: rec-pulse 1.2s ease-in-out infinite;
-	}
-	@keyframes rec-pulse {
-		0%,
-		100% {
-			opacity: 1;
-			transform: scale(1);
-		}
-		50% {
-			opacity: 0.4;
-			transform: scale(0.7);
-		}
-	}
 
-	/* During the drain the circle becomes a cancel button. box-sizing + fixed size +
-	   padding:0 keep it a clean circle (no UA button padding making it an oval).
-	   pointer-events default (auto) so a tap discards the dictation. */
+	/* Review state: explicit Send (✓) and Discard (✗) buttons — nothing auto-sends.
+	   Both are clean fixed-size circles (box-sizing + padding:0 so UA button styles
+	   can't make them oval); Send sits to the left of Discard. */
+	.voice-send,
 	.voice-cancel {
 		position: absolute;
 		top: 50%;
-		right: 14px;
 		transform: translateY(-50%);
 		z-index: 3;
 		box-sizing: border-box;
@@ -2051,9 +2023,7 @@
 		padding: 0;
 		border: 0;
 		border-radius: 50%;
-		background: rgba(255, 253, 245, 0.97);
-		color: #b3301a;
-		font-size: 20px;
+		font-size: 18px;
 		line-height: 1;
 		cursor: pointer;
 		display: inline-flex;
@@ -2061,6 +2031,16 @@
 		justify-content: center;
 		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
 		-webkit-tap-highlight-color: transparent;
+	}
+	.voice-send {
+		right: 56px;
+		background: #2f7d31;
+		color: #fff;
+	}
+	.voice-cancel {
+		right: 14px;
+		background: rgba(255, 253, 245, 0.97);
+		color: #b3301a;
 	}
 
 	/* Transient recording-error toast (mic denied / Baseten unreachable / not
