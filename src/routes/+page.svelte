@@ -312,7 +312,6 @@
 	let sttBackend = $state<VoiceBackend>('voice');
 	let voicePhase = $state<'idle' | 'recording' | 'draining'>('idle');
 	let voiceTicketId = $state<string | null>(null);
-	let amplitude = $state(0); // 0..1 mic loudness (Baseten waveform)
 	let voiceError = $state<string | null>(null);
 	let voiceErrorTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -454,7 +453,6 @@
 		voiceSession = null;
 		setVoicePhase('idle');
 		voiceTicketId = null;
-		amplitude = 0;
 		pointerIsResume = false;
 		// Gesture over — apply any SSE snapshot we held back so the dock catches up.
 		flushPendingTickets();
@@ -469,9 +467,6 @@
 			const session = await startVoiceSession(
 				{ backend: sttBackend, pane: ticket.tmux_pane, token: clientToken },
 				{
-					onAmplitude: (l) => {
-						amplitude = l;
-					},
 					onError: (m) => {
 						showVoiceError(m);
 						resetVoice(true);
@@ -930,8 +925,9 @@
 							{#if isVoiceActive(ticket)}
 								<!-- Recording UI. The ticket turns orange-red via CSS vars
 								     (.recording/.draining) — no overlay, so the perforation notch stays
-								     cut out. Recording shows a live amplitude waveform off the phone mic
-								     (same for both backends); release shows ✓ send / ✗ discard — nothing
+								     cut out. The indicator is a recording PULSE, not a live waveform: the
+								     phone can't measure /voice's audio (you speak at the laptop), so faking
+								     amplitude is meaningless. Release shows ✓ send / ✗ discard — nothing
 								     auto-sends. -->
 								{#if voicePhase === 'draining'}
 									<button
@@ -948,9 +944,7 @@
 									>
 								{:else}
 									<div class="voice-indicator" aria-hidden="true">
-										<span class="bar" style="height:{6 + amplitude * 20}px"></span>
-										<span class="bar" style="height:{5 + amplitude * 26}px"></span>
-										<span class="bar" style="height:{6 + amplitude * 20}px"></span>
+										<span class="rec-pulse"></span>
 									</div>
 								{/if}
 							{/if}
@@ -1730,9 +1724,9 @@
 		z-index: 3;
 	}
 
-	/* Right-end indicator circle: a live amplitude waveform off the phone mic (same
-	   for both backends — silence reads flat thanks to the noise gate in voiceClient).
-	   pointer-events:none so the hold gesture passes through to the ticket. */
+	/* Right-end indicator circle holding a recording PULSE — a status light, not a
+	   waveform (the phone can't measure /voice's laptop-side audio, so live amplitude
+	   would be fake). pointer-events:none so the hold gesture passes through. */
 	.voice-indicator {
 		position: absolute;
 		top: 50%;
@@ -1748,22 +1742,33 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: 3px;
 		pointer-events: none;
 	}
-	.voice-indicator .bar {
-		width: 3px;
-		min-height: 4px;
-		border-radius: 2px;
+	.voice-indicator .rec-pulse {
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
 		background: #d33a1c;
-		transition: height 70ms linear;
+		animation: rec-pulse 1.1s ease-in-out infinite;
+	}
+	@keyframes rec-pulse {
+		0%,
+		100% {
+			opacity: 1;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.35;
+			transform: scale(0.6);
+		}
 	}
 
 	/* Review state: explicit Send (✓) and Discard (✗) buttons — nothing auto-sends.
-	   Both are clean fixed-size circles (box-sizing + padding:0 so UA button styles
-	   can't make them oval); Send sits to the left of Discard. */
-	.voice-send,
-	.voice-cancel {
+	   Scoped `.ticket button.voice-*` so they OUT-SPECIFY `.ticket button { width:100% }`
+	   (which was stretching them into ovals) and override its block/left-align/
+	   transparent. Fixed-size clean circles; Send sits to the left of Discard. */
+	.ticket button.voice-send,
+	.ticket button.voice-cancel {
 		position: absolute;
 		top: 50%;
 		transform: translateY(-50%);
@@ -1776,6 +1781,7 @@
 		border-radius: 50%;
 		font-size: 18px;
 		line-height: 1;
+		text-align: center;
 		cursor: pointer;
 		display: inline-flex;
 		align-items: center;
@@ -1783,12 +1789,12 @@
 		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
 		-webkit-tap-highlight-color: transparent;
 	}
-	.voice-send {
+	.ticket button.voice-send {
 		right: 56px;
 		background: #2f7d31;
 		color: #fff;
 	}
-	.voice-cancel {
+	.ticket button.voice-cancel {
 		right: 14px;
 		background: rgba(255, 253, 245, 0.97);
 		color: #b3301a;
