@@ -4,6 +4,7 @@
 	import { flip } from 'svelte/animate';
 	import { browser } from '$app/environment';
 	import { getClientToken, clearClientToken } from '$lib/clientToken';
+	import { startVoiceSession, type VoiceSession, type VoiceBackend } from '$lib/voiceClient';
 
 	type EventType = 'Stop' | 'PermissionRequest' | 'Notification' | 'Idle';
 	// `title` may be empty string before the async topic refresh has run;
@@ -21,6 +22,11 @@
 		// uniform grey and tap to re-attach. May be absent on an old SSE frame —
 		// treated as attached (the pre-feature default) via `!== false` below.
 		attached: boolean;
+		// True while a speech-to-prompt dictation is capturing for this session, set
+		// by the daemon's /api/voice/* routes and streamed over SSE. Drives the
+		// /voice mock waveform (the phone has no local audio on that backend). May be
+		// absent on an old frame — treated as false.
+		recording?: boolean;
 	};
 
 	let tickets = $state<Ticket[]>([]);
@@ -154,6 +160,9 @@
 			connected = false;
 			return;
 		}
+		// Refresh which STT backend the gesture should drive on every (re)connect,
+		// so a settings change is picked up without a full reload.
+		void fetchVoiceBackend();
 		// status === 'valid' or 'unknown' — open the EventSource. For 'unknown'
 		// (network blip), EventSource's retry loop will handle reconnection.
 		eventSource = new EventSource(
@@ -280,6 +289,278 @@
 			return;
 		}
 		void tapSession(ticket, '/api/focus');
+	}
+
+	// ─── Speech-to-prompt gesture (Phase 5) ─────────────────────────────────
+	// Press-and-hold a ticket ~HOLD_MS to start dictation (RECORDING); release to
+	// start a DRAIN — a 3s right→left wipe. If the drain completes untouched the
+	// transcript is sent; tapping the circle cancels; tap-and-hold resumes. A press
+	// shorter than HOLD_MS (or one that moves past the slop) falls through to the
+	// normal tap (focus/attach). One recording at a time (v1).
+	//
+	// NOT verifiable without a real touch device + mic + HTTPS; thresholds and the
+	// two sounds are sensible defaults (OQ4/OQ5), tunable here.
+	const HOLD_MS = 1000; // press duration to arm recording (~1–2s per the plan)
+	const DRAIN_MS = 3000; // post-release wipe before auto-send
+	const SLOP = 10; // px of movement that reclassifies a hold as a scroll
+
+	let sttBackend = $state<VoiceBackend>('voice');
+	let voicePhase = $state<'idle' | 'recording' | 'draining'>('idle');
+	let voiceTicketId = $state<string | null>(null);
+	let amplitude = $state(0); // 0..1 mic loudness (Baseten waveform)
+	let voiceError = $state<string | null>(null);
+	let voiceErrorTimer: ReturnType<typeof setTimeout> | null = null;
+	let drainNonce = $state(0); // bumped to (re)start the drain wipe animation
+
+	// Surface a transient recording error (mic denied, Baseten unreachable, daemon
+	// "not ready") as a brief toast — no silent failure, no backend switch.
+	function showVoiceError(message: string): void {
+		voiceError = message;
+		if (voiceErrorTimer !== null) clearTimeout(voiceErrorTimer);
+		voiceErrorTimer = setTimeout(() => {
+			voiceError = null;
+			voiceErrorTimer = null;
+		}, 4000);
+	}
+
+	// All writes to voicePhase route through this so TS doesn't narrow it to a
+	// literal across the awaits in beginRecording — it's $state the gesture mutates
+	// concurrently with mic-permission / connection setup.
+	function setVoicePhase(p: 'idle' | 'recording' | 'draining'): void {
+		voicePhase = p;
+	}
+
+	// Non-reactive gesture bookkeeping.
+	let voiceSession: VoiceSession | null = null;
+	let holdTimer: ReturnType<typeof setTimeout> | null = null;
+	let drainTimer: ReturnType<typeof setTimeout> | null = null;
+	let pointerStartX = 0;
+	let pointerStartY = 0;
+	let pointerIsResume = false; // this press is a resume-hold during a drain
+	let capturedEl: Element | null = null;
+	let capturedPointerId = -1;
+	let beepCtx: AudioContext | null = null;
+
+	function isVoiceActive(ticket: Ticket): boolean {
+		return voicePhase !== 'idle' && voiceTicketId === ticket.session_id;
+	}
+
+	function clearHoldTimer(): void {
+		if (holdTimer !== null) {
+			clearTimeout(holdTimer);
+			holdTimer = null;
+		}
+	}
+	function clearDrainTimer(): void {
+		if (drainTimer !== null) {
+			clearTimeout(drainTimer);
+			drainTimer = null;
+		}
+	}
+
+	function releaseCapture(): void {
+		if (capturedEl && capturedPointerId >= 0) {
+			try {
+				capturedEl.releasePointerCapture(capturedPointerId);
+			} catch {
+				/* capture already gone */
+			}
+		}
+		capturedEl = null;
+		capturedPointerId = -1;
+	}
+
+	// Minimal WebAudio beeps for start/sent (OQ4 defaults). The hold is a user
+	// gesture, so creating/resuming the context on first use satisfies autoplay.
+	function beep(freq: number, durMs: number, when = 0): void {
+		if (!browser) return;
+		try {
+			beepCtx ??= new AudioContext();
+			if (beepCtx.state === 'suspended') void beepCtx.resume();
+			const t0 = beepCtx.currentTime + when;
+			const osc = beepCtx.createOscillator();
+			const gain = beepCtx.createGain();
+			osc.type = 'sine';
+			osc.frequency.value = freq;
+			gain.gain.setValueAtTime(0.0001, t0);
+			gain.gain.exponentialRampToValueAtTime(0.16, t0 + 0.012);
+			gain.gain.exponentialRampToValueAtTime(0.0001, t0 + durMs / 1000);
+			osc.connect(gain).connect(beepCtx.destination);
+			osc.start(t0);
+			osc.stop(t0 + durMs / 1000 + 0.02);
+		} catch {
+			/* audio unavailable — sound is non-essential */
+		}
+	}
+	const playStartSound = (): void => beep(660, 90);
+	const playSentSound = (): void => {
+		beep(880, 70);
+		beep(1175, 90, 0.08);
+	};
+
+	async function fetchVoiceBackend(): Promise<void> {
+		if (!clientToken) return;
+		try {
+			const res = await fetch('/api/voice/config', {
+				headers: { 'x-expediter-token': clientToken }
+			});
+			if (!res.ok) return;
+			const data = (await res.json()) as { backend?: string };
+			if (data.backend === 'baseten' || data.backend === 'voice') sttBackend = data.backend;
+		} catch {
+			/* keep the default backend */
+		}
+	}
+
+	function resetVoice(dispose = false): void {
+		clearHoldTimer();
+		clearDrainTimer();
+		if (dispose) voiceSession?.dispose();
+		voiceSession = null;
+		setVoicePhase('idle');
+		voiceTicketId = null;
+		amplitude = 0;
+		pointerIsResume = false;
+	}
+
+	async function beginRecording(ticket: Ticket): Promise<void> {
+		if (!clientToken) return;
+		voiceTicketId = ticket.session_id;
+		setVoicePhase('recording');
+		playStartSound();
+		try {
+			const session = await startVoiceSession(
+				{ backend: sttBackend, pane: ticket.tmux_pane, token: clientToken },
+				{
+					onAmplitude: (l) => {
+						amplitude = l;
+					},
+					onError: (m) => {
+						showVoiceError(m);
+						resetVoice(true);
+					}
+				}
+			);
+			// The user may have released/cancelled while mic access was being granted
+			// (voicePhase is written via setVoicePhase, so it reads as the live value).
+			if (voiceTicketId !== ticket.session_id || voicePhase === 'idle') {
+				session.dispose();
+				return;
+			}
+			voiceSession = session;
+			// If they released into the drain during the await, honor it now.
+			if (voicePhase === 'draining') session.release();
+		} catch {
+			showVoiceError('microphone unavailable');
+			resetVoice(true);
+		}
+	}
+
+	function startDrain(): void {
+		setVoicePhase('draining');
+		drainNonce += 1; // remount the wash so the wipe animation (re)starts
+		clearDrainTimer();
+		drainTimer = setTimeout(() => {
+			drainTimer = null;
+			doSend();
+		}, DRAIN_MS);
+	}
+
+	function enterDrain(): void {
+		voiceSession?.release();
+		startDrain();
+	}
+
+	function doResume(): void {
+		clearDrainTimer();
+		voiceSession?.resume();
+		setVoicePhase('recording');
+	}
+
+	function doSend(): void {
+		clearDrainTimer();
+		voiceSession?.send();
+		playSentSound();
+		resetVoice(false);
+	}
+
+	function doCancel(): void {
+		clearDrainTimer();
+		voiceSession?.cancel();
+		resetVoice(false);
+	}
+
+	function onTicketPointerDown(ticket: Ticket, e: PointerEvent): void {
+		if (!e.isPrimary) return;
+		pointerStartX = e.clientX;
+		pointerStartY = e.clientY;
+		try {
+			(e.currentTarget as Element).setPointerCapture(e.pointerId);
+			capturedEl = e.currentTarget as Element;
+			capturedPointerId = e.pointerId;
+		} catch {
+			/* capture unsupported — gesture still works, just less robust */
+		}
+
+		if (voicePhase === 'draining' && voiceTicketId === ticket.session_id) {
+			// Tap-and-hold during the drain → resume. Pause the auto-send meanwhile.
+			pointerIsResume = true;
+			clearDrainTimer();
+			holdTimer = setTimeout(() => {
+				holdTimer = null;
+				doResume();
+			}, HOLD_MS);
+			return;
+		}
+		if (voicePhase !== 'idle') return; // a recording is active elsewhere — ignore
+		pointerIsResume = false;
+		holdTimer = setTimeout(() => {
+			holdTimer = null;
+			void beginRecording(ticket);
+		}, HOLD_MS);
+	}
+
+	function onTicketPointerMove(e: PointerEvent): void {
+		// Only the pre-threshold hold is movement-cancellable; once recording, drift
+		// is fine (you may shift your grip while talking).
+		if (holdTimer === null) return;
+		const dx = e.clientX - pointerStartX;
+		const dy = e.clientY - pointerStartY;
+		if (dx * dx + dy * dy > SLOP * SLOP) {
+			clearHoldTimer();
+			// A moved resume-hold reverts to a scroll; keep the drain running.
+			if (pointerIsResume) startDrain();
+		}
+	}
+
+	function onTicketPointerUp(ticket: Ticket, e: PointerEvent): void {
+		void e;
+		releaseCapture();
+		if (voicePhase === 'recording' && voiceTicketId === ticket.session_id) {
+			enterDrain();
+			return;
+		}
+		if (holdTimer !== null) {
+			// Released before the hold armed → it's a tap (or, during a drain, a stray
+			// short press that just keeps the drain going).
+			clearHoldTimer();
+			if (pointerIsResume) startDrain();
+			else onTicketTap(ticket);
+		}
+	}
+
+	function onTicketPointerCancel(): void {
+		releaseCapture();
+		clearHoldTimer();
+		// Browser claimed the gesture (scroll). Abort only, never confirm: discard an
+		// in-progress recording rather than sending it.
+		if (voicePhase === 'recording') doCancel();
+	}
+
+	// Android Chrome's long-press context menu isn't covered by the CSS callout
+	// suppression, so cancel it explicitly on the ticket.
+	function onTicketContextMenu(e: Event): void {
+		e.preventDefault();
 	}
 
 	function projectLabel(cwd: string): string {
@@ -416,6 +697,8 @@
 	});
 
 	onDestroy(() => {
+		// Tear down any in-progress dictation (mic stream / WS / audio context).
+		resetVoice(true);
 		if (eventSource) {
 			try {
 				eventSource.close();
@@ -549,11 +832,26 @@
 							class:working={ticket.working}
 							class:tapped={lastTapped === ticket.session_id}
 							class:detached={ticket.attached === false}
+							class:recording={voicePhase === 'recording' && voiceTicketId === ticket.session_id}
+							class:draining={voicePhase === 'draining' && voiceTicketId === ticket.session_id}
 							animate:flip={{ duration: 220 }}
 							in:fly|local={{ y: -8, duration: 180 }}
 							out:fly|local={{ y: 8, duration: 140 }}
 						>
-							<button type="button" onclick={() => onTicketTap(ticket)}>
+							<button
+								type="button"
+								onpointerdown={(e) => onTicketPointerDown(ticket, e)}
+								onpointermove={onTicketPointerMove}
+								onpointerup={(e) => onTicketPointerUp(ticket, e)}
+								onpointercancel={onTicketPointerCancel}
+								oncontextmenu={onTicketContextMenu}
+								onkeydown={(e) => {
+									if (e.key === 'Enter' || e.key === ' ') {
+										e.preventDefault();
+										onTicketTap(ticket);
+									}
+								}}
+							>
 								{#if ticket.working}
 									<div class="shimmer" aria-hidden="true">
 										<div class="shimmer-stripe"></div>
@@ -571,6 +869,40 @@
 									{/if}
 								</div>
 							</button>
+
+							{#if isVoiceActive(ticket)}
+								<!-- Orange-red wash: full cover while recording; on the drain it wipes
+								     right→left, revealing the ticket's prior color. Keyed by drainNonce
+								     so a resume restarts the wipe. pointer-events:none so the ticket
+								     button keeps receiving the gesture. -->
+								{#key drainNonce}
+									<div
+										class="voice-wash"
+										class:draining={voicePhase === 'draining'}
+										aria-hidden="true"
+									></div>
+								{/key}
+								{#if voicePhase === 'draining'}
+									<button
+										type="button"
+										class="voice-cancel"
+										aria-label="Cancel dictation"
+										onclick={doCancel}>×</button
+									>
+								{:else}
+									<div class="voice-indicator" aria-hidden="true">
+										{#if sttBackend === 'baseten'}
+											<span class="bar" style="height:{6 + amplitude * 20}px"></span>
+											<span class="bar" style="height:{5 + amplitude * 26}px"></span>
+											<span class="bar" style="height:{6 + amplitude * 20}px"></span>
+										{:else}
+											<span class="bar mock"></span>
+											<span class="bar mock"></span>
+											<span class="bar mock"></span>
+										{/if}
+									</div>
+								{/if}
+							{/if}
 						</li>
 					{/each}
 				</ul>
@@ -617,6 +949,10 @@
 		<div class="disconnected-overlay" role="status" aria-live="polite">
 			<span>you are disconnected</span>
 		</div>
+	{/if}
+
+	{#if voiceError}
+		<div class="voice-error" role="status" aria-live="polite">{voiceError}</div>
 	{/if}
 
 	{#if useVideoFallback}
@@ -1121,6 +1457,16 @@
 		padding: 0;
 		cursor: pointer;
 		-webkit-tap-highlight-color: transparent;
+		/* Long-press gesture suppression (5.1): keep vertical dock scroll (pan-y) but
+		   kill the iOS callout/text-magnifier and Android selection so a hold reads as
+		   our gesture, not a browser one. touch-action: pan-y also makes the browser
+		   fire pointercancel when a vertical scroll starts, which the FSM treats as an
+		   abort. The Android long-press menu needs the contextmenu preventDefault in
+		   JS as well — the callout property doesn't cover it. */
+		-webkit-touch-callout: none;
+		-webkit-user-select: none;
+		user-select: none;
+		touch-action: pan-y;
 	}
 
 	.stub {
@@ -1269,4 +1615,140 @@
 		cursor: default;
 	}
 
+	/* ─── Speech-to-prompt recording UI (Phase 5) ───────────────────────────── */
+
+	/* Raised ticket while recording or draining. Placed after .working/.pressing so
+	   it wins the transform on equal specificity. */
+	.ticket.recording,
+	.ticket.draining {
+		transform: translateY(-3px) scale(1.012);
+		box-shadow: 0 6px 18px rgba(150, 50, 20, 0.28);
+		z-index: 3;
+	}
+
+	/* Punchy orange-red wash, distinct from the permission/notification shades. Sits
+	   above the ticket fill (z-index 0) but below the text (.stub/.body are z-index
+	   1), so the transcript-less card just glows orange-red. On the drain it wipes
+	   right→left via clip-path, revealing the ticket's prior color from the right. The
+	   3s duration is coupled to DRAIN_MS in the script. */
+	.voice-wash {
+		position: absolute;
+		inset: 0;
+		z-index: 0;
+		background: rgba(255, 84, 54, 0.93);
+		pointer-events: none;
+	}
+	.voice-wash.draining {
+		animation: voice-drain 3s linear forwards;
+	}
+	@keyframes voice-drain {
+		from {
+			clip-path: inset(0 0 0 0);
+		}
+		to {
+			clip-path: inset(0 100% 0 0);
+		}
+	}
+
+	/* Right-end indicator circle. Recording: a small waveform (real amplitude bars on
+	   Baseten, a looping mock on /voice). Both sit above the wash and text (z-index
+	   2). pointer-events:none so the hold gesture passes through to the ticket. */
+	.voice-indicator {
+		position: absolute;
+		top: 50%;
+		right: 14px;
+		transform: translateY(-50%);
+		z-index: 2;
+		width: 34px;
+		height: 34px;
+		border-radius: 50%;
+		background: rgba(255, 253, 245, 0.94);
+		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 3px;
+		pointer-events: none;
+	}
+	.voice-indicator .bar {
+		width: 3px;
+		min-height: 4px;
+		border-radius: 2px;
+		background: #d33a1c;
+		transition: height 70ms linear;
+	}
+	/* /voice has no phone-side audio, so its indicator is a looping mock wave that
+	   only signals "recording is on", not amplitude. */
+	.voice-indicator .bar.mock {
+		height: 10px;
+		animation: voice-mock-wave 0.9s ease-in-out infinite;
+	}
+	.voice-indicator .bar.mock:nth-child(2) {
+		animation-delay: 0.15s;
+	}
+	.voice-indicator .bar.mock:nth-child(3) {
+		animation-delay: 0.3s;
+	}
+	@keyframes voice-mock-wave {
+		0%,
+		100% {
+			height: 7px;
+		}
+		50% {
+			height: 24px;
+		}
+	}
+
+	/* During the drain the circle becomes a cancel button. pointer-events:auto (it
+	   overrides the indicator) so a tap on it discards the dictation. */
+	.voice-cancel {
+		position: absolute;
+		top: 50%;
+		right: 14px;
+		transform: translateY(-50%);
+		z-index: 2;
+		width: 34px;
+		height: 34px;
+		border-radius: 50%;
+		border: 0;
+		background: rgba(255, 253, 245, 0.96);
+		color: #b3301a;
+		font-size: 20px;
+		line-height: 1;
+		cursor: pointer;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	/* Transient recording-error toast (mic denied / Baseten unreachable / not
+	   ready). Sits just above the pager; auto-clears after 4s. */
+	.voice-error {
+		position: fixed;
+		left: 50%;
+		bottom: calc(env(safe-area-inset-bottom, 0) + 64px);
+		transform: translateX(-50%);
+		z-index: 16;
+		max-width: calc(100vw - 40px);
+		padding: 10px 16px;
+		background: #8b2e1f;
+		color: #fff;
+		font-size: 12px;
+		letter-spacing: 0.06em;
+		border-radius: 2px;
+		box-shadow: 0 4px 14px rgba(80, 20, 10, 0.3);
+		animation: voice-error-in 160ms ease both;
+	}
+	@keyframes voice-error-in {
+		from {
+			opacity: 0;
+			transform: translate(-50%, 6px);
+		}
+		to {
+			opacity: 1;
+			transform: translate(-50%, 0);
+		}
+	}
 </style>
