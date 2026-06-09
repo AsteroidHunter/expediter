@@ -3,13 +3,14 @@
 // backend-agnostic (5.6):
 //
 //   - 'voice'   — built-in Claude Code /voice (laptop mic does the transcription).
-//                 The phone POSTs start/stop/cancel to the daemon AND opens its own
-//                 mic via startMicMeter purely to drive the waveform (audio not
-//                 transmitted), so the indicator is the same real waveform as Baseten.
+//                 The phone only POSTs start/stop/cancel; it never opens the phone
+//                 mic, since the user speaks at the laptop and the phone has no useful
+//                 signal. The dock shows a recording-status pulse, not a waveform.
 //   - 'baseten' — phone mic. getUserMedia → AudioContext(16 kHz) → pcm-worklet →
 //                 PCM frames over a WebSocket to the daemon, which proxies Baseten
-//                 and types the transcript into the pane. onAmplitude drives the
-//                 real waveform; onPartial/onFinal mirror the live transcript.
+//                 and types the transcript into the pane; onPartial/onFinal mirror the
+//                 live transcript. (onAmplitude is still emitted but currently unused
+//                 — the UI is a status pulse for both backends.)
 //
 // $lib import is fine here — this module is bundled into the client by Vite (it's
 // imported by +page.svelte), unlike the daemon-only voiceSocket.ts.
@@ -43,76 +44,27 @@ async function postVoice(path: string, pane: string, token: string): Promise<voi
 	});
 }
 
-// Open the phone mic purely to drive the waveform meter (RMS → onAmplitude, with a
-// noise gate so silence reads flat). Used by both backends so there's ONE waveform.
-// On /voice the audio is NOT transmitted — the laptop mic does the actual
-// transcription — this is only so the indicator reflects real speech.
-async function startMicMeter(
-	handlers: VoiceHandlers
-): Promise<{ setPaused: (p: boolean) => void; stop: () => void }> {
-	const stream = await navigator.mediaDevices.getUserMedia({
-		audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
-	});
-	const ctx = new AudioContext();
-	const source = ctx.createMediaStreamSource(stream);
-	const analyser = ctx.createAnalyser();
-	analyser.fftSize = 512;
-	source.connect(analyser);
-
-	const timeData = new Float32Array(analyser.fftSize);
-	let paused = false;
-	let raf = 0;
-	const loop = () => {
-		if (!paused) {
-			analyser.getFloatTimeDomainData(timeData);
-			let sum = 0;
-			for (let i = 0; i < timeData.length; i++) sum += timeData[i] * timeData[i];
-			const rms = Math.sqrt(sum / timeData.length);
-			const NOISE_FLOOR = 0.02;
-			handlers.onAmplitude?.(rms <= NOISE_FLOOR ? 0 : Math.min(1, (rms - NOISE_FLOOR) * 6));
-		}
-		raf = requestAnimationFrame(loop);
-	};
-	raf = requestAnimationFrame(loop);
-
-	return {
-		setPaused(p: boolean): void {
-			paused = p;
-			if (p) handlers.onAmplitude?.(0);
-		},
-		stop(): void {
-			cancelAnimationFrame(raf);
-			for (const track of stream.getTracks()) track.stop();
-			void ctx.close().catch(() => {});
-		}
-	};
-}
-
-// Built-in /voice: the laptop mic does the transcription; the phone POSTs
-// start/stop/cancel and opens its own mic only for the shared waveform meter (best
-// effort — a denied phone-mic permission just means no waveform, /voice still works).
-async function startVoiceBackend(
-	pane: string,
-	token: string,
-	handlers: VoiceHandlers
-): Promise<VoiceSession> {
+// Built-in /voice: the laptop mic does the transcription; the phone only POSTs
+// start/stop/cancel. It does NOT open the phone mic — the user speaks at the laptop,
+// so the phone has no useful signal to meter. The indicator is a status pulse, not a
+// waveform. release/resume are no-ops (the daemon's /voice keeps recording until
+// send/cancel).
+function startVoiceBackend(pane: string, token: string, handlers: VoiceHandlers): VoiceSession {
 	void postVoice('/api/voice/start', pane, token).catch(() =>
 		handlers.onError?.('Could not start /voice')
 	);
-	const meter = await startMicMeter(handlers).catch(() => null);
 	let done = false;
 	const finish = (path: string): void => {
 		if (done) return;
 		done = true;
-		meter?.stop();
 		void postVoice(path, pane, token).catch(() => {});
 	};
 	return {
 		release() {
-			meter?.setPaused(true); // recording continues on the laptop; just pause the meter
+			/* recording continues on the laptop until send/cancel */
 		},
 		resume() {
-			meter?.setPaused(false);
+			/* still recording */
 		},
 		send() {
 			finish('/api/voice/stop');
