@@ -93,6 +93,23 @@ test('computeTypingDiff replaces everything when there is no common prefix', () 
 	expect(computeTypingDiff('abc', 'xyz')).toEqual({ backspaces: 3, append: 'xyz' });
 });
 
+test('computeTypingDiff counts an astral emoji as ONE backspace, not two UTF-16 units', () => {
+	// '🐟'.length === 2 (surrogate pair); the old unit-count sent 2 BSpaces and ate
+	// the neighboring character too.
+	expect(computeTypingDiff('fish 🐟', 'fish 🐠')).toEqual({ backspaces: 1, append: '🐠' });
+	expect(computeTypingDiff('go 🐟', 'go')).toEqual({ backspaces: 2, append: '' }); // emoji + space
+});
+
+test('computeTypingDiff finds a common prefix across astral chars by code point', () => {
+	// Identical leading emoji must not be erased: surrogate-pair halves compare
+	// equal pairwise only when walked as code points.
+	expect(computeTypingDiff('🐟 swim', '🐟 swam')).toEqual({ backspaces: 2, append: 'am' });
+});
+
+test('computeTypingDiff treats CJK (BMP) text the same as before', () => {
+	expect(computeTypingDiff('日本語です', '日本語かな')).toEqual({ backspaces: 2, append: 'かな' });
+});
+
 // joinTranscript ────────────────────────────────────────────────────────────
 
 test('joinTranscript returns the latest when nothing is finalized yet', () => {

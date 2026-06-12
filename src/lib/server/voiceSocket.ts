@@ -58,6 +58,25 @@ function tokenOk(provided: string | null): boolean {
 
 const isValidPane = (pane: string | null): pane is string => !!pane && /^%[0-9]+$/.test(pane);
 
+// ─── One live audio connection per pane ──────────────────────────────────────
+// Two phones (or a stale tab plus a live one) streaming into the same pane would
+// interleave their typing chains — each connection serializes its OWN keystrokes,
+// so two of them alternate backspaces/typing mid-line. The claim is taken before
+// the upgrade completes and released exactly once when the connection finishes.
+// Pure claim/release pair, exported for unit tests.
+
+const activePanes = new Set<string>();
+
+export function tryClaimPane(pane: string): boolean {
+	if (activePanes.has(pane)) return false;
+	activePanes.add(pane);
+	return true;
+}
+
+export function releasePane(pane: string): void {
+	activePanes.delete(pane);
+}
+
 // Parse the upgrade request URL into { path, token, pane }. Pure for unit-testing —
 // the auth/validation gate keys off these. `req.url` is path+query only, so a dummy
 // origin is supplied to URL().
@@ -109,7 +128,21 @@ export function attachVoiceSocket(server: Server): void {
 			const apiKey = getBasetenApiKey();
 			const modelId = getBasetenModelId();
 			if (!apiKey || !modelId) return rejectUpgrade(socket, 503, 'Baseten Not Configured');
+			// Claim the pane before completing the handshake. The readiness check above
+			// is async, so two simultaneous upgrades for one pane can both reach this
+			// line — the claim itself is synchronous, so exactly one wins.
+			if (!tryClaimPane(pane)) {
+				return rejectUpgrade(socket, 409, 'Recording Already Active');
+			}
+			let upgraded = false;
+			socket.once('close', () => {
+				// The TCP socket died before the WS callback ran — release the claim
+				// handleConnection never got the chance to own. (After a successful
+				// upgrade the connection's finish() owns the release.)
+				if (!upgraded) releasePane(pane);
+			});
 			wss.handleUpgrade(req, socket, head, (ws) => {
+				upgraded = true;
 				handleConnection(ws as WsWebSocket, pane, apiKey, modelId);
 			});
 		})();
@@ -183,6 +216,7 @@ function handleConnection(
 	const finish = (clearInput: boolean): void => {
 		if (finished) return;
 		finished = true;
+		releasePane(pane);
 		baseten.close();
 		if (session_id) setRecording(session_id, false);
 		if (clearInput) void sendKeys(pane, ['C-u']).catch(() => {});

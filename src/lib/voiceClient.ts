@@ -26,6 +26,12 @@ export interface VoiceHandlers {
 	onFinal?(text: string): void;
 	onAmplitude?(level: number): void; // 0..1, Baseten only (mic loudness)
 	onError?(message: string): void;
+	// The session died underneath the gesture (daemon restart, network change,
+	// phone backgrounded → WS closed). The FSM must reset on this: without it the
+	// dock keeps pulsing "recording" on a dead session and a later ✓ no-ops
+	// silently while the UI claims "sent". Baseten only — the /voice backend has
+	// no connection to lose; its failures surface through onError.
+	onClosed?(): void;
 }
 
 export interface VoiceSession {
@@ -36,12 +42,28 @@ export interface VoiceSession {
 	dispose(): void; // hard teardown (error / unmount)
 }
 
+// POST one of the /api/voice/* control routes and fail loudly on a refusal.
+// fetch() only rejects on network errors — a 409 (pane not ready, CC too old),
+// 410 (pane gone), or 500 resolves normally, so swallowing the response meant a
+// refused START left the UI happily "recording" a dictation that never began,
+// and the ✓ that followed toggled a fresh dictation ON instead of stopping one.
+// The daemon's { error } body is the toast message; fall back to the status.
 async function postVoice(path: string, pane: string, token: string): Promise<void> {
-	await fetch(path, {
+	const res = await fetch(path, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', 'x-expediter-token': token },
 		body: JSON.stringify({ pane })
 	});
+	if (!res.ok) {
+		let message = `voice request failed (${res.status})`;
+		try {
+			const body = (await res.json()) as { error?: string };
+			if (body.error) message = body.error;
+		} catch {
+			/* non-JSON error body — keep the status-code message */
+		}
+		throw new Error(message);
+	}
 }
 
 // Built-in /voice: the laptop mic does the transcription; the phone only POSTs
@@ -50,14 +72,30 @@ async function postVoice(path: string, pane: string, token: string): Promise<voi
 // waveform. release/resume are no-ops (the daemon's /voice keeps recording until
 // send/cancel).
 function startVoiceBackend(pane: string, token: string, handlers: VoiceHandlers): VoiceSession {
-	void postVoice('/api/voice/start', pane, token).catch(() =>
-		handlers.onError?.('Could not start /voice')
-	);
-	let done = false;
+	// A refused start (409 pane-not-ready / CC-too-old, 410 pane gone) means the
+	// session is dead on arrival: latch it so send/cancel/dispose never inject
+	// keys into a dictation that never started — that stray Space/Escape is
+	// exactly the desync seed seen on-device.
+	let startFailed = false;
+	let finished = false;
+	const startPromise = postVoice('/api/voice/start', pane, token).catch((err: unknown) => {
+		startFailed = true;
+		handlers.onError?.(err instanceof Error ? err.message : 'Could not start /voice');
+	});
+	// Serialize stop/cancel behind the start POST so a fast ✓/✗ can't overtake
+	// the start on the wire (stop-before-start would be refused by the daemon,
+	// then the late-arriving start would begin an unwatched dictation).
 	const finish = (path: string): void => {
-		if (done) return;
-		done = true;
-		void postVoice(path, pane, token).catch(() => {});
+		if (finished) return;
+		finished = true;
+		void startPromise
+			.then(() => {
+				if (startFailed) return;
+				return postVoice(path, pane, token);
+			})
+			.catch((err: unknown) => {
+				handlers.onError?.(err instanceof Error ? err.message : 'voice request failed');
+			});
 	};
 	return {
 		release() {
@@ -141,7 +179,14 @@ async function startBasetenBackend(
 	});
 	ws.addEventListener('error', () => handlers.onError?.('audio connection error'));
 	ws.addEventListener('close', () => {
-		if (!disposed) dispose();
+		// Intentional teardowns (send/cancel/dispose) set `disposed` BEFORE closing
+		// the socket, so reaching here un-disposed means the connection died under
+		// us (daemon restart, network change, phone backgrounded). Tell the FSM —
+		// otherwise the dock pulses forever and a later ✓ fakes a send.
+		if (!disposed) {
+			dispose();
+			handlers.onClosed?.();
+		}
 	});
 
 	// RMS amplitude meter for the real waveform. Runs while not paused/disposed.

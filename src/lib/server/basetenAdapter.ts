@@ -74,14 +74,26 @@ export function parseBasetenMessage(raw: string): BasetenMessage {
 // append, by keeping the common prefix. Streaming STT revises text in-flight, so
 // this keeps the per-revision keystroke churn (and the flicker of not owning Claude
 // Code's input) minimal. Pure.
+//
+// Counts in Unicode CODE POINTS, not UTF-16 units: a BSpace erases at least one
+// code point, never half a surrogate pair — counting units sent one BSpace per
+// unit, so revising away an astral char (emoji) erased it AND its neighbor, then
+// appended over the mangled line. Residual ambiguity: whether Claude Code's input
+// deletes a full grapheme CLUSTER (e.g. e + combining accent, ZWJ emoji) per
+// backspace is unverified — STT output is normalized (NFC) in practice, so code
+// points match user-perceived characters for realistic transcripts; confirm
+// cluster behavior in the live CC probe before relying on it.
 export function computeTypingDiff(
 	prev: string,
 	next: string
 ): { backspaces: number; append: string } {
+	if (prev === next) return { backspaces: 0, append: '' };
+	const a = Array.from(prev);
+	const b = Array.from(next);
 	let i = 0;
-	const min = Math.min(prev.length, next.length);
-	while (i < min && prev[i] === next[i]) i++;
-	return { backspaces: prev.length - i, append: next.slice(i) };
+	const min = Math.min(a.length, b.length);
+	while (i < min && a[i] === b[i]) i++;
+	return { backspaces: a.length - i, append: b.slice(i).join('') };
 }
 
 // Accumulate streaming segments: join the latest (partial or final) text onto the
