@@ -278,6 +278,26 @@ test('isAllowedHost rejects a literal host with no port suffix', () => {
 	expect(isAllowedHost('192.168.1.50')).toBe(false);
 });
 
+// Tailscale: phones dialing over the tailnet present the Mac's CGNAT address
+// (100.64.0.0/10) as the Host — accepted at the configured port, and only
+// within the /10 (neighboring 100.x space stays rejected).
+test('isAllowedHost accepts a Tailscale CGNAT address at the configured port', () => {
+	expect(isAllowedHost('100.64.0.1:5179')).toBe(true);
+	expect(isAllowedHost('100.101.102.103:5179')).toBe(true);
+	expect(isAllowedHost('100.127.255.254:5179')).toBe(true);
+});
+
+test('isAllowedHost rejects 100.x hosts outside the CGNAT /10', () => {
+	expect(isAllowedHost('100.63.255.255:5179')).toBe(false);
+	expect(isAllowedHost('100.128.0.1:5179')).toBe(false);
+	expect(isAllowedHost('100.101.102.103')).toBe(false); // no port
+});
+
+test('GET / via a Tailscale host with no token → 200 (page is public over the tailnet)', async () => {
+	const res = await runGate(makeEvent({ url: 'http://100.101.102.103:5179/' }));
+	expect(res.status).toBe(200);
+});
+
 // --- SSE log redaction ---
 
 test('SSE reject log line redacts ?t=', async () => {

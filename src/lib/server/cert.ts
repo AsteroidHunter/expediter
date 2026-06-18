@@ -122,6 +122,9 @@ export function leafSans(host: string, ips: string[] = []): string[] {
 	return [`DNS:${host}`, 'DNS:localhost', 'IP:127.0.0.1', 'IP:::1', ...ips.map((ip) => `IP:${ip}`)];
 }
 
+/** Filename of the SAN-set stamp recorded next to the leaf at issue time. */
+const SANS_STAMP = 'leaf.sans';
+
 /**
  * Generate the leaf if it is missing or if the hostname it was issued for has
  * changed. Idempotent: a second call with the same host is a no-op. The SAN set
@@ -130,7 +133,7 @@ export function leafSans(host: string, ips: string[] = []): string[] {
  */
 function ensureLeaf(p: CertPaths, host: string, ips: string[]): void {
 	const sans = leafSans(host, ips);
-	const stamp = path.join(p.dir, 'leaf.sans');
+	const stamp = path.join(p.dir, SANS_STAMP);
 	const current = existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : '';
 	const want = sans.join(',');
 	if (existsSync(p.key) && existsSync(p.cert) && current === want) return;
@@ -217,18 +220,63 @@ export function leafMtimeMs(base?: string): number {
 }
 
 /**
+ * True when the on-disk leaf covers `ip` in its SAN set, judged from the SAN
+ * stamp recorded at issue time (no certificate parsing). The launcher uses this
+ * to fail loudly when an already-running daemon's leaf predates the Tailscale
+ * address, instead of letting the phone hit an opaque TLS name-mismatch error.
+ */
+export function leafCoversIp(ip: string, base?: string): boolean {
+	const stamp = path.join(certPaths(base).dir, SANS_STAMP);
+	if (!existsSync(stamp)) return false;
+	return readFileSync(stamp, 'utf8').trim().split(',').includes(`IP:${ip}`);
+}
+
+/**
+ * True for an IPv4 in Tailscale's CGNAT range, 100.64.0.0/10 (second octet
+ * 64–127). Every tailnet node gets exactly one such address, stable for the
+ * node's lifetime — which is what makes it safe in the leaf SAN (no churn on
+ * reconnect) and in a printed QR (doesn't go stale).
+ */
+export function isTailscaleIPv4(addr: string): boolean {
+	const octets = addr.split('.');
+	if (octets.length !== 4 || octets[0] !== '100') return false;
+	const second = Number(octets[1]);
+	return Number.isInteger(second) && second >= 64 && second <= 127;
+}
+
+/**
+ * The machine's Tailscale IPv4 addresses (usually one). Detected by the CGNAT
+ * range rather than interface name: macOS surfaces Tailscale as an anonymous
+ * utun*, Linux as tailscale0, so the address range is the only stable signal.
+ */
+export function tailscaleIPv4s(): string[] {
+	const out: string[] = [];
+	for (const addrs of Object.values(networkInterfaces())) {
+		for (const a of addrs ?? []) {
+			if (a.family === 'IPv4' && !a.internal && isTailscaleIPv4(a.address)) out.push(a.address);
+		}
+	}
+	return out;
+}
+
+/**
  * The machine's current external (non-internal) IPv4 addresses, for the leaf
  * SAN, so the phone can reach the daemon by IP. VPN/tunnel interfaces are
  * skipped (same set as the launcher's address picker): a phone can never route
  * to a utun/ipsec/wg address, so there's no point covering it and it would only
- * churn the leaf when the tunnel reconnects.
+ * churn the leaf when the tunnel reconnects. One exception: a Tailscale CGNAT
+ * address IS phone-reachable (over the tailnet) and stable for the node's
+ * lifetime, so it is always covered — that keeps `--tailscale` a launcher-side
+ * choice, with no daemon restart needed to switch between LAN and tailnet.
  */
 export function localIPv4s(): string[] {
 	const out: string[] = [];
 	for (const [name, addrs] of Object.entries(networkInterfaces())) {
-		if (/^(utun|ipsec|ppp|tun|tap|wg)\d*$/i.test(name)) continue;
+		const isTunnel = /^(utun|ipsec|ppp|tun|tap|wg)\d*$/i.test(name);
 		for (const a of addrs ?? []) {
-			if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+			if (a.family !== 'IPv4' || a.internal) continue;
+			if (isTunnel && !isTailscaleIPv4(a.address)) continue;
+			out.push(a.address);
 		}
 	}
 	return out;

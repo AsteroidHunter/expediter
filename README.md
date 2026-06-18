@@ -108,6 +108,8 @@ Expediter needs your phone to reach your Mac at its LAN IP. That's fine on home 
 
 If you switch networks (say, coffee shop to home), your Mac gets a new IP and the old QR points at the wrong address. Re-run `expediter` to get a fresh one.
 
+**Not on the same network at all?** If both devices run [Tailscale](https://tailscale.com/), `expediter --tailscale` puts your Mac's tailnet address in the QR instead of the LAN IP, so your phone can connect from anywhere -- cellular included, and it sidesteps client isolation too. The flag applies to that run only; the certificate step is the same one-time flow.
+
 ## Security & access control
 
 Expediter trusts your local network, like Plex, Sonos, or a Philips Hue bridge. Anyone on the same Wi-Fi can reach the daemon's port; a per-session token gate stops them from doing anything once they reach it.

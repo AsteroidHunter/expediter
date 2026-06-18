@@ -11,6 +11,7 @@ import { promises as fs } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
 import { resolveTransport, accessUrl } from '../src/lib/server/transport.ts';
+import { tailscaleIPv4s, leafCoversIp } from '../src/lib/server/cert.ts';
 
 const PORT = process.env.EXPEDITER_PORT ?? '5179';
 const HOME = process.env.EXPEDITER_HOME;
@@ -21,6 +22,10 @@ const TITLE_VALUE = TITLE_IDX >= 0 ? process.argv[TITLE_IDX + 1] : null;
 const CONFIG_FILE = path.join(os.homedir(), '.expediter', 'config.json');
 const HTTP_FLAG = process.argv.includes('--http');
 const HTTPS_FLAG = process.argv.includes('--https');
+// --tailscale advertises the Mac's tailnet address in the QR instead of the
+// LAN IP. Per-run (not sticky): the LAN QR is the right default at home, and a
+// stale sticky tailnet QR would silently dead-end a phone with Tailscale off.
+const TAILSCALE_FLAG = process.argv.includes('--tailscale');
 // Resolved in main() from the flags above + the saved preference; module-scoped
 // so isDaemonUp / fetchToken / printAccess all speak the same scheme.
 let transport = 'https';
@@ -66,7 +71,7 @@ if (process.argv[2] === 'update') {
 
 if (SHOW_HELP) {
 	console.log(
-		'Usage: expediter [--http|--https] [--print-url] [--title default|haiku] [--steps "..."] [--help]'
+		'Usage: expediter [--http|--https] [--tailscale] [--print-url] [--title default|haiku] [--steps "..."] [--help]'
 	);
 	console.log('   or: expediter update [--dev]');
 	console.log('');
@@ -88,6 +93,10 @@ if (SHOW_HELP) {
 	console.log('                         voice feature and PWA install; the phone does a one-time');
 	console.log('                         in-browser certificate trust step. --http opts out to a plain');
 	console.log('                         connection with no certificate (and no microphone).');
+	console.log('  --tailscale            Put this Mac\'s Tailscale address in the QR instead of the LAN');
+	console.log('                         IP, so a phone on your tailnet can connect from any network.');
+	console.log('                         Applies to this run only (not sticky); requires Tailscale');
+	console.log('                         connected on both devices. Combines with --http/--https.');
 	console.log('  --help, -h             Show this message.');
 	process.exit(0);
 }
@@ -185,6 +194,22 @@ function pickTetherAddress() {
 	return candidates[0];
 }
 
+// --tailscale: advertise the tailnet address instead of the LAN pick. Detection
+// is by Tailscale's CGNAT range (100.64.0.0/10): on macOS the interface is an
+// anonymous utun*, so the address range is the only stable signal. No fallback —
+// if Tailscale isn't up, say so and exit rather than quietly advertising a LAN
+// URL the user didn't ask for.
+function pickTailscaleAddress() {
+	const addrs = tailscaleIPv4s();
+	if (addrs.length === 0) {
+		console.error('expediter: --tailscale was passed, but this Mac has no Tailscale address');
+		console.error('(no IPv4 in 100.64.0.0/10 on any interface). Is Tailscale running and connected?');
+		process.exit(1);
+	}
+	dbg('pickTailscaleAddress candidates:', addrs.join(' '));
+	return addrs[0];
+}
+
 // --- check whether the daemon is already serving ---
 async function isDaemonUp(scheme = transport) {
 	try {
@@ -240,7 +265,23 @@ async function fetchToken() {
 }
 
 async function printAccess() {
-	const addr = pickTetherAddress();
+	const addr = TAILSCALE_FLAG ? pickTailscaleAddress() : pickTetherAddress();
+
+	// In https mode the leaf must cover the advertised IP or the phone gets a
+	// bare TLS name-mismatch error. The daemon (re)issues the leaf only at
+	// startup, so a daemon started before Tailscale came up won't cover the
+	// tailnet address — tell the user to restart it rather than printing a QR
+	// that cannot work. (A daemon this launcher just spawned always passes:
+	// its leaf was issued moments ago with the tailnet address included.)
+	if (TAILSCALE_FLAG && transport === 'https' && !leafCoversIp(addr)) {
+		console.error(
+			`expediter: the running daemon's certificate does not cover the Tailscale address ${addr}.`
+		);
+		console.error('Stop the daemon (Ctrl-C in its terminal), then re-run `expediter --tailscale` —');
+		console.error('the fresh daemon reissues the certificate with the Tailscale address included.');
+		process.exit(1);
+	}
+
 	if (!addr) {
 		console.log('');
 		console.log(`Daemon running at http://localhost:${PORT}/`);
@@ -274,7 +315,7 @@ async function printAccess() {
 		console.log('  HTTPS is on (required for the microphone / voice feature). First time on this');
 		console.log('  phone? Open the link in Safari and follow the one-time certificate step; after');
 		console.log('  that it connects automatically. Want plain HTTP with no cert step? Re-run');
-		console.log('  `expediter --http`.');
+		console.log(`  \`expediter --http${TAILSCALE_FLAG ? ' --tailscale' : ''}\`.`);
 	}
 	if (PRINT_URL) {
 		console.log('');
@@ -325,6 +366,13 @@ async function printAccess() {
 }
 
 dbg(`transport=${transport} port=${PORT} (loopback probe ${transport}://127.0.0.1:${PORT}/)`);
+
+// Validate --tailscale before touching the daemon: with no tailnet address
+// there is nothing useful to start or print, and failing later would leave a
+// freshly spawned daemon running behind the error. Exits with the guidance
+// message when no address is found; the picked value itself is re-derived in
+// printAccess.
+if (TAILSCALE_FLAG) pickTailscaleAddress();
 
 const running = await detectRunningScheme();
 if (running) {

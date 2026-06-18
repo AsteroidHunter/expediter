@@ -3,7 +3,16 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { ensureCerts, certPaths, leafSans, certsExist, leafMtimeMs, localDotLocalName } from './cert';
+import {
+	ensureCerts,
+	certPaths,
+	leafSans,
+	certsExist,
+	leafMtimeMs,
+	localDotLocalName,
+	isTailscaleIPv4,
+	leafCoversIp
+} from './cert';
 
 let dir: string;
 
@@ -122,4 +131,31 @@ test('changing the LAN IP reissues the leaf but reuses the CA', () => {
 
 test('localDotLocalName ends in .local', () => {
 	expect(localDotLocalName().endsWith('.local')).toBe(true);
+});
+
+test('isTailscaleIPv4 accepts exactly the CGNAT range 100.64.0.0/10', () => {
+	expect(isTailscaleIPv4('100.64.0.1')).toBe(true);
+	expect(isTailscaleIPv4('100.101.102.103')).toBe(true);
+	expect(isTailscaleIPv4('100.127.255.254')).toBe(true);
+	// boundary neighbors and lookalikes
+	expect(isTailscaleIPv4('100.63.255.255')).toBe(false);
+	expect(isTailscaleIPv4('100.128.0.1')).toBe(false);
+	expect(isTailscaleIPv4('10.64.0.1')).toBe(false);
+	expect(isTailscaleIPv4('192.168.1.5')).toBe(false);
+	expect(isTailscaleIPv4('not-an-ip')).toBe(false);
+});
+
+test('a Tailscale address passed to ensureCerts lands in the leaf SAN', () => {
+	const p = ensureCerts({ dir, host: 'as-machine.local', ips: ['100.101.102.103'] });
+	expect(dump(p.cert)).toContain('IP Address:100.101.102.103');
+});
+
+test('leafCoversIp reflects the issued SAN set', () => {
+	ensureCerts({ dir, host: 'as-machine.local', ips: ['100.101.102.103'] });
+	expect(leafCoversIp('100.101.102.103', dir)).toBe(true);
+	expect(leafCoversIp('100.99.99.99', dir)).toBe(false);
+});
+
+test('leafCoversIp is false before any certs exist', () => {
+	expect(leafCoversIp('100.101.102.103', dir)).toBe(false);
 });

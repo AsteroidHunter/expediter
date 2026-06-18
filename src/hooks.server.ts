@@ -107,25 +107,28 @@ export function isAllowedIp(ip: string | null): boolean {
 	return false;
 }
 
-// Host header check. After the design pivot, accepts any RFC1918 or link-local
-// IPv4 at the configured port plus loopback literals and `<name>.local` mDNS
-// hostnames. Token gate is the actual auth; this is cheap defense-in-depth
-// against DNS rebinding from arbitrary Host headers pointing at the daemon's
-// LAN IP.
+// Host header check. After the design pivot, accepts any RFC1918, link-local,
+// or Tailscale CGNAT IPv4 at the configured port plus loopback literals and
+// `<name>.local` mDNS hostnames. Token gate is the actual auth; this is cheap
+// defense-in-depth against DNS rebinding from arbitrary Host headers pointing
+// at the daemon's LAN IP.
 const HOST_LITERALS = new Set<string>([
 	`localhost:${PORT}`,
 	`127.0.0.1:${PORT}`,
 	`[::1]:${PORT}`
 ]);
 
-// One regex per RFC1918 / link-local range, anchored on full string and the
-// configured port. Each octet is range-checked separately below to reject
-// values >255 (the regex's \d{1,3} would accept up to 999).
+// One regex per accepted range — RFC1918, link-local, and Tailscale's CGNAT
+// block (100.64.0.0/10, the address a phone dials with `expediter --tailscale`)
+// — anchored on full string and the configured port. Each octet is
+// range-checked separately below to reject values >255 (the regex's \d{1,3}
+// would accept up to 999).
 const HOST_IP_PATTERNS: RegExp[] = [
 	new RegExp(`^10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
 	new RegExp(`^172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
 	new RegExp(`^192\\.168\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
-	new RegExp(`^169\\.254\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`)
+	new RegExp(`^169\\.254\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
+	new RegExp(`^100\\.(?:6[4-9]|[789]\\d|1[01]\\d|12[0-7])\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`)
 ];
 
 // Single-label `<name>.local` mDNS hostname at the configured port. The label
