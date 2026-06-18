@@ -5,7 +5,6 @@
 	import { browser } from '$app/environment';
 	import { getClientToken, clearClientToken } from '$lib/clientToken';
 	import { startVoiceSession, type VoiceSession, type VoiceBackend } from '$lib/voiceClient';
-	import type { VoiceController, VoiceState } from '$lib/voice';
 
 	type EventType = 'Stop' | 'PermissionRequest' | 'Notification' | 'Idle';
 	// `title` may be empty string before the async topic refresh has run;
@@ -108,14 +107,6 @@
 	// Reactive: cleared when /api/ping returns 403 (token died, daemon restarted).
 	// Initial value is read from sessionStorage on the browser; null on the server.
 	let clientToken = $state<string | null>(browser ? getClientToken() : null);
-
-	// Voice: tap-to-talk to the oppie orchestrator over a LiveKit room. 'idle' →
-	// not connected; the rest mirror the controller's reported state. The
-	// controller (and livekit-client) is loaded with a dynamic import() inside
-	// toggleVoice so it never enters SSR or the entry bundle.
-	let voiceState = $state<'idle' | VoiceState>('idle');
-	let voiceDetail = $state<string>('');
-	let voiceCtl: VoiceController | null = null;
 
 	const mockLoaders = import.meta.glob<{ getMockTickets: () => Ticket[] }>(
 		'../../internal/fixtures/mocktickets.ts'
@@ -570,6 +561,19 @@
 
 	// Non-reactive gesture bookkeeping.
 	let voiceSession: VoiceSession | null = null;
+	// Generation counter for the gesture: bumped on every beginRecording and every
+	// resetVoice. Session callbacks (onError/onClosed) and the post-await resume
+	// check compare against it so a LATE callback from a previous session — e.g.
+	// its WS closing after the user already started a new dictation, or a failed
+	// stop POST reporting after the FSM reset — can never reset the new gesture.
+	let voiceGeneration = 0;
+	// True once the VoiceSession promise has resolved for the current gesture. The
+	// ✓/✗ buttons are disabled until then: before the session exists a ✓ tap could
+	// only no-op the send while resetting the FSM, after which the late-resolving
+	// session got disposed — i.e. the user pressed SEND and the system ran CANCEL.
+	// (The window is one microtask on the /voice backend but spans the whole
+	// mic-permission prompt on Baseten.)
+	let voiceSessionReady = $state(false);
 	let holdTimer: ReturnType<typeof setTimeout> | null = null;
 	let drainTimer: ReturnType<typeof setTimeout> | null = null;
 	let pointerStartX = 0;
@@ -682,10 +686,12 @@
 	}
 
 	function resetVoice(dispose = false): void {
+		voiceGeneration++;
 		clearHoldTimer();
 		clearDrainTimer();
 		if (dispose) voiceSession?.dispose();
 		voiceSession = null;
+		voiceSessionReady = false;
 		setVoicePhase('idle');
 		voiceTicketId = null;
 		pointerIsResume = false;
@@ -695,7 +701,9 @@
 
 	async function beginRecording(ticket: Ticket): Promise<void> {
 		if (!clientToken) return;
+		const gen = ++voiceGeneration;
 		voiceTicketId = ticket.session_id;
+		voiceSessionReady = false;
 		setVoicePhase('recording');
 		playStartSound();
 		try {
@@ -703,23 +711,37 @@
 				{ backend: sttBackend, pane: ticket.tmux_pane, token: clientToken },
 				{
 					onError: (m) => {
+						// Always surface the failure; only reset the FSM if this session
+						// is still the live gesture (a failed stop POST reports after the
+						// reset, and must not knock over the NEXT recording).
 						showVoiceError(m);
-						resetVoice(true);
+						if (gen === voiceGeneration) resetVoice(true);
+					},
+					onClosed: () => {
+						// The session died underneath the gesture (daemon restart, network
+						// change, phone backgrounded). The session has already disposed
+						// itself — reset the FSM so the dock stops pulsing on a corpse and
+						// a later ✓ can't fake a send.
+						if (gen !== voiceGeneration) return;
+						showVoiceError('recording connection lost');
+						resetVoice(false);
 					}
 				}
 			);
-			// The user may have released/cancelled while mic access was being granted
-			// (voicePhase is written via setVoicePhase, so it reads as the live value).
-			if (voiceTicketId !== ticket.session_id || voicePhase === 'idle') {
+			// The user may have released/cancelled (or an error reset us) while mic
+			// access was being granted — any path back through resetVoice bumped the
+			// generation, so a mismatch means this session is orphaned.
+			if (gen !== voiceGeneration) {
 				session.dispose();
 				return;
 			}
 			voiceSession = session;
+			voiceSessionReady = true;
 			// If they released into the drain during the await, honor it now.
 			if (voicePhase === 'draining') session.release();
 		} catch {
 			showVoiceError('microphone unavailable');
-			resetVoice(true);
+			if (gen === voiceGeneration) resetVoice(true);
 		}
 	}
 
@@ -742,15 +764,20 @@
 	}
 
 	function doSend(): void {
+		// No session yet (still resolving) or already gone → there is nothing to
+		// send; doing the feedback-and-reset anyway is how a ✓ used to lie. The
+		// buttons are disabled until voiceSessionReady, this is the race belt.
+		if (!voiceSession) return;
 		clearDrainTimer();
-		voiceSession?.send();
+		voiceSession.send();
 		playSentSound();
 		resetVoice(false);
 	}
 
 	function doCancel(): void {
+		if (!voiceSession) return;
 		clearDrainTimer();
-		voiceSession?.cancel();
+		voiceSession.cancel();
 		resetVoice(false);
 	}
 
@@ -823,8 +850,14 @@
 		releaseCapture();
 		clearHoldTimer();
 		// Browser claimed the gesture (scroll). Abort only, never confirm: discard an
-		// in-progress recording rather than sending it.
-		if (voicePhase === 'recording') doCancel();
+		// in-progress recording rather than sending it. Unlike the ✗ button this can
+		// fire BEFORE the session resolves — reset unconditionally; the post-await
+		// generation check in beginRecording disposes the orphaned session.
+		if (voicePhase === 'recording') {
+			clearDrainTimer();
+			voiceSession?.cancel();
+			resetVoice(false);
+		}
 	}
 
 	// Android Chrome's long-press context menu isn't covered by the CSS callout
@@ -945,46 +978,6 @@
 		}, 600);
 	}
 
-	async function stopVoice(): Promise<void> {
-		const ctl = voiceCtl;
-		voiceCtl = null;
-		voiceState = 'idle';
-		voiceDetail = '';
-		if (ctl) {
-			try {
-				await ctl.hangUp();
-			} catch {
-				/* already torn down */
-			}
-		}
-	}
-
-	async function toggleVoice(): Promise<void> {
-		if (!clientToken) return;
-		// Live or mid-connect → hang up. Otherwise start a fresh session.
-		if (voiceState === 'live' || voiceState === 'connecting') {
-			await stopVoice();
-			return;
-		}
-		voiceDetail = '';
-		voiceState = 'connecting';
-		try {
-			const { startVoice } = await import('$lib/voice');
-			voiceCtl = await startVoice({
-				clientToken,
-				onState: (s, d) => {
-					voiceState = s;
-					if (d) voiceDetail = d;
-				}
-			});
-		} catch {
-			// startVoice already reported the specific reason via onState (which set a
-			// detail message); ensure the button lands in the error state regardless.
-			voiceCtl = null;
-			voiceState = 'error';
-		}
-	}
-
 	onMount(async () => {
 		if (browser && new URLSearchParams(window.location.search).has('mock')) {
 			const loader = Object.values(mockLoaders)[0];
@@ -1009,11 +1002,6 @@
 	onDestroy(() => {
 		// Tear down any in-progress dictation (mic stream / WS / audio context).
 		resetVoice(true);
-		// Hang up any live tap-to-talk session with the orchestrator.
-		if (voiceCtl) {
-			void voiceCtl.hangUp().catch(() => {});
-			voiceCtl = null;
-		}
 		if (eventSource) {
 			try {
 				eventSource.close();
@@ -1058,21 +1046,6 @@
 			<span class="brand-version">(v0.72)</span>
 		</div>
 		<div class="header-right">
-			{#if clientToken}
-				<button
-					type="button"
-					class="voice"
-					class:connecting={voiceState === 'connecting'}
-					class:live={voiceState === 'live'}
-					class:error={voiceState === 'error'}
-					aria-label="Talk to orchestrator"
-					aria-pressed={voiceState === 'live'}
-					title={voiceDetail || 'Talk to orchestrator'}
-					onclick={toggleVoice}
-				>
-					🎙
-				</button>
-			{/if}
 			{#if clientToken}
 				<button
 					type="button"
@@ -1247,16 +1220,22 @@
 								     amplitude is meaningless. Release shows ✓ send / ✗ discard — nothing
 								     auto-sends. -->
 								{#if voicePhase === 'draining'}
+									<!-- Disabled until the VoiceSession promise resolves: a ✓ on a
+									     not-yet-existing session can't send anything, and resetting the
+									     FSM on it turned the user's SEND into a CANCEL (the orphaned
+									     session gets disposed when it finally resolves). -->
 									<button
 										type="button"
 										class="voice-send"
 										aria-label="Send dictation"
+										disabled={!voiceSessionReady}
 										onclick={doSend}>✓</button
 									>
 									<button
 										type="button"
 										class="voice-cancel"
 										aria-label="Discard dictation"
+										disabled={!voiceSessionReady}
 										onclick={doCancel}>✕</button
 									>
 								{:else}
@@ -1442,51 +1421,6 @@
 	}
 	.gear.open {
 		transform: rotate(45deg);
-	}
-
-	/* Tap-to-talk mic. Idle = desaturated/quiet; connecting pulses; live goes
-	   green (matches the .conn LED); error goes the PermissionRequest red. */
-	.voice {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: 0;
-		padding: 4px;
-		margin: -4px;
-		font-size: 18px;
-		line-height: 1;
-		cursor: pointer;
-		-webkit-tap-highlight-color: transparent;
-		filter: grayscale(1);
-		opacity: 0.5;
-		transition:
-			filter 150ms ease,
-			opacity 150ms ease,
-			transform 200ms ease;
-	}
-	.voice.connecting {
-		filter: none;
-		opacity: 1;
-		animation: voice-pulse 1s ease-in-out infinite;
-	}
-	.voice.live {
-		filter: none;
-		opacity: 1;
-		transform: scale(1.1);
-	}
-	.voice.error {
-		filter: none;
-		opacity: 1;
-	}
-	@keyframes voice-pulse {
-		0%,
-		100% {
-			opacity: 1;
-		}
-		50% {
-			opacity: 0.35;
-		}
 	}
 
 	/* Full-viewport blurred backdrop. Dims and blurs the dock behind the panel
@@ -2163,6 +2097,13 @@
 		right: 14px;
 		background: rgba(255, 253, 245, 0.97);
 		color: #b3301a;
+	}
+	/* Session still resolving (mic permission up, WS connecting) — the buttons
+	   exist but can't act yet, so read as inert rather than ignoring taps. */
+	.ticket button.voice-send:disabled,
+	.ticket button.voice-cancel:disabled {
+		opacity: 0.45;
+		cursor: default;
 	}
 
 	/* Transient recording-error toast (mic denied / Baseten unreachable / not
