@@ -1,5 +1,5 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
-import { sendKeys, paneAcceptsInput, InjectError } from '$lib/tmux';
+import { sendKeys, ensurePaneInputReady, InjectError } from '$lib/tmux';
 import { findByPane, setRecording } from '$lib/ticketStore';
 import { voiceElapsedMs, stopWaitMs, clearVoice } from '$lib/server/voice';
 
@@ -48,7 +48,12 @@ export const POST: RequestHandler = async ({ request }) => {
 		if (session_id) setRecording(session_id, false);
 	};
 
-	const readiness = await paneAcceptsInput(pane);
+	// Same copy-mode recovery as start: if the user scrolled up between recording and
+	// tapping ✓, drop the pane back to the live prompt so the stop Space reaches
+	// Claude instead of paging the scrollback (which would leave CC recording — a
+	// desync). Any OTHER not-ready reason means the recording is effectively over, so
+	// we just clear our flag and report injected=false rather than erroring.
+	const readiness = await ensurePaneInputReady(pane);
 	if (!readiness.ready) {
 		console.warn(`[voice] stop: pane not ready (${readiness.reason}); clearing flag only`);
 		clearFlag();

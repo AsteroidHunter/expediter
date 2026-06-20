@@ -513,11 +513,13 @@
 
 	// ─── Speech-to-prompt gesture (Phase 5) ─────────────────────────────────
 	// Press-and-hold a ticket ~HOLD_MS to start dictation (RECORDING); release to
-	// enter REVIEW, where you explicitly tap ✓ to send or ✗ to discard (or hold again
-	// to resume) — nothing sends on a timer. A press shorter than HOLD_MS (or one that
-	// moves past the slop) falls through to the normal tap (focus/attach). One
-	// recording at a time (v1).
+	// enter the DRAIN — a DRAIN_MS countdown shown as a ring emptying around the orb,
+	// after which the dictation auto-sends. Hold the ticket again before the ring
+	// empties to resume recording (the ring clears); release for a fresh countdown.
+	// A press shorter than HOLD_MS (or one that moves past the slop) falls through to
+	// the normal tap (focus/attach). One recording at a time (v1).
 	const HOLD_MS = 1000; // press duration to arm recording (~1–2s per the plan)
+	const DRAIN_MS = 2500; // release → autosend countdown; the orb ring drains over this
 	const SLOP = 10; // px of movement that reclassifies a hold as a scroll
 
 	let sttBackend = $state<VoiceBackend>('voice');
@@ -567,13 +569,6 @@
 	// its WS closing after the user already started a new dictation, or a failed
 	// stop POST reporting after the FSM reset — can never reset the new gesture.
 	let voiceGeneration = 0;
-	// True once the VoiceSession promise has resolved for the current gesture. The
-	// ✓/✗ buttons are disabled until then: before the session exists a ✓ tap could
-	// only no-op the send while resetting the FSM, after which the late-resolving
-	// session got disposed — i.e. the user pressed SEND and the system ran CANCEL.
-	// (The window is one microtask on the /voice backend but spans the whole
-	// mic-permission prompt on Baseten.)
-	let voiceSessionReady = $state(false);
 	let holdTimer: ReturnType<typeof setTimeout> | null = null;
 	let drainTimer: ReturnType<typeof setTimeout> | null = null;
 	let pointerStartX = 0;
@@ -691,7 +686,6 @@
 		clearDrainTimer();
 		if (dispose) voiceSession?.dispose();
 		voiceSession = null;
-		voiceSessionReady = false;
 		setVoicePhase('idle');
 		voiceTicketId = null;
 		pointerIsResume = false;
@@ -703,7 +697,6 @@
 		if (!clientToken) return;
 		const gen = ++voiceGeneration;
 		voiceTicketId = ticket.session_id;
-		voiceSessionReady = false;
 		setVoicePhase('recording');
 		playStartSound();
 		try {
@@ -736,7 +729,6 @@
 				return;
 			}
 			voiceSession = session;
-			voiceSessionReady = true;
 			// If they released into the drain during the await, honor it now.
 			if (voicePhase === 'draining') session.release();
 		} catch {
@@ -746,10 +738,15 @@
 	}
 
 	function startDrain(): void {
-		// Release → "review": recording stops but NOTHING sends on its own. The user
-		// taps ✓ to send or ✗ to discard (or holds again to resume). No timer.
+		// Release → drain: a DRAIN_MS countdown (the orb ring empties) after which the
+		// dictation auto-sends. Re-holding the ticket cancels this and resumes — the
+		// pointer-down handler clears the timer the instant a resume-press lands.
 		setVoicePhase('draining');
 		clearDrainTimer();
+		drainTimer = setTimeout(() => {
+			drainTimer = null;
+			doSend();
+		}, DRAIN_MS);
 	}
 
 	function enterDrain(): void {
@@ -764,20 +761,16 @@
 	}
 
 	function doSend(): void {
-		// No session yet (still resolving) or already gone → there is nothing to
-		// send; doing the feedback-and-reset anyway is how a ✓ used to lie. The
-		// buttons are disabled until voiceSessionReady, this is the race belt.
+		// Autosend at the end of the drain. No session yet (still resolving) or already
+		// gone → nothing to send; resetting anyway would fake a send, so bail and let
+		// the gesture's other exits (onError / onClosed / pointercancel) clean up. On
+		// the /voice backend the session resolves within a microtask, long before the
+		// DRAIN_MS countdown elapses, so this guard effectively only trips on a dead
+		// session.
 		if (!voiceSession) return;
 		clearDrainTimer();
 		voiceSession.send();
 		playSentSound();
-		resetVoice(false);
-	}
-
-	function doCancel(): void {
-		if (!voiceSession) return;
-		clearDrainTimer();
-		voiceSession.cancel();
 		resetVoice(false);
 	}
 
@@ -850,13 +843,19 @@
 		releaseCapture();
 		clearHoldTimer();
 		// Browser claimed the gesture (scroll). Abort only, never confirm: discard an
-		// in-progress recording rather than sending it. Unlike the ✗ button this can
-		// fire BEFORE the session resolves — reset unconditionally; the post-await
-		// generation check in beginRecording disposes the orphaned session.
+		// in-progress recording rather than sending it. This can fire BEFORE the session
+		// resolves — reset unconditionally; the post-await generation check in
+		// beginRecording disposes the orphaned session.
 		if (voicePhase === 'recording') {
 			clearDrainTimer();
 			voiceSession?.cancel();
 			resetVoice(false);
+		} else if (pointerIsResume) {
+			// A resume-press during the drain got stolen by a scroll. The pointerdown
+			// paused the autosend countdown (cleared the timer); restart it — same as the
+			// move/up handlers — so the dictation still sends rather than freezing in a
+			// drain that no longer has a ✗ to recover it.
+			startDrain();
 		}
 	}
 
@@ -1213,36 +1212,26 @@
 							</button>
 
 							{#if isVoiceActive(ticket)}
-								<!-- Recording UI. The ticket turns orange-red via CSS vars
-								     (.recording/.draining) — no overlay, so the perforation notch stays
-								     cut out. The indicator is a recording PULSE, not a live waveform: the
-								     phone can't measure /voice's audio (you speak at the laptop), so faking
-								     amplitude is meaningless. Release shows ✓ send / ✗ discard — nothing
-								     auto-sends. -->
-								{#if voicePhase === 'draining'}
-									<!-- Disabled until the VoiceSession promise resolves: a ✓ on a
-									     not-yet-existing session can't send anything, and resetting the
-									     FSM on it turned the user's SEND into a CANCEL (the orphaned
-									     session gets disposed when it finally resolves). -->
-									<button
-										type="button"
-										class="voice-send"
-										aria-label="Send dictation"
-										disabled={!voiceSessionReady}
-										onclick={doSend}>✓</button
-									>
-									<button
-										type="button"
-										class="voice-cancel"
-										aria-label="Discard dictation"
-										disabled={!voiceSessionReady}
-										onclick={doCancel}>✕</button
-									>
-								{:else}
-									<div class="voice-indicator" aria-hidden="true">
+								<!-- Recording orb in the gap the sliding card opens on the right. A
+								     record PULSE while held; on release a ring draining clockwise over
+								     DRAIN_MS, after which the dictation auto-sends. Status light only — no
+								     tap actions in this cut, so re-recording is a re-hold on the card and
+								     pointer-events stay off it. The phone can't meter /voice's laptop-side
+								     audio, so neither shape is a real waveform. -->
+								<div class="voice-orb" aria-hidden="true">
+									{#if voicePhase === 'draining'}
+										<svg
+											class="drain-ring"
+											viewBox="0 0 36 36"
+											style:--drain-ms={`${DRAIN_MS}ms`}
+										>
+											<circle class="drain-track" cx="18" cy="18" r="16" />
+											<circle class="drain-progress" cx="18" cy="18" r="16" />
+										</svg>
+									{:else}
 										<span class="rec-pulse"></span>
-									</div>
-								{/if}
+									{/if}
+								</div>
 							{/if}
 						</li>
 					{/each}
@@ -1707,21 +1696,16 @@
 		--notch-size: 18px;
 		--notch-offset: 14px;
 
+		/* The <li> is the stationary positioning context + CSS-var source + flip/fly
+		   layout host. It carries NO fill — the card's visual surface lives on the child
+		   <button> (see `.ticket button`) so a voice gesture can slide just the surface
+		   left and reveal the orb in the gap, which shows this bare <li>'s page
+		   background through it. */
 		position: relative;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 0;
 		/* Vertical scroll stays native; horizontal is the detach drag's to handle,
 		   so we never need a non-passive preventDefault on touchmove. */
 		touch-action: pan-y;
-		box-shadow:
-			0 1px 0 rgba(80, 60, 30, 0.04),
-			0 2px 10px rgba(80, 60, 30, 0.06);
-		transition:
-			transform 120ms ease,
-			background-color 150ms ease,
-			border-color 150ms ease,
-			color 150ms ease;
+		transition: transform 120ms ease;
 	}
 	.ticket.type-permission {
 		--bg: #f9d5cc;
@@ -1745,8 +1729,10 @@
 	   the fill is translucent; text and border stay crisp, unlike element
 	   opacity which faded the whole ticket. */
 	.ticket.type-idle {
-		filter: saturate(0);
 		--bg: rgba(255, 241, 201, 0.2);
+	}
+	.ticket.type-idle button {
+		filter: saturate(0);
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
@@ -1764,16 +1750,16 @@
 	   so the entire palette ages together. Placed before .ticket.working so the
 	   working pastel-green wins if both classes ever co-applied (the helper
 	   skips stale on working/permission tickets, so this is defensive). */
-	.ticket.stale-1 {
+	.ticket.stale-1 button {
 		filter: saturate(0.75);
 	}
-	.ticket.stale-2 {
+	.ticket.stale-2 button {
 		filter: saturate(0.5);
 	}
-	.ticket.stale-3 {
+	.ticket.stale-3 button {
 		filter: saturate(0.25);
 	}
-	.ticket.stale-4 {
+	.ticket.stale-4 button {
 		filter: saturate(0);
 	}
 	/* "Working" state: Claude is processing (UserPromptSubmit / PostToolUse /
@@ -1800,12 +1786,14 @@
 	   detached, so there is no additional age-fade. Placed after .type-*, .stale-*,
 	   and .working so it wins on equal specificity via source order. */
 	.ticket.detached {
-		filter: saturate(0);
 		--bg: #fff1c9;
 		--border: #ead68f;
 		--title: #2a1f15;
 		--muted: #8a7a45;
 		--accent: #6e5a20;
+	}
+	.ticket.detached button {
+		filter: saturate(0);
 	}
 	.shimmer {
 		position: absolute;
@@ -1835,15 +1823,31 @@
 	}
 
 	.ticket button {
+		/* The card's visual surface (moved off the <li>): fill, border, shadow — and the
+		   element a voice gesture slides left via translateX. box-sizing:border-box so the
+		   1px border doesn't push the 100% width past the <li>. position:relative so the
+		   working shimmer (absolute inset:0) clips to the button as it slides, not to the
+		   stationary <li>. */
+		position: relative;
+		box-sizing: border-box;
 		display: block;
 		width: 100%;
 		text-align: left;
-		background: transparent;
-		border: 0;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 0;
+		box-shadow:
+			0 1px 0 rgba(80, 60, 30, 0.04),
+			0 2px 10px rgba(80, 60, 30, 0.06);
 		color: inherit;
 		font: inherit;
 		padding: 0;
 		cursor: pointer;
+		transition:
+			transform 200ms ease,
+			background-color 150ms ease,
+			border-color 150ms ease,
+			color 150ms ease;
 		-webkit-tap-highlight-color: transparent;
 		/* Long-press gesture suppression (5.1): keep vertical dock scroll (pan-y) but
 		   kill the iOS callout/text-magnifier and Android selection so a hold reads as
@@ -2005,45 +2009,47 @@
 
 	/* ─── Speech-to-prompt recording UI (Phase 5) ───────────────────────────── */
 
-	/* Recording / draining ticket: turn the whole card orange-red via the SAME CSS
-	   variables the working/permission states use — not an overlay — so the
-	   perforation notch (var(--page-bg)) stays cut out. filter:none defeats the
-	   idle/detached/stale saturate(0) that otherwise greyed the card. Raised and
-	   above its neighbors; placed after .working/.detached so it wins on source order. */
+	/* Active voice gesture: slide the card surface (the <button>) left to open a gap on
+	   the right for the orb. No colour change — the orb, not the whole card, is the
+	   recording signal now. overflow:hidden on the <li> clips the surface's slid-off
+	   left edge at the card boundary (a clean "window"), and the raised z-index lets the
+	   sliding card + orb composite above neighbouring tickets. filter:none keeps the
+	   surface crisp even on an idle/stale/detached ticket (defeats their saturate());
+	   placed after those rules so it wins on equal specificity via source order. */
 	.ticket.recording,
 	.ticket.draining {
-		--bg: #ff5436;
-		--border: #e23d1f;
-		--title: #fff4f0;
-		--muted: #ffd7cc;
-		--accent: #ffffff;
+		z-index: 4;
+		overflow: hidden;
+	}
+	.ticket.recording button,
+	.ticket.draining button {
+		transform: translateX(-36%);
 		filter: none;
-		transform: translateY(-3px) scale(1.012);
-		box-shadow: 0 6px 18px rgba(150, 50, 20, 0.3);
-		z-index: 3;
 	}
 
-	/* Right-end indicator circle holding a recording PULSE — a status light, not a
-	   waveform (the phone can't measure /voice's laptop-side audio, so live amplitude
-	   would be fake). pointer-events:none so the hold gesture passes through. */
-	.voice-indicator {
+	/* Recording orb — a status light centred in the gap the sliding card opens on the
+	   right (right:18% + translateX(50%) puts its centre in the middle of the 36% gap).
+	   A record PULSE while held; a draining ring after release. Neither is a real
+	   waveform — the phone can't meter /voice's laptop-side audio. pointer-events:none:
+	   indicator only, the re-hold-to-resume gesture lands on the card behind it. */
+	.voice-orb {
 		position: absolute;
 		top: 50%;
-		right: 14px;
-		transform: translateY(-50%);
-		z-index: 2;
+		right: 18%;
+		transform: translate(50%, -50%);
+		z-index: 5;
 		box-sizing: border-box;
 		width: 34px;
 		height: 34px;
 		border-radius: 50%;
-		background: rgba(255, 253, 245, 0.95);
+		background: rgba(255, 253, 245, 0.97);
 		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		pointer-events: none;
 	}
-	.voice-indicator .rec-pulse {
+	.voice-orb .rec-pulse {
 		width: 12px;
 		height: 12px;
 		border-radius: 50%;
@@ -2062,48 +2068,37 @@
 		}
 	}
 
-	/* Review state: explicit Send (✓) and Discard (✗) buttons — nothing auto-sends.
-	   Scoped `.ticket button.voice-*` so they OUT-SPECIFY `.ticket button { width:100% }`
-	   (which was stretching them into ovals) and override its block/left-align/
-	   transparent. Fixed-size clean circles; Send sits to the left of Discard. */
-	.ticket button.voice-send,
-	.ticket button.voice-cancel {
-		position: absolute;
-		top: 50%;
-		transform: translateY(-50%);
-		z-index: 3;
-		box-sizing: border-box;
-		width: 34px;
-		height: 34px;
-		padding: 0;
-		border: 0;
-		border-radius: 50%;
-		font-size: 18px;
-		line-height: 1;
-		text-align: center;
-		cursor: pointer;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
-		-webkit-tap-highlight-color: transparent;
+	/* Countdown ring: drains clockwise from 12 o'clock over --drain-ms (bound inline to
+	   the JS DRAIN_MS so the ring and the autosend timer share one source). The dash is
+	   the full circumference (2·π·16 ≈ 100.53); animating stroke-dashoffset
+	   0 → circumference empties it. `forwards` holds it empty at the end — the gesture
+	   resets right after. rotate(-90deg) moves the stroke's start point to 12 o'clock;
+	   if on-device it drains the wrong way, flip that sign or swap the keyframe ends. */
+	.drain-ring {
+		width: 30px;
+		height: 30px;
+		transform: rotate(-90deg);
 	}
-	.ticket button.voice-send {
-		right: 56px;
-		background: #2f7d31;
-		color: #fff;
+	.drain-track {
+		fill: none;
+		stroke: rgba(210, 58, 28, 0.16);
+		stroke-width: 3;
 	}
-	.ticket button.voice-cancel {
-		right: 14px;
-		background: rgba(255, 253, 245, 0.97);
-		color: #b3301a;
+	.drain-progress {
+		fill: none;
+		stroke: #d33a1c;
+		stroke-width: 3;
+		stroke-linecap: round;
+		stroke-dasharray: 100.53;
+		animation: drain var(--drain-ms, 2500ms) linear forwards;
 	}
-	/* Session still resolving (mic permission up, WS connecting) — the buttons
-	   exist but can't act yet, so read as inert rather than ignoring taps. */
-	.ticket button.voice-send:disabled,
-	.ticket button.voice-cancel:disabled {
-		opacity: 0.45;
-		cursor: default;
+	@keyframes drain {
+		from {
+			stroke-dashoffset: 0;
+		}
+		to {
+			stroke-dashoffset: 100.53;
+		}
 	}
 
 	/* Transient recording-error toast (mic denied / Baseten unreachable / not
