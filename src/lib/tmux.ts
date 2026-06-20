@@ -452,6 +452,29 @@ export async function sendKeys(pane: string, keys: string[]): Promise<void> {
 	}
 }
 
+// Build the argv to drop a pane OUT of copy/view mode. tmux dispatches send-keys to
+// the copy-mode key table while a pane is in mode, so injected keys (a /voice
+// Space, a C-u) would drive the scrollback viewer instead of Claude Code; `-X
+// cancel` is the copy-mode command that leaves the mode and returns the pane to the
+// live prompt. Only valid while the pane is in a mode (tmux is a no-op otherwise) —
+// callers gate on a copy-mode readiness verdict. Pure for unit-testing the shape.
+export function exitCopyModeArgs(pane: string): string[] {
+	return ['send-keys', '-t', pane, '-X', 'cancel'];
+}
+
+// Leave copy/view mode on a pane so a following inject reaches Claude Code. Side
+// effect: the pane's view snaps back to the live prompt — you can't type into
+// Claude while scrolled up reading history. Throws InjectError on a bad pane id or
+// a tmux failure.
+export async function exitCopyMode(pane: string): Promise<void> {
+	if (!isValidPane(pane)) throw new InjectError(`invalid pane id '${pane}'`);
+	try {
+		await execFileAsync('tmux', exitCopyModeArgs(pane));
+	} catch {
+		throw new InjectError(`tmux exit copy-mode failed for pane '${pane}'`);
+	}
+}
+
 // Build the argv for `tmux send-keys -l` sending LITERAL text (no key-name lookup)
 // to a pane — used to live-type Baseten transcript suffixes as they stream in.
 // `--` terminates flag parsing so a suffix starting with '-' isn't read as a flag.
@@ -511,7 +534,14 @@ export async function submitPrompt(pane: string, text: string): Promise<void> {
 // too broad and would defeat the guard.
 const CLAUDE_PANE_COMMANDS = ['claude.exe', 'claude'];
 
-export type PaneReadiness = { ready: true } | { ready: false; reason: string };
+// Why a pane isn't ready for injection. `copy-mode` is the one reason a caller can
+// recover from (it's the user's scroll position, not a hard blocker) — every other
+// reason means the pane genuinely can't take Claude input right now. See
+// ensurePaneInputReady, which keys off this.
+export type PaneNotReadyReason = 'invalid-pane' | 'gone' | 'not-claude' | 'copy-mode' | 'unreadable';
+export type PaneReadiness =
+	| { ready: true }
+	| { ready: false; reason: string; code: PaneNotReadyReason };
 
 // Parse `display-message -p '#{pane_current_command}|#{pane_in_mode}'` output into
 // a tier-1 readiness verdict: the foreground process must be Claude Code and the
@@ -527,19 +557,18 @@ export function parsePaneReadiness(
 	const sep = trimmed.indexOf('|');
 	// Fail closed: our format string always joins both fields with a literal '|',
 	// so a missing separator means malformed output — refuse rather than guess.
-	if (sep < 0) return { ready: false, reason: 'could not read pane state' };
+	if (sep < 0) return { ready: false, reason: 'could not read pane state', code: 'unreadable' };
 	const cmd = trimmed.slice(0, sep).trim();
 	const inMode = trimmed.slice(sep + 1).trim();
-	if (!cmd) return { ready: false, reason: 'could not read pane state' };
+	if (!cmd) return { ready: false, reason: 'could not read pane state', code: 'unreadable' };
 	if (!claudeCommands.includes(cmd)) {
-		return { ready: false, reason: `pane is running '${cmd}', not Claude Code` };
+		return { ready: false, reason: `pane is running '${cmd}', not Claude Code`, code: 'not-claude' };
 	}
 	// pane_in_mode is 0 or 1; treat anything but a clean 0 as not-ready.
 	if (inMode !== '0') {
-		return {
-			ready: false,
-			reason: inMode === '1' ? 'pane is in copy-mode' : 'could not read pane state'
-		};
+		return inMode === '1'
+			? { ready: false, reason: 'pane is in copy-mode', code: 'copy-mode' }
+			: { ready: false, reason: 'could not read pane state', code: 'unreadable' };
 	}
 	return { ready: true };
 }
@@ -549,7 +578,8 @@ export function parsePaneReadiness(
 // "not ready" instead of a hard error. A pane that no longer exists reads as
 // not-ready. See parsePaneReadiness for the deliberate limits of this check.
 export async function paneAcceptsInput(pane: string): Promise<PaneReadiness> {
-	if (!isValidPane(pane)) return { ready: false, reason: `invalid pane id '${pane}'` };
+	if (!isValidPane(pane))
+		return { ready: false, reason: `invalid pane id '${pane}'`, code: 'invalid-pane' };
 	let stdout: string;
 	try {
 		({ stdout } = await execFileAsync('tmux', [
@@ -560,7 +590,28 @@ export async function paneAcceptsInput(pane: string): Promise<PaneReadiness> {
 			'#{pane_current_command}|#{pane_in_mode}'
 		]));
 	} catch {
-		return { ready: false, reason: `pane '${pane}' no longer exists` };
+		return { ready: false, reason: `pane '${pane}' no longer exists`, code: 'gone' };
 	}
 	return parsePaneReadiness(stdout);
+}
+
+// paneAcceptsInput, but recover from the one not-ready reason that's the user's
+// view rather than a hard blocker: a pane scrolled up into copy-mode. tmux routes
+// send-keys to the copy-mode key table while a pane is in mode, so a /voice Space
+// would page the scrollback instead of reaching Claude — so we drop the pane back
+// to the live prompt and re-check. Hold-to-record (and its stop) then work even
+// while the user is reading scrollback, at the cost of snapping their view to the
+// bottom (the dictation lands in the prompt there anyway). Every OTHER not-ready
+// reason — not Claude, pane gone, unreadable — is returned unchanged; those aren't
+// ours to override. If leaving copy-mode fails, the original copy-mode verdict is
+// returned and the caller refuses exactly as before.
+export async function ensurePaneInputReady(pane: string): Promise<PaneReadiness> {
+	const verdict = await paneAcceptsInput(pane);
+	if (verdict.ready || verdict.code !== 'copy-mode') return verdict;
+	try {
+		await exitCopyMode(pane);
+	} catch {
+		return verdict;
+	}
+	return paneAcceptsInput(pane);
 }

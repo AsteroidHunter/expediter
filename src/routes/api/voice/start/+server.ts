@@ -1,5 +1,5 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
-import { sendKeys, paneAcceptsInput, InjectError } from '$lib/tmux';
+import { sendKeys, ensurePaneInputReady, InjectError } from '$lib/tmux';
 import { findByPane, setRecording } from '$lib/ticketStore';
 import { markVoiceStart, checkVoiceTapVersion, VOICE_TAP_MIN_VERSION } from '$lib/server/voice';
 
@@ -23,9 +23,12 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!pane) return json({ ok: false, error: 'missing pane' }, { status: 400 });
 
 	// tier-1 readiness guard — refuse to inject unless Claude Code is the pane's
-	// foreground process and it isn't in copy-mode. Also catches a malformed/gone
-	// pane (paneAcceptsInput returns not-ready without shelling out for a bad id).
-	const readiness = await paneAcceptsInput(pane);
+	// foreground process. A pane scrolled up into copy-mode is NOT refused:
+	// ensurePaneInputReady drops it back to the live prompt first, so hold-to-record
+	// works even while the user is reading scrollback (it snaps their view to the
+	// bottom — the dictation lands in the prompt there anyway). Still catches a
+	// malformed/gone pane and a non-Claude foreground without shelling out for a bad id.
+	const readiness = await ensurePaneInputReady(pane);
 	if (!readiness.ready) {
 		return json({ ok: false, ready: false, error: readiness.reason }, { status: 409 });
 	}

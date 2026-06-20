@@ -10,11 +10,14 @@ import {
 	sendKeysArgs,
 	pasteBufferArgs,
 	sendTextArgs,
+	exitCopyModeArgs,
+	exitCopyMode,
 	parsePaneReadiness,
 	sendKeys,
 	sendText,
 	submitPrompt,
 	paneAcceptsInput,
+	ensurePaneInputReady,
 	InjectError,
 	type TabLocation
 } from './tmux';
@@ -354,6 +357,18 @@ test('sendTextArgs builds a literal send-keys argv terminated with --', () => {
 	]);
 });
 
+// exitCopyModeArgs ──────────────────────────────────────────────────────────
+
+// -X dispatches `cancel` to the copy-mode command table (not the literal key),
+// which is what leaves the mode and drops the pane back to the live prompt.
+test('exitCopyModeArgs builds the copy-mode cancel argv', () => {
+	expect(exitCopyModeArgs('%5')).toEqual(['send-keys', '-t', '%5', '-X', 'cancel']);
+});
+
+test('exitCopyMode rejects an invalid pane id with InjectError', async () => {
+	expect(await captureThrow(() => exitCopyMode('14'))).toBeInstanceOf(InjectError);
+});
+
 // parsePaneReadiness ────────────────────────────────────────────────────────
 
 test('parsePaneReadiness is ready when Claude Code is foreground and not in a mode', () => {
@@ -367,13 +382,28 @@ test('parsePaneReadiness accepts the bare "claude" command name too', () => {
 test('parsePaneReadiness refuses a non-Claude foreground process', () => {
 	const r = parsePaneReadiness('zsh|0');
 	expect(r.ready).toBe(false);
-	if (!r.ready) expect(r.reason).toContain('zsh');
+	if (!r.ready) {
+		expect(r.reason).toContain('zsh');
+		expect(r.code).toBe('not-claude');
+	}
 });
 
-test('parsePaneReadiness refuses a pane in copy-mode', () => {
+test('parsePaneReadiness flags copy-mode with a recoverable code', () => {
+	// The `copy-mode` code is what ensurePaneInputReady keys off to auto-recover.
 	const r = parsePaneReadiness('claude.exe|1');
 	expect(r.ready).toBe(false);
-	if (!r.ready) expect(r.reason).toContain('copy-mode');
+	if (!r.ready) {
+		expect(r.reason).toContain('copy-mode');
+		expect(r.code).toBe('copy-mode');
+	}
+});
+
+test('parsePaneReadiness codes malformed output as unreadable, not copy-mode', () => {
+	for (const out of ['claude.exe', '', 'claude.exe|', 'claude.exe|2']) {
+		const r = parsePaneReadiness(out);
+		expect(r.ready).toBe(false);
+		if (!r.ready) expect(r.code).toBe('unreadable');
+	}
 });
 
 test('parsePaneReadiness trims surrounding whitespace before matching', () => {
@@ -425,4 +455,14 @@ test('sendText is a no-op for empty text on a valid pane (no tmux call, no throw
 test('paneAcceptsInput returns not-ready for an invalid pane id without throwing', async () => {
 	const r = await paneAcceptsInput('nope');
 	expect(r.ready).toBe(false);
+	if (!r.ready) expect(r.code).toBe('invalid-pane');
+});
+
+// ensurePaneInputReady — copy-mode recovery is a live-tmux path (exercised on
+// device); without a tmux server we can still prove it never tries to recover a
+// non-copy-mode blocker, returning the underlying verdict verbatim.
+test('ensurePaneInputReady passes a non-copy-mode verdict straight through', async () => {
+	const r = await ensurePaneInputReady('nope');
+	expect(r.ready).toBe(false);
+	if (!r.ready) expect(r.code).toBe('invalid-pane');
 });
