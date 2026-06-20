@@ -310,13 +310,6 @@ async function printAccess() {
 	console.log('  Scan the QR with your phone:');
 	console.log('');
 	qrcode.generate(url, { small: true });
-	if (transport === 'https') {
-		console.log('');
-		console.log('  HTTPS is on (required for the microphone / voice feature). First time on this');
-		console.log('  phone? Open the link in Safari and follow the one-time certificate step; after');
-		console.log('  that it connects automatically. Want plain HTTP with no cert step? Re-run');
-		console.log(`  \`expediter --http${TAILSCALE_FLAG ? ' --tailscale' : ''}\`.`);
-	}
 	if (PRINT_URL) {
 		console.log('');
 		console.log(`  ${url}`);
@@ -410,7 +403,6 @@ const daemonEnv = {
 	EXPEDITER_SHUTDOWN_TIMEOUT: '1'
 };
 delete daemonEnv.EXPEDITER_HOME;
-console.log('Starting Expediter daemon...');
 const serverArgs = [`${HOME}/bin/expediter-server.mjs`];
 if (transport === 'http') serverArgs.push('--http');
 const child = spawn('bun', serverArgs, {

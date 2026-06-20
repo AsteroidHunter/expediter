@@ -60,7 +60,8 @@ if (useHttps) {
 		createDoormatHandler({ caCertPath: paths.caCert, setupHtml, httpsPort: port })
 	);
 	doormat.listen(port + 1, host, () => {
-		console.log(`Cert bootstrap (HTTP) on http://${host}:${port + 1}`);
+		if (process.env.DEBUG_EXPEDITER)
+			console.log(`Cert bootstrap (HTTP) on http://${host}:${port + 1}`);
 	});
 } else {
 	server = http.createServer(handler);
@@ -73,8 +74,10 @@ if (useHttps) {
 attachVoiceSocket(server);
 
 server.listen(port, host, () => {
-	const scheme = useHttps ? 'https' : 'http';
-	console.log(`Listening on ${scheme}://${host}:${port}`);
+	if (process.env.DEBUG_EXPEDITER) {
+		const scheme = useHttps ? 'https' : 'http';
+		console.log(`Listening on ${scheme}://${host}:${port}`);
+	}
 });
 
 // Graceful shutdown mirroring adapter-node's build/index.js. closeIdleConnections

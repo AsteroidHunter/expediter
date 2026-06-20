@@ -3,7 +3,7 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-		<meta name="theme-color" content="#0a0a0a" />
+		<meta name="theme-color" content="#fffdf5" />
 		<title>Connect to Expediter</title>
 		<style>
 			/*
@@ -13,13 +13,14 @@
 			 *   #connecting  #install  #download  #continue  #status
 			 */
 			:root {
-				color-scheme: dark;
+				color-scheme: light;
 			}
 			body {
 				margin: 0;
-				font: 16px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-				background: #0a0a0a;
-				color: #e8e8e8;
+				font: 16px/1.5 ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+				background: #fffdf5;
+				color: #2a1f15;
+				-webkit-font-smoothing: antialiased;
 				padding: max(env(safe-area-inset-top), 18px) 20px max(env(safe-area-inset-bottom), 18px);
 			}
 			main {
@@ -27,46 +28,55 @@
 				margin: 0 auto;
 			}
 			h1 {
-				font-size: 1.4rem;
-				margin: 0.2rem 0 0.8rem;
+				font-size: 1.3rem;
+				font-weight: 600;
+				letter-spacing: 0.01em;
+				margin: 0.2rem 0 0.9rem;
 			}
 			p {
 				margin: 0.7rem 0;
+			}
+			strong {
+				font-weight: 700;
 			}
 			ol {
 				padding-left: 1.25rem;
 			}
 			li {
-				margin: 0.45rem 0;
+				margin: 0.5rem 0;
 			}
 			.btn {
 				display: inline-block;
-				background: #e8e8e8;
-				color: #0a0a0a;
+				background: #2a1f15;
+				color: #fffdf5;
 				padding: 0.7rem 1.15rem;
-				border-radius: 0.6rem;
+				border-radius: 3px;
+				border: 1px solid #2a1f15;
 				text-decoration: none;
 				font: inherit;
 				font-weight: 600;
-				border: 0;
+				letter-spacing: 0.02em;
 				cursor: pointer;
+				-webkit-tap-highlight-color: transparent;
 			}
 			.btn.secondary {
 				background: transparent;
-				color: #e8e8e8;
-				border: 1px solid #555;
+				color: #2a1f15;
+				border: 1px solid #c9bd9a;
 			}
 			.muted {
-				color: #9a9a9a;
+				color: rgba(42, 31, 21, 0.55);
 				font-size: 0.9rem;
 			}
 			.hidden {
 				display: none;
 			}
 			code {
-				background: #1c1c1c;
-				padding: 0.1rem 0.35rem;
-				border-radius: 0.3rem;
+				background: #fff1c9;
+				border: 1px solid #ead68f;
+				padding: 0.08rem 0.35rem;
+				border-radius: 2px;
+				font: inherit;
 			}
 		</style>
 	</head>
