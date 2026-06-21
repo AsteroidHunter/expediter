@@ -2103,14 +2103,21 @@
 	   0 → circumference empties it. `forwards` holds it empty at the end — the gesture
 	   resets right after. rotate(-90deg) moves the stroke's start point to 12 o'clock;
 	   if on-device it drains the wrong way, flip that sign or swap the keyframe ends. */
-	/* Ring overlays the orb (absolute) so the ✕ glyph sits centred on top of it. */
+	/* Ring is the flex-centred child at an EXPLICIT size — not position:absolute+inset:
+	   mobile WebKit won't stretch a viewBox <svg> to an inset box, it falls back to the
+	   SVG's intrinsic size, so the ring rendered huge and displaced from the orb. The ✕
+	   glyph is then absolutely centred ON TOP of it (a <span> centres reliably where the
+	   replaced <svg> doesn't). */
 	.drain-ring {
-		position: absolute;
-		inset: 2px;
+		width: 30px;
+		height: 30px;
 		transform: rotate(-90deg);
 	}
 	.orb-x {
-		position: relative;
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
 		z-index: 1;
 		font-size: 15px;
 		line-height: 1;
