@@ -54,7 +54,8 @@ test('leaf carries the SAN, serverAuth EKU, and a human-readable CN', () => {
 	// EKU serverAuth — iOS requires it
 	expect(leaf).toContain('TLS Web Server Authentication');
 	// human-readable CN — without it the cert won't show in the trust toggle
-	expect(leaf).toContain('CN=Expediter (as-machine.local)');
+	// openssl prints the DN as `CN=` or `CN = ` depending on the build; tolerate both
+	expect(/CN ?= ?Expediter \(as-machine\.local\)/.test(leaf)).toBe(true);
 });
 
 test('cert.pem is a fullchain (leaf + CA = two certificates)', () => {
