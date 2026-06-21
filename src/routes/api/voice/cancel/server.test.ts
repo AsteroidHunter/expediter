@@ -3,13 +3,13 @@ import type { RequestEvent } from '@sveltejs/kit';
 import { POST } from './+server';
 import { markVoiceStart, clearVoice, voiceElapsedMs } from '$lib/server/voice';
 
-// /api/voice/cancel aborts a /voice tap dictation without submitting (Escape +
-// Ctrl-U). Body validation and the no-active-recording gate are testable here; the
-// injection happy path is manual. Unlike stop, no-active-recording is SUCCESS
-// (cancel's intent — "nothing recording" — already holds), and the injection is
-// skipped so Escape/C-u can't wipe a draft sitting in an idle pane. Past the gate,
-// cancel is best-effort: a malformed/not-ready pane clears state and returns 200
-// injected=false rather than erroring.
+// /api/voice/cancel aborts a /voice dictation without submitting by sending Escape
+// (Claude's /voice discard key). Body validation and the no-active-recording gate are
+// testable here; the injection happy path is manual. Unlike stop, no-active-recording
+// is SUCCESS (cancel's intent — "nothing recording" — already holds), and the injection
+// is skipped so a stray Escape can't disturb an idle pane. Past the gate, cancel is
+// best-effort: a malformed/not-ready pane clears state and returns 200 injected=false
+// rather than erroring.
 function makeRequest(body: unknown, asString = false): RequestEvent {
 	const request = new Request('http://localhost/api/voice/cancel', {
 		method: 'POST',
@@ -41,7 +41,7 @@ test('POST with no pane field returns 400 missing-pane', async () => {
 
 test('POST with no active recording succeeds without injecting (200 injected=false)', async () => {
 	// Valid-shaped pane, nothing on record: the gate returns success before any
-	// readiness check — an injected Escape/C-u here could only disturb an idle pane.
+	// readiness check — an injected Escape here could only disturb an idle pane.
 	const res = await POST(makeRequest({ pane: '%999902' }));
 	expect(res.status).toBe(200);
 	const body = (await res.json()) as { ok: boolean; injected: boolean };

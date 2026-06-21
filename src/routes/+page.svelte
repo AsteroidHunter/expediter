@@ -548,6 +548,17 @@
 		resetVoice(false);
 	}
 
+	// ✕ tapped during the drain → discard the dictation. cancel() hits the cancel
+	// route, which sends Escape — Claude's own /voice discard key (it drops out of
+	// dictation and deletes the transcript without submitting). The recording has run
+	// since the hold, so it's well past /voice's warmup window where Escape is ignored.
+	function doDelete(): void {
+		if (!voiceSession) return;
+		clearDrainTimer();
+		voiceSession.cancel();
+		resetVoice(false);
+	}
+
 	function onTicketPointerDown(ticket: Ticket, e: PointerEvent): void {
 		if (!e.isPrimary) return;
 		pointerStartX = e.clientX;
@@ -964,26 +975,36 @@
 							</button>
 
 							{#if isVoiceActive(ticket)}
-								<!-- Recording orb in the gap the sliding card opens on the right. A
-								     record PULSE while held; on release a ring draining clockwise over
-								     DRAIN_MS, after which the dictation auto-sends. Status light only — no
-								     tap actions in this cut, so re-recording is a re-hold on the card and
-								     pointer-events stay off it. The phone can't meter /voice's laptop-side
-								     audio, so neither shape is a real waveform. -->
-								<div class="voice-orb" aria-hidden="true">
-									{#if voicePhase === 'draining'}
+								<!-- Recording orb in the gap the sliding card opens on the right. While
+								     held it's a record PULSE (indicator only, pointer-events off so the hold
+								     passes through). On release it becomes the ✕ DELETE button: a ring drains
+								     clockwise over DRAIN_MS and auto-sends at the end, but tap it first to
+								     discard (Escape — Claude's /voice discard key). Re-holding the card
+								     resumes. The phone can't meter /voice's laptop-side audio, so the pulse
+								     and ring are status, not a waveform. -->
+								{#if voicePhase === 'draining'}
+									<button
+										type="button"
+										class="voice-orb voice-delete"
+										aria-label="Delete dictation"
+										onclick={doDelete}
+									>
 										<svg
 											class="drain-ring"
 											viewBox="0 0 36 36"
+											aria-hidden="true"
 											style:--drain-ms={`${DRAIN_MS}ms`}
 										>
 											<circle class="drain-track" cx="18" cy="18" r="16" />
 											<circle class="drain-progress" cx="18" cy="18" r="16" />
 										</svg>
-									{:else}
+										<span class="orb-x" aria-hidden="true">✕</span>
+									</button>
+								{:else}
+									<div class="voice-orb" aria-hidden="true">
 										<span class="rec-pulse"></span>
-									{/if}
-								</div>
+									</div>
+								{/if}
 							{/if}
 						</li>
 					{/each}
@@ -1776,12 +1797,13 @@
 		filter: none;
 	}
 
-	/* Recording orb — a status light centred in the gap the sliding card opens on the
-	   right (right:18% + translateX(50%) puts its centre in the middle of the 36% gap).
-	   A record PULSE while held; a draining ring after release. Neither is a real
-	   waveform — the phone can't meter /voice's laptop-side audio. pointer-events:none:
-	   indicator only, the re-hold-to-resume gesture lands on the card behind it. */
-	.voice-orb {
+	/* Recording orb — centred in the gap the sliding card opens on the right (right:18%
+	   + translateX(50%) puts its centre in the middle of the 36% gap). Scoped under
+	   .ticket so it out-specifies `.ticket button { width:100%; background; border }`:
+	   the draining variant is a real <button> (the ✕ delete) and would otherwise inherit
+	   the card surface and stretch full-width. While held it's a pointer-events:none
+	   PULSE; the draining ✕ button re-enables pointer events below. */
+	.ticket .voice-orb {
 		position: absolute;
 		top: 50%;
 		right: 18%;
@@ -1790,6 +1812,7 @@
 		box-sizing: border-box;
 		width: 34px;
 		height: 34px;
+		border: 0;
 		border-radius: 50%;
 		background: rgba(255, 253, 245, 0.97);
 		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
@@ -1797,6 +1820,12 @@
 		align-items: center;
 		justify-content: center;
 		pointer-events: none;
+	}
+	/* The drain-phase orb is the ✕ delete button — tappable (the pulse orb is a div and
+	   stays inert). Tap discards via the cancel route (Escape); leave it and the ring
+	   autosends; re-hold the card to resume. */
+	.ticket button.voice-orb {
+		pointer-events: auto;
 	}
 	.voice-orb .rec-pulse {
 		width: 12px;
@@ -1823,10 +1852,19 @@
 	   0 → circumference empties it. `forwards` holds it empty at the end — the gesture
 	   resets right after. rotate(-90deg) moves the stroke's start point to 12 o'clock;
 	   if on-device it drains the wrong way, flip that sign or swap the keyframe ends. */
+	/* Ring overlays the orb (absolute) so the ✕ glyph sits centred on top of it. */
 	.drain-ring {
-		width: 30px;
-		height: 30px;
+		position: absolute;
+		inset: 2px;
 		transform: rotate(-90deg);
+	}
+	.orb-x {
+		position: relative;
+		z-index: 1;
+		font-size: 15px;
+		line-height: 1;
+		font-weight: 700;
+		color: #b3301a;
 	}
 	.drain-track {
 		fill: none;
