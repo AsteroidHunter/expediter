@@ -3,18 +3,19 @@ import { sendKeys, paneAcceptsInput, InjectError } from '$lib/tmux';
 import { findByPane, setRecording } from '$lib/ticketStore';
 import { clearVoice, voiceElapsedMs } from '$lib/server/voice';
 
-// POST /api/voice/cancel — abort the /voice tap dictation WITHOUT submitting.
-// Stopping with Space would auto-submit, so cancel instead sends Escape to drop out
-// of dictation and Ctrl-U to wipe any partial transcript left in the prompt. The
-// exact discard keys are Open Question 1 — Esc/C-u is the working assumption,
-// pending a live check against /voice. Best-effort like stop: not-ready → clear our
-// flag only.
+// POST /api/voice/cancel — abort the /voice dictation WITHOUT submitting. Stopping
+// with Space would auto-submit, so cancel sends Escape instead: Escape is Claude Code's
+// own /voice discard key — it drops out of dictation and deletes the transcript without
+// sending. Confirmed in the CC 2.1.172 source: the voice key handler runs
+// cancelRecording on Escape while voiceState==="recording" (logged "discarding without
+// submit"). No Ctrl-U — Escape already discards the transcript, and the trailing C-u was
+// what wiped hand-typed prompt text. Escape is a no-op unless a recording is genuinely
+// active and past its warmup, so the client only fires this during the drain, well after
+// the hold. Best-effort like stop: not-ready → clear our flag only.
 //
-// Unlike stop, "no active recording" is SUCCESS here (200, injected=false), not a
-// 409: cancel's intent is "make sure nothing is recording", which is already true —
-// and injecting Escape/C-u into an idle pane could wipe a half-typed draft. Stop's
-// intent ("finish my dictation") is unfulfillable without a recording, hence its
-// refusal.
+// Unlike stop, "no active recording" is SUCCESS here (200, injected=false), not a 409:
+// cancel's intent is "make sure nothing is recording", which is already true. The
+// no-recording guard also keeps a stray Escape out of an idle pane.
 export const POST: RequestHandler = async ({ request }) => {
 	let body: { pane?: string };
 	try {
@@ -31,8 +32,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		if (session_id) setRecording(session_id, false);
 	};
 
-	// No recording on record → nothing to discard; skip the injection entirely so
-	// the Escape/C-u can't disturb whatever is actually in the pane.
+	// No recording on record → nothing to discard; skip the injection so a stray
+	// Escape can't disturb whatever the user is doing in an idle pane.
 	if (voiceElapsedMs(pane) === null) {
 		clearFlag();
 		return json({ ok: true, injected: false });
@@ -46,8 +47,9 @@ export const POST: RequestHandler = async ({ request }) => {
 	}
 
 	try {
-		// Escape exits dictation without submitting; C-u clears any partial text.
-		await sendKeys(pane, ['Escape', 'C-u']);
+		// Escape is Claude's /voice discard — exits dictation and deletes the transcript
+		// without submitting. No C-u (that wiped the prompt; Escape already discards).
+		await sendKeys(pane, ['Escape']);
 	} catch (err) {
 		clearFlag();
 		if (err instanceof InjectError) {
