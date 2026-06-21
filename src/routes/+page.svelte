@@ -1043,7 +1043,7 @@
 	<header>
 		<div class="brand">
 			<span class="brand-name">Expediter</span>
-			<span class="brand-version">(v0.72)</span>
+			<span class="brand-version">(v0.74)</span>
 		</div>
 		<div class="header-right">
 			{#if clientToken}
