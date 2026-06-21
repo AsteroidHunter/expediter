@@ -4,6 +4,7 @@
 	import { flip } from 'svelte/animate';
 	import { browser } from '$app/environment';
 	import { getClientToken, clearClientToken } from '$lib/clientToken';
+	import { startVoiceSession, type VoiceSession, type VoiceBackend } from '$lib/voiceClient';
 
 	type EventType = 'Stop' | 'PermissionRequest' | 'Notification' | 'Idle';
 	// `title` may be empty string before the async topic refresh has run;
@@ -16,9 +17,78 @@
 		event_type: EventType;
 		created_at: number;
 		working: boolean;
+		// True when the tmux session has an attached client. Splits the dock into
+		// the Attached page (default) and the Detached page; detached cards render
+		// uniform grey and tap to re-attach. May be absent on an old SSE frame —
+		// treated as attached (the pre-feature default) via `!== false` below.
+		attached: boolean;
+		// True while a speech-to-prompt dictation is capturing for this session, set
+		// by the daemon's /api/voice/* routes and streamed over SSE. Drives the
+		// /voice mock waveform (the phone has no local audio on that backend). May be
+		// absent on an old frame — treated as false.
+		recording?: boolean;
 	};
 
 	let tickets = $state<Ticket[]>([]);
+	// Latest SSE snapshot held back while a gesture is in flight (see layoutFrozen),
+	// applied when the gesture ends so the list can't re-sort under the user's finger.
+	let pendingTickets: Ticket[] | null = null;
+
+	// ── Detach-by-hold gesture (Attached cards only) ──────────────────────────
+	// Swipe a card left-to-right to ~30%, then keep holding ~1.75s to detach: the
+	// whole card fades uniformly to nothing over the hold; on commit it leaves the
+	// Attached page (others reflow) and the session detaches. Release early → snaps
+	// back, nothing vanished. One card at a time.
+	const DETACH_FRACTION = 0.3; // visual lock: the card slides this far (of its width)
+	const DETACH_FINGER = 0.65; // finger travel (of card width) to reach the lock — the
+	// resistance: you drag further than the card moves, easing in so it takes a
+	// deliberate push to start rather than triggering on a light flick.
+	const DETACH_HOLD_MS = 1750; // hold duration: the card fades to nothing over this, then commits
+	let dragId = $state<string | null>(null); // card under an active horizontal drag
+	let dragOffset = $state(0); // px translateX, >= 0 (card slides right)
+	let holdArmed = $state(false); // reached the 30% lock; 2s timer running
+	let fadeProgress = $state(0); // 0..1 right→left wipe during the hold
+	let snapBack = $state(false); // animate offset→0 on early release
+	let detachingOut = $state<Record<string, boolean>>({}); // committed → hidden from Attached
+	// Non-reactive scratch for the in-flight gesture:
+	let dragStartX = 0;
+	let dragStartY = 0;
+	let dragWidth = 1;
+	let dragAxis: 'undecided' | 'h' | 'v' = 'undecided';
+	let dragMoved = false; // a real drag happened → suppress the focus click after it
+	let holdRaf: number | null = null;
+	let holdStart = 0;
+	let audioCtx: AudioContext | null = null;
+
+	// Two pages — Attached (default) and Detached — switched by the bottom pager
+	// bar (arrows only, no swipe). A ticket is attached unless explicitly false,
+	// so a frame from an older daemon that omits the field stays on the Attached
+	// page rather than vanishing to Detached.
+	const PAGES = ['attached', 'detached'] as const;
+	let pageIndex = $state(0);
+	// Slide direction for the page transition: +1 moving toward Detached, -1 back
+	// toward Attached. Drives the horizontal fly so a page switch reads as a slide
+	// rather than the cards flashing in place.
+	let pageDir = $state(1);
+	const page = $derived(PAGES[pageIndex]);
+	const attachedTickets = $derived(
+		tickets.filter((t) => t.attached !== false && !detachingOut[t.session_id])
+	);
+	const detachedTickets = $derived(tickets.filter((t) => t.attached === false));
+	const visibleTickets = $derived(pageIndex === 0 ? attachedTickets : detachedTickets);
+
+	function prevPage(): void {
+		if (pageIndex > 0) {
+			pageDir = -1;
+			pageIndex -= 1;
+		}
+	}
+	function nextPage(): void {
+		if (pageIndex < PAGES.length - 1) {
+			pageDir = 1;
+			pageIndex += 1;
+		}
+	}
 	let connected = $state(false);
 	// Sticky: flips true on the first successful onopen and never resets. Without
 	// it, isDisconnected would flash on every page load and every wake-from-
@@ -121,6 +191,9 @@
 			connected = false;
 			return;
 		}
+		// Refresh which STT backend the gesture should drive on every (re)connect,
+		// so a settings change is picked up without a full reload.
+		void fetchVoiceBackend();
 		// status === 'valid' or 'unknown' — open the EventSource. For 'unknown'
 		// (network blip), EventSource's retry loop will handle reconnection.
 		eventSource = new EventSource(
@@ -154,7 +227,13 @@
 		eventSource.onmessage = (e: MessageEvent) => {
 			try {
 				const parsed = JSON.parse(e.data) as Ticket[];
-				if (Array.isArray(parsed)) tickets = parsed;
+				if (!Array.isArray(parsed)) return;
+				// Hold the layout still while a gesture is in flight (recording, the
+				// review state, or a detach drag) so another session finishing doesn't
+				// re-sort the list and yank the ticket out from under your finger. The
+				// latest snapshot is buffered and applied when the gesture ends.
+				if (layoutFrozen()) pendingTickets = parsed;
+				else tickets = parsed;
 			} catch {
 				/* ignore malformed frame */
 			}
@@ -193,7 +272,11 @@
 		deferredReacquireWakeLock();
 	}
 
-	async function focusSession(ticket: Ticket): Promise<void> {
+	// Tap a card: an attached session hits /api/focus (raise its existing
+	// terminal); a detached one hits /api/attach (open a fresh terminal running
+	// `tmux attach`). Same press feedback either way; the next reconcile migrates
+	// a re-attached card from the Detached page to the Attached page on its own.
+	async function tapSession(ticket: Ticket, endpoint: string): Promise<void> {
 		if (!clientToken) {
 			// No token in sessionStorage — the empty-state branch should be visible
 			// anyway, but if the user somehow taps a stale ticket without one, no-op.
@@ -202,7 +285,7 @@
 		focusing = ticket.session_id;
 		lastTapped = ticket.session_id;
 		try {
-			await fetch('/api/focus', {
+			await fetch(endpoint, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -211,12 +294,576 @@
 				body: JSON.stringify({ pane: ticket.tmux_pane })
 			});
 		} catch {
-			/* failure is shown only as a missed focus — daemon-side log is the record */
+			/* failure is shown only as a missed tap — daemon-side log is the record */
 		} finally {
 			setTimeout(() => {
 				if (focusing === ticket.session_id) focusing = null;
 			}, 80);
 		}
+	}
+
+	// Detached taps are gated so one tap spawns exactly one `tmux attach` window.
+	// A session is latched "attaching" from the tap until a fallback timeout (the
+	// card normally migrates to the Attached page within ~1-2s as the client-
+	// attached hook fires); re-taps while latched are ignored. Attached (focus)
+	// taps aren't gated — re-raising a window is harmless and idempotent.
+	let attaching = $state<Record<string, boolean>>({});
+
+	function onTicketTap(ticket: Ticket): void {
+		if (ticket.attached === false) {
+			if (attaching[ticket.session_id]) return; // already spawning — ignore the re-tap
+			const id = ticket.session_id;
+			attaching = { ...attaching, [id]: true };
+			void tapSession(ticket, '/api/attach');
+			// Fallback unlatch in case the attach fails and the card never migrates,
+			// so a later retry isn't permanently swallowed.
+			setTimeout(() => {
+				if (!attaching[id]) return;
+				const next = { ...attaching };
+				delete next[id];
+				attaching = next;
+			}, 3000);
+			return;
+		}
+		void tapSession(ticket, '/api/focus');
+	}
+
+	// ── detach gesture handlers ───────────────────────────────────────────────
+	function cancelHold(): void {
+		if (holdRaf !== null) {
+			cancelAnimationFrame(holdRaf);
+			holdRaf = null;
+		}
+		holdArmed = false;
+		fadeProgress = 0;
+	}
+
+	function resetDrag(): void {
+		dragId = null;
+		dragOffset = 0;
+		dragAxis = 'undecided';
+		cancelHold();
+		// Detach drag over — apply any SSE snapshot held back during it.
+		flushPendingTickets();
+	}
+
+	function startHold(): void {
+		holdArmed = true;
+		tapHaptic(); // buzz at the lock
+		holdStart = performance.now();
+		const tick = (now: number): void => {
+			fadeProgress = Math.min(1, (now - holdStart) / DETACH_HOLD_MS);
+			if (fadeProgress >= 1) {
+				holdRaf = null;
+				commitDetach();
+				return;
+			}
+			holdRaf = requestAnimationFrame(tick);
+		};
+		holdRaf = requestAnimationFrame(tick);
+	}
+
+	function commitDetach(): void {
+		const id = dragId;
+		resetDrag();
+		if (!id) return;
+		const ticket = tickets.find((t) => t.session_id === id);
+		if (!ticket || !clientToken) return;
+		playWhoosh();
+		// Hide from the Attached page immediately so the remaining cards reflow on
+		// the whoosh; SSE then moves it to the Detached page once detach lands.
+		detachingOut = { ...detachingOut, [id]: true };
+		const token = clientToken;
+		void fetch('/api/detach', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'x-expediter-token': token },
+			body: JSON.stringify({ pane: ticket.tmux_pane })
+		}).catch(() => {
+			// detach failed — un-hide so the card reappears on the Attached page
+			const next = { ...detachingOut };
+			delete next[id];
+			detachingOut = next;
+		});
+		// Drop the optimistic flag after SSE has had time to reflect the detach.
+		setTimeout(() => {
+			const next = { ...detachingOut };
+			delete next[id];
+			detachingOut = next;
+		}, 4000);
+	}
+
+	function onCardTouchStart(e: TouchEvent, ticket: Ticket): void {
+		if (ticket.attached === false) return; // detach gesture is Attached-only
+		if (dragId) return; // one card at a time
+		const t = e.touches[0];
+		if (!t) return;
+		dragId = ticket.session_id;
+		dragStartX = t.clientX;
+		dragStartY = t.clientY;
+		dragAxis = 'undecided';
+		dragOffset = 0;
+		dragMoved = false;
+		snapBack = false;
+		dragWidth = (e.currentTarget as HTMLElement).getBoundingClientRect().width || 1;
+	}
+
+	function onCardTouchMove(e: TouchEvent, ticket: Ticket): void {
+		if (dragId !== ticket.session_id) return;
+		const t = e.touches[0];
+		if (!t) return;
+		const dx = t.clientX - dragStartX;
+		const dy = t.clientY - dragStartY;
+		if (dragAxis === 'undecided') {
+			if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // wait for clear intent
+			dragAxis = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+			if (dragAxis === 'v') {
+				resetDrag(); // vertical = scroll; let the browser have it (touch-action: pan-y)
+				return;
+			}
+			dragMoved = true;
+		}
+		if (dragAxis !== 'h') return;
+		const raw = Math.max(0, dx); // rightward finger travel (left-to-right swipe)
+		const t2 = Math.min(1, raw / (DETACH_FINGER * dragWidth)); // needs a longer push than it moves
+		const eased = Math.pow(t2, 2.5); // easeIn (t^2.5) — between quadratic and cubic
+		dragOffset = DETACH_FRACTION * dragWidth * eased; // card moves slower than the finger; caps at 30%
+		const atHold = t2 >= 1;
+		if (atHold && !holdArmed) startHold();
+		else if (!atHold && holdArmed) cancelHold();
+	}
+
+	function onCardTouchEnd(ticket: Ticket): void {
+		if (dragId !== ticket.session_id) return;
+		if (holdArmed && fadeProgress >= 1) return; // already committed via the rAF tick
+		// Early release: cancel the hold, snap back to rest, leave nothing vanished.
+		cancelHold();
+		snapBack = true;
+		dragOffset = 0;
+		const id = ticket.session_id;
+		setTimeout(() => {
+			if (dragId === id) {
+				dragId = null;
+				dragAxis = 'undecided';
+			}
+			snapBack = false;
+		}, 340);
+	}
+
+	function cardStyle(ticket: Ticket): string {
+		if (dragId !== ticket.session_id) return '';
+		// Springy easeOutBack on release; instant follow while dragging. On release,
+		// opacity also eases back so a half-faded card doesn't snap to full.
+		const transition = snapBack
+			? 'transition: transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 200ms ease;'
+			: 'transition: none;';
+		// While holding, the whole card fades uniformly to nothing over the hold
+		// (opacity 1→0); startHold's rAF drives fadeProgress across DETACH_HOLD_MS.
+		const opacity = holdArmed ? `opacity: ${1 - fadeProgress};` : '';
+		return `transform: translateX(${dragOffset}px); ${transition} ${opacity}`;
+	}
+
+	// Haptic tick at the lock — Android only (navigator.vibrate). iOS Safari has no
+	// Vibration API, and the hidden <input switch> toggle hack that worked from
+	// iOS 17.4–26.4 was patched in iOS 26.5 (a programmatic .click() no longer
+	// fires a haptic — only a real user tap does), so there is no web haptic on
+	// current iPhones. The spring + gradient wipe carry the signal there.
+	function tapHaptic(): void {
+		try {
+			navigator.vibrate?.(15);
+		} catch {
+			/* no Vibration API (e.g. iOS Safari) */
+		}
+	}
+
+	// Synthesized whoosh (no asset): filtered noise sweep. Best-effort — iOS mutes
+	// web audio on the hardware silent switch, so the visual wipe is the real
+	// signal and this is a bonus.
+	function playWhoosh(): void {
+		if (!browser) return;
+		try {
+			const Ctor =
+				window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+			if (!Ctor) return;
+			audioCtx ??= new Ctor();
+			const ctx = audioCtx;
+			const dur = 0.45;
+			const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+			const data = buf.getChannelData(0);
+			for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+			const src = ctx.createBufferSource();
+			src.buffer = buf;
+			const bp = ctx.createBiquadFilter();
+			bp.type = 'bandpass';
+			bp.Q.value = 0.7;
+			bp.frequency.setValueAtTime(1800, ctx.currentTime);
+			bp.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + dur);
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+			gain.gain.exponentialRampToValueAtTime(0.32, ctx.currentTime + 0.06);
+			gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+			src.connect(bp);
+			bp.connect(gain);
+			gain.connect(ctx.destination);
+			src.start();
+			src.stop(ctx.currentTime + dur);
+		} catch {
+			/* audio blocked / silent switch — bonus only */
+		}
+	}
+
+	// ─── Speech-to-prompt gesture (Phase 5) ─────────────────────────────────
+	// Press-and-hold a ticket ~HOLD_MS to start dictation (RECORDING); release to
+	// enter the DRAIN — a DRAIN_MS countdown shown as a ring emptying around the orb,
+	// after which the dictation auto-sends. Hold the ticket again before the ring
+	// empties to resume recording (the ring clears); release for a fresh countdown.
+	// A press shorter than HOLD_MS (or one that moves past the slop) falls through to
+	// the normal tap (focus/attach). One recording at a time (v1).
+	const HOLD_MS = 1000; // press duration to arm recording (~1–2s per the plan)
+	const DRAIN_MS = 2500; // release → autosend countdown; the orb ring drains over this
+	const SLOP = 10; // px of movement that reclassifies a hold as a scroll
+	// Speech-to-prompt is DISABLED: the hold-to-record gesture is gated off (below) and
+	// the backend toggle is pulled from settings. All the recording code — the FSM, the
+	// orb, the /api/voice routes, voiceClient — is left intact; flip this to true to
+	// bring the feature back.
+	const VOICE_ENABLED = false;
+
+	let sttBackend = $state<VoiceBackend>('voice');
+	let voicePhase = $state<'idle' | 'recording' | 'draining'>('idle');
+	let voiceTicketId = $state<string | null>(null);
+	let voiceError = $state<string | null>(null);
+	let voiceErrorTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// A completed long-press (or a tap during the drain) is followed by a synthetic
+	// click; this flag lets the ticket's onclick swallow that one click so a voice
+	// gesture doesn't also fire focus/attach. (The detach swipe has its own dragMoved
+	// guard on the same onclick.) Auto-clears so it can't get stuck if no click comes.
+	let suppressClick = false;
+	let suppressClickTimer: ReturnType<typeof setTimeout> | null = null;
+	function suppressNextClick(): void {
+		suppressClick = true;
+		if (suppressClickTimer !== null) clearTimeout(suppressClickTimer);
+		suppressClickTimer = setTimeout(() => {
+			suppressClick = false;
+			suppressClickTimer = null;
+		}, 400);
+	}
+
+	// Surface a transient recording error (mic denied, Baseten unreachable, daemon
+	// "not ready") as a brief toast — no silent failure, no backend switch.
+	function showVoiceError(message: string): void {
+		voiceError = message;
+		if (voiceErrorTimer !== null) clearTimeout(voiceErrorTimer);
+		voiceErrorTimer = setTimeout(() => {
+			voiceError = null;
+			voiceErrorTimer = null;
+		}, 4000);
+	}
+
+	// All writes to voicePhase route through this so TS doesn't narrow it to a
+	// literal across the awaits in beginRecording — it's $state the gesture mutates
+	// concurrently with mic-permission / connection setup.
+	function setVoicePhase(p: 'idle' | 'recording' | 'draining'): void {
+		voicePhase = p;
+	}
+
+	// Non-reactive gesture bookkeeping.
+	let voiceSession: VoiceSession | null = null;
+	// Generation counter for the gesture: bumped on every beginRecording and every
+	// resetVoice. Session callbacks (onError/onClosed) and the post-await resume
+	// check compare against it so a LATE callback from a previous session — e.g.
+	// its WS closing after the user already started a new dictation, or a failed
+	// stop POST reporting after the FSM reset — can never reset the new gesture.
+	let voiceGeneration = 0;
+	let holdTimer: ReturnType<typeof setTimeout> | null = null;
+	let drainTimer: ReturnType<typeof setTimeout> | null = null;
+	let pointerStartX = 0;
+	let pointerStartY = 0;
+	let pointerIsResume = false; // this press is a resume-hold during a drain
+	let capturedEl: Element | null = null;
+	let capturedPointerId = -1;
+	let beepCtx: AudioContext | null = null;
+
+	function isVoiceActive(ticket: Ticket): boolean {
+		return voicePhase !== 'idle' && voiceTicketId === ticket.session_id;
+	}
+
+	// The dock layout is held still (incoming SSE snapshots buffered) while a gesture
+	// is in flight — a voice recording/review OR a detach drag — so a ticket can't
+	// reorder out from under the finger.
+	function layoutFrozen(): boolean {
+		return voicePhase !== 'idle' || dragId !== null;
+	}
+
+	function flushPendingTickets(): void {
+		if (pendingTickets) {
+			tickets = pendingTickets;
+			pendingTickets = null;
+		}
+	}
+
+	function clearHoldTimer(): void {
+		if (holdTimer !== null) {
+			clearTimeout(holdTimer);
+			holdTimer = null;
+		}
+	}
+	function clearDrainTimer(): void {
+		if (drainTimer !== null) {
+			clearTimeout(drainTimer);
+			drainTimer = null;
+		}
+	}
+
+	function releaseCapture(): void {
+		if (capturedEl && capturedPointerId >= 0) {
+			try {
+				capturedEl.releasePointerCapture(capturedPointerId);
+			} catch {
+				/* capture already gone */
+			}
+		}
+		capturedEl = null;
+		capturedPointerId = -1;
+	}
+
+	// Minimal WebAudio beeps for start/sent (OQ4 defaults). The hold is a user
+	// gesture, so creating/resuming the context on first use satisfies autoplay.
+	function beep(freq: number, durMs: number, when = 0): void {
+		if (!browser) return;
+		try {
+			beepCtx ??= new AudioContext();
+			if (beepCtx.state === 'suspended') void beepCtx.resume();
+			const t0 = beepCtx.currentTime + when;
+			const osc = beepCtx.createOscillator();
+			const gain = beepCtx.createGain();
+			osc.type = 'sine';
+			osc.frequency.value = freq;
+			gain.gain.setValueAtTime(0.0001, t0);
+			gain.gain.exponentialRampToValueAtTime(0.16, t0 + 0.012);
+			gain.gain.exponentialRampToValueAtTime(0.0001, t0 + durMs / 1000);
+			osc.connect(gain).connect(beepCtx.destination);
+			osc.start(t0);
+			osc.stop(t0 + durMs / 1000 + 0.02);
+		} catch {
+			/* audio unavailable — sound is non-essential */
+		}
+	}
+	const playStartSound = (): void => beep(660, 90);
+	const playSentSound = (): void => {
+		beep(880, 70);
+		beep(1175, 90, 0.08);
+	};
+
+	async function fetchVoiceBackend(): Promise<void> {
+		if (!clientToken) return;
+		try {
+			const res = await fetch('/api/voice/config', {
+				headers: { 'x-expediter-token': clientToken }
+			});
+			if (!res.ok) return;
+			const data = (await res.json()) as { backend?: string };
+			if (data.backend === 'baseten' || data.backend === 'voice') sttBackend = data.backend;
+		} catch {
+			/* keep the default backend */
+		}
+	}
+
+	function resetVoice(dispose = false): void {
+		voiceGeneration++;
+		clearHoldTimer();
+		clearDrainTimer();
+		if (dispose) voiceSession?.dispose();
+		voiceSession = null;
+		setVoicePhase('idle');
+		voiceTicketId = null;
+		pointerIsResume = false;
+		// Gesture over — apply any SSE snapshot we held back so the dock catches up.
+		flushPendingTickets();
+	}
+
+	async function beginRecording(ticket: Ticket): Promise<void> {
+		if (!clientToken) return;
+		const gen = ++voiceGeneration;
+		voiceTicketId = ticket.session_id;
+		setVoicePhase('recording');
+		playStartSound();
+		try {
+			const session = await startVoiceSession(
+				{ backend: sttBackend, pane: ticket.tmux_pane, token: clientToken },
+				{
+					onError: (m) => {
+						// Always surface the failure; only reset the FSM if this session
+						// is still the live gesture (a failed stop POST reports after the
+						// reset, and must not knock over the NEXT recording).
+						showVoiceError(m);
+						if (gen === voiceGeneration) resetVoice(true);
+					},
+					onClosed: () => {
+						// The session died underneath the gesture (daemon restart, network
+						// change, phone backgrounded). The session has already disposed
+						// itself — reset the FSM so the dock stops pulsing on a corpse and
+						// a later ✓ can't fake a send.
+						if (gen !== voiceGeneration) return;
+						showVoiceError('recording connection lost');
+						resetVoice(false);
+					}
+				}
+			);
+			// The user may have released/cancelled (or an error reset us) while mic
+			// access was being granted — any path back through resetVoice bumped the
+			// generation, so a mismatch means this session is orphaned.
+			if (gen !== voiceGeneration) {
+				session.dispose();
+				return;
+			}
+			voiceSession = session;
+			// If they released into the drain during the await, honor it now.
+			if (voicePhase === 'draining') session.release();
+		} catch {
+			showVoiceError('microphone unavailable');
+			if (gen === voiceGeneration) resetVoice(true);
+		}
+	}
+
+	function startDrain(): void {
+		// Release → drain: a DRAIN_MS countdown (the orb ring empties) after which the
+		// dictation auto-sends. Re-holding the ticket cancels this and resumes — the
+		// pointer-down handler clears the timer the instant a resume-press lands.
+		setVoicePhase('draining');
+		clearDrainTimer();
+		drainTimer = setTimeout(() => {
+			drainTimer = null;
+			doSend();
+		}, DRAIN_MS);
+	}
+
+	function enterDrain(): void {
+		voiceSession?.release();
+		startDrain();
+	}
+
+	function doResume(): void {
+		clearDrainTimer();
+		voiceSession?.resume();
+		setVoicePhase('recording');
+	}
+
+	function doSend(): void {
+		// Autosend at the end of the drain. No session yet (still resolving) or already
+		// gone → nothing to send; resetting anyway would fake a send, so bail and let
+		// the gesture's other exits (onError / onClosed / pointercancel) clean up. On
+		// the /voice backend the session resolves within a microtask, long before the
+		// DRAIN_MS countdown elapses, so this guard effectively only trips on a dead
+		// session.
+		if (!voiceSession) return;
+		clearDrainTimer();
+		voiceSession.send();
+		playSentSound();
+		resetVoice(false);
+	}
+
+	// ✕ tapped during the drain → discard the dictation. cancel() hits the cancel
+	// route, which sends Escape — Claude's own /voice discard key (it drops out of
+	// dictation and deletes the transcript without submitting). The recording has run
+	// since the hold, so it's well past /voice's warmup window where Escape is ignored.
+	function doDelete(): void {
+		if (!voiceSession) return;
+		clearDrainTimer();
+		voiceSession.cancel();
+		resetVoice(false);
+	}
+
+	function onTicketPointerDown(ticket: Ticket, e: PointerEvent): void {
+		if (!e.isPrimary) return;
+		pointerStartX = e.clientX;
+		pointerStartY = e.clientY;
+		try {
+			(e.currentTarget as Element).setPointerCapture(e.pointerId);
+			capturedEl = e.currentTarget as Element;
+			capturedPointerId = e.pointerId;
+		} catch {
+			/* capture unsupported — gesture still works, just less robust */
+		}
+
+		if (voicePhase === 'draining' && voiceTicketId === ticket.session_id) {
+			// Tap-and-hold during the drain → resume. Pause the auto-send meanwhile.
+			pointerIsResume = true;
+			clearDrainTimer();
+			holdTimer = setTimeout(() => {
+				holdTimer = null;
+				doResume();
+			}, HOLD_MS);
+			return;
+		}
+		if (voicePhase !== 'idle') return; // a recording is active elsewhere — ignore
+		pointerIsResume = false;
+		holdTimer = setTimeout(() => {
+			holdTimer = null;
+			// Voice disabled → a long press is inert; a short press still falls through to
+			// onTicketTap (focus/attach) via the pointerup handler.
+			if (VOICE_ENABLED) void beginRecording(ticket);
+		}, HOLD_MS);
+	}
+
+	function onTicketPointerMove(e: PointerEvent): void {
+		// Only the pre-threshold hold is movement-cancellable; once recording, drift
+		// is fine (you may shift your grip while talking).
+		if (holdTimer === null) return;
+		const dx = e.clientX - pointerStartX;
+		const dy = e.clientY - pointerStartY;
+		if (dx * dx + dy * dy > SLOP * SLOP) {
+			clearHoldTimer();
+			// A moved resume-hold reverts to a scroll; keep the drain running.
+			if (pointerIsResume) startDrain();
+		}
+	}
+
+	function onTicketPointerUp(ticket: Ticket, e: PointerEvent): void {
+		void e;
+		releaseCapture();
+		if (voicePhase === 'recording' && voiceTicketId === ticket.session_id) {
+			// Long-press release → drain. Swallow the click that follows so it doesn't
+			// also fire focus/attach (the onclick handler owns the tap path).
+			suppressNextClick();
+			enterDrain();
+			return;
+		}
+		if (holdTimer !== null) {
+			// Released before the hold armed. A plain tap falls through to onclick
+			// (focus/attach); a stray short press during a drain just keeps the drain
+			// going and must not also tap.
+			clearHoldTimer();
+			if (pointerIsResume) {
+				suppressNextClick();
+				startDrain();
+			}
+		}
+	}
+
+	function onTicketPointerCancel(): void {
+		releaseCapture();
+		clearHoldTimer();
+		// Browser claimed the gesture (scroll). Abort only, never confirm: discard an
+		// in-progress recording rather than sending it. This can fire BEFORE the session
+		// resolves — reset unconditionally; the post-await generation check in
+		// beginRecording disposes the orphaned session.
+		if (voicePhase === 'recording') {
+			clearDrainTimer();
+			voiceSession?.cancel();
+			resetVoice(false);
+		} else if (pointerIsResume) {
+			// A resume-press during the drain got stolen by a scroll. The pointerdown
+			// paused the autosend countdown (cleared the timer); restart it — same as the
+			// move/up handlers — so the dictation still sends rather than freezing in a
+			// drain that no longer has a ✗ to recover it.
+			startDrain();
+		}
+	}
+
+	// Android Chrome's long-press context menu isn't covered by the CSS callout
+	// suppression, so cancel it explicitly on the ticket.
+	function onTicketContextMenu(e: Event): void {
+		e.preventDefault();
 	}
 
 	function projectLabel(cwd: string): string {
@@ -244,6 +891,8 @@
 	// PermissionRequest never fades (load-bearing red attention); working state
 	// owns its own pastel-green visual and skips fading too.
 	function staleClass(ticket: Ticket, now: number): string {
+		// Detached cards are uniform grey with no age-fade (see .ticket.detached).
+		if (ticket.attached === false) return '';
 		if (ticket.working) return '';
 		if (ticket.event_type === 'PermissionRequest') return '';
 		// Idle tickets are already fully desaturated via .type-idle CSS — stale
@@ -351,6 +1000,8 @@
 	});
 
 	onDestroy(() => {
+		// Tear down any in-progress dictation (mic stream / WS / audio context).
+		resetVoice(true);
 		if (eventSource) {
 			try {
 				eventSource.close();
@@ -392,7 +1043,7 @@
 	<header>
 		<div class="brand">
 			<span class="brand-name">Expediter</span>
-			<span class="brand-version">(v0.72)</span>
+			<span class="brand-version">(v0.74)</span>
 		</div>
 		<div class="header-right">
 			{#if clientToken}
@@ -473,52 +1124,153 @@
 		<div class="empty empty-no-token" aria-live="polite">
 			<span class="empty-label">Scan the QR code in your terminal to connect</span>
 		</div>
-	{:else if tickets.length === 0 && !isDisconnected}
-		<div class="empty" aria-live="polite">
-			<span class="dot"></span>
-			<span class="empty-label">You have zero tickets!</span>
-		</div>
-	{:else if tickets.length === 0}
-		<div class="empty" aria-live="polite"></div>
 	{:else}
-		<ul class="queue" class:disconnected={isDisconnected}>
-			{#each tickets as ticket (ticket.session_id)}
-				<li
-					class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
-					class:pressing={focusing === ticket.session_id}
-					class:working={ticket.working}
-					class:tapped={lastTapped === ticket.session_id}
-					animate:flip={{ duration: 220 }}
-					in:fly={{ y: -8, duration: 180 }}
-					out:fly={{ y: 8, duration: 140 }}
-				>
-					<button type="button" onclick={() => focusSession(ticket)}>
-						{#if ticket.working}
-							<div class="shimmer" aria-hidden="true">
-								<div class="shimmer-stripe"></div>
-							</div>
-						{/if}
-						<div class="stub">
-							<span class="project">{projectLabel(ticket.cwd)}</span>
-							<span class="type">{ticket.working ? 'COOKING' : typeLabel(ticket.event_type)}</span>
-							<span class="age">{formatAge(ticket.created_at, now)}</span>
-						</div>
-						<div class="perforation" aria-hidden="true"></div>
-						<div class="body">
-							{#if ticket.title}
-								<div class="title">{ticket.title}</div>
+		{#key pageIndex}
+			<div class="page" in:fly={{ x: pageDir * 44, duration: 200 }}>
+				<ul class="queue" class:disconnected={isDisconnected}>
+					{#each visibleTickets as ticket (ticket.session_id)}
+						<li
+							class="ticket {typeClass(ticket.event_type)} {staleClass(ticket, now)}"
+							class:pressing={focusing === ticket.session_id || attaching[ticket.session_id]}
+							class:working={ticket.working}
+							class:tapped={lastTapped === ticket.session_id}
+							class:detached={ticket.attached === false}
+							style={cardStyle(ticket)}
+							class:recording={voicePhase === 'recording' && voiceTicketId === ticket.session_id}
+							class:draining={voicePhase === 'draining' && voiceTicketId === ticket.session_id}
+							animate:flip={{ duration: 220 }}
+							in:fly|local={{ y: -8, duration: 180 }}
+							out:fly|local={{ y: 8, duration: 140 }}
+							ontouchstart={(e) => onCardTouchStart(e, ticket)}
+							ontouchmove={(e) => onCardTouchMove(e, ticket)}
+							ontouchend={() => onCardTouchEnd(ticket)}
+							ontouchcancel={() => onCardTouchEnd(ticket)}
+						>
+							<button
+								type="button"
+								onclick={() => {
+									if (dragMoved) {
+										dragMoved = false;
+										return;
+									}
+									if (suppressClick) {
+										suppressClick = false;
+										return;
+									}
+									onTicketTap(ticket);
+								}}
+								onpointerdown={(e) => onTicketPointerDown(ticket, e)}
+								onpointermove={onTicketPointerMove}
+								onpointerup={(e) => onTicketPointerUp(ticket, e)}
+								onpointercancel={onTicketPointerCancel}
+								oncontextmenu={onTicketContextMenu}
+								onkeydown={(e) => {
+									if (e.key === 'Enter' || e.key === ' ') {
+										e.preventDefault();
+										onTicketTap(ticket);
+									}
+								}}
+							>
+								{#if ticket.working}
+									<div class="shimmer" aria-hidden="true">
+										<div class="shimmer-stripe"></div>
+									</div>
+								{/if}
+								<div class="stub">
+									<span class="project">{projectLabel(ticket.cwd)}</span>
+									<span class="type">{ticket.working ? 'COOKING' : typeLabel(ticket.event_type)}</span>
+									<span class="age">{formatAge(ticket.created_at, now)}</span>
+								</div>
+								<div class="perforation" aria-hidden="true"></div>
+								<div class="body">
+									{#if ticket.title}
+										<div class="title">{ticket.title}</div>
+									{/if}
+								</div>
+							</button>
+
+							{#if isVoiceActive(ticket)}
+								<!-- Recording orb in the gap the sliding card opens on the right. While
+								     held it's a record PULSE (indicator only, pointer-events off so the hold
+								     passes through). On release it becomes the ✕ DELETE button: a ring drains
+								     clockwise over DRAIN_MS and auto-sends at the end, but tap it first to
+								     discard (Escape — Claude's /voice discard key). Re-holding the card
+								     resumes. The phone can't meter /voice's laptop-side audio, so the pulse
+								     and ring are status, not a waveform. -->
+								{#if voicePhase === 'draining'}
+									<button
+										type="button"
+										class="voice-orb voice-delete"
+										aria-label="Delete dictation"
+										onclick={doDelete}
+									>
+										<svg
+											class="drain-ring"
+											viewBox="0 0 36 36"
+											aria-hidden="true"
+											style:--drain-ms={`${DRAIN_MS}ms`}
+										>
+											<circle class="drain-track" cx="18" cy="18" r="16" />
+											<circle class="drain-progress" cx="18" cy="18" r="16" />
+										</svg>
+										<span class="orb-x" aria-hidden="true">✕</span>
+									</button>
+								{:else}
+									<div class="voice-orb" aria-hidden="true">
+										<span class="rec-pulse"></span>
+									</div>
+								{/if}
 							{/if}
-						</div>
-					</button>
-				</li>
-			{/each}
-		</ul>
+						</li>
+					{/each}
+				</ul>
+
+				{#if visibleTickets.length === 0 && !isDisconnected}
+					<div class="empty page-empty" aria-live="polite">
+						{#if page === 'attached'}
+							<span class="dot"></span>
+							<span class="empty-label">You have zero tickets!</span>
+						{:else}
+							<span class="empty-label">No detached sessions</span>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/key}
+
+		{#if !isDisconnected}
+			<nav class="pager" aria-label="Pages">
+				<button
+					type="button"
+					class="pager-arrow"
+					onclick={prevPage}
+					disabled={pageIndex === 0}
+					aria-label="Previous page"
+				>
+					‹
+				</button>
+				<span class="pager-title">{page === 'attached' ? 'Attached' : 'Detached'}</span>
+				<button
+					type="button"
+					class="pager-arrow"
+					onclick={nextPage}
+					disabled={pageIndex === PAGES.length - 1}
+					aria-label="Next page"
+				>
+					›
+				</button>
+			</nav>
+		{/if}
 	{/if}
 
 	{#if isDisconnected}
 		<div class="disconnected-overlay" role="status" aria-live="polite">
 			<span>you are disconnected</span>
 		</div>
+	{/if}
+
+	{#if voiceError}
+		<div class="voice-error" role="status" aria-live="polite">{voiceError}</div>
 	{/if}
 
 	{#if useVideoFallback}
@@ -587,7 +1339,7 @@
 		   phone. In portrait the left/right insets are ~0, so it stays at 14px. */
 		padding: calc(env(safe-area-inset-top, 0) + 14px)
 			calc(env(safe-area-inset-right, 0) + 14px)
-			calc(env(safe-area-inset-bottom, 0) + 14px)
+			calc(env(safe-area-inset-bottom, 0) + 72px)
 			calc(env(safe-area-inset-left, 0) + 14px);
 		display: flex;
 		flex-direction: column;
@@ -698,6 +1450,9 @@
 			transform: translate(-50%, -50%) scale(1);
 		}
 	}
+	/* Backend selector in the settings panel (6.1). A label over a two-option
+	   segmented toggle, styled to sit above the destructive shutdown action. */
+
 	.settings-action {
 		display: flex;
 		align-items: center;
@@ -828,6 +1583,18 @@
 		padding: 0 24px;
 	}
 
+	/* Page wrapper for the Attached/Detached slide transition. Fills the space
+	   between the header and the fixed pager (flex: 1) and stacks its queue +
+	   empty state in a column, so the empty state still centers and the whole
+	   page can fly horizontally as one unit on a page switch. */
+	.page {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
 	.queue {
 		list-style: none;
 		margin: 0;
@@ -876,18 +1643,16 @@
 		--notch-size: 18px;
 		--notch-offset: 14px;
 
+		/* The <li> is the stationary positioning context + CSS-var source + flip/fly
+		   layout host. It carries NO fill — the card's visual surface lives on the child
+		   <button> (see `.ticket button`) so a voice gesture can slide just the surface
+		   left and reveal the orb in the gap, which shows this bare <li>'s page
+		   background through it. */
 		position: relative;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 0;
-		box-shadow:
-			0 1px 0 rgba(80, 60, 30, 0.04),
-			0 2px 10px rgba(80, 60, 30, 0.06);
-		transition:
-			transform 120ms ease,
-			background-color 150ms ease,
-			border-color 150ms ease,
-			color 150ms ease;
+		/* Vertical scroll stays native; horizontal is the detach drag's to handle,
+		   so we never need a non-passive preventDefault on touchmove. */
+		touch-action: pan-y;
+		transition: transform 120ms ease;
 	}
 	.ticket.type-permission {
 		--bg: #f9d5cc;
@@ -911,8 +1676,10 @@
 	   the fill is translucent; text and border stay crisp, unlike element
 	   opacity which faded the whole ticket. */
 	.ticket.type-idle {
-		filter: saturate(0);
 		--bg: rgba(255, 241, 201, 0.2);
+	}
+	.ticket.type-idle button {
+		filter: saturate(0);
 	}
 	.ticket.pressing {
 		transform: scale(0.985);
@@ -930,16 +1697,16 @@
 	   so the entire palette ages together. Placed before .ticket.working so the
 	   working pastel-green wins if both classes ever co-applied (the helper
 	   skips stale on working/permission tickets, so this is defensive). */
-	.ticket.stale-1 {
+	.ticket.stale-1 button {
 		filter: saturate(0.75);
 	}
-	.ticket.stale-2 {
+	.ticket.stale-2 button {
 		filter: saturate(0.5);
 	}
-	.ticket.stale-3 {
+	.ticket.stale-3 button {
 		filter: saturate(0.25);
 	}
-	.ticket.stale-4 {
+	.ticket.stale-4 button {
 		filter: saturate(0);
 	}
 	/* "Working" state: Claude is processing (UserPromptSubmit / PostToolUse /
@@ -958,6 +1725,22 @@
 		--title: #1f3a1f;
 		--muted: #6b8a55;
 		--accent: #3a5e2a;
+	}
+	/* Detached cards: uniform grey, overriding the per-event-type palette AND the
+	   never-grey PermissionRequest rule — a detached session is parked, so it reads
+	   as inactive regardless of its last event. saturate(0) over the default
+	   ticket palette yields one consistent grey; staleClass already returns '' for
+	   detached, so there is no additional age-fade. Placed after .type-*, .stale-*,
+	   and .working so it wins on equal specificity via source order. */
+	.ticket.detached {
+		--bg: #fff1c9;
+		--border: #ead68f;
+		--title: #2a1f15;
+		--muted: #8a7a45;
+		--accent: #6e5a20;
+	}
+	.ticket.detached button {
+		filter: saturate(0);
 	}
 	.shimmer {
 		position: absolute;
@@ -987,16 +1770,42 @@
 	}
 
 	.ticket button {
+		/* The card's visual surface (moved off the <li>): fill, border, shadow — and the
+		   element a voice gesture slides left via translateX. box-sizing:border-box so the
+		   1px border doesn't push the 100% width past the <li>. position:relative so the
+		   working shimmer (absolute inset:0) clips to the button as it slides, not to the
+		   stationary <li>. */
+		position: relative;
+		box-sizing: border-box;
 		display: block;
 		width: 100%;
 		text-align: left;
-		background: transparent;
-		border: 0;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 0;
+		box-shadow:
+			0 1px 0 rgba(80, 60, 30, 0.04),
+			0 2px 10px rgba(80, 60, 30, 0.06);
 		color: inherit;
 		font: inherit;
 		padding: 0;
 		cursor: pointer;
+		transition:
+			transform 200ms ease,
+			background-color 150ms ease,
+			border-color 150ms ease,
+			color 150ms ease;
 		-webkit-tap-highlight-color: transparent;
+		/* Long-press gesture suppression (5.1): keep vertical dock scroll (pan-y) but
+		   kill the iOS callout/text-magnifier and Android selection so a hold reads as
+		   our gesture, not a browser one. touch-action: pan-y also makes the browser
+		   fire pointercancel when a vertical scroll starts, which the FSM treats as an
+		   abort. The Android long-press menu needs the contextmenu preventDefault in
+		   JS as well — the callout property doesn't cover it. */
+		-webkit-touch-callout: none;
+		-webkit-user-select: none;
+		user-select: none;
+		touch-action: pan-y;
 	}
 
 	.stub {
@@ -1094,4 +1903,201 @@
 		word-break: break-word;
 	}
 
+	/* Bottom pager: a fixed bar that switches the Attached / Detached pages.
+	   Centered page title with a minimal arrow on each side; no swipe. Translucent
+	   blurred background so dock content scrolls underneath. Hidden while
+	   disconnected (the overlay takes over); main reserves bottom padding so the
+	   last card never hides behind it. */
+	.pager {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 15;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 22px;
+		padding: 10px calc(env(safe-area-inset-right, 0) + 14px)
+			calc(env(safe-area-inset-bottom, 0) + 10px)
+			calc(env(safe-area-inset-left, 0) + 14px);
+		background: rgba(255, 253, 245, 0.92);
+		-webkit-backdrop-filter: blur(8px);
+		backdrop-filter: blur(8px);
+	}
+	.pager-title {
+		flex: 1;
+		text-align: center;
+		font-size: 13px;
+		font-weight: 600;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: #2a1f15;
+	}
+	.pager-arrow {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 40px;
+		min-height: 36px;
+		background: transparent;
+		border: 0;
+		color: #2a1f15;
+		font-size: 22px;
+		line-height: 1;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition: opacity 150ms ease;
+	}
+	.pager-arrow:disabled {
+		opacity: 0.22;
+		cursor: default;
+	}
+
+	/* ─── Speech-to-prompt recording UI (Phase 5) ───────────────────────────── */
+
+	/* Active voice gesture: slide the card surface (the <button>) left to open a gap on
+	   the right for the orb. No colour change — the orb, not the whole card, is the
+	   recording signal now. overflow:hidden on the <li> clips the surface's slid-off
+	   left edge at the card boundary (a clean "window"), and the raised z-index lets the
+	   sliding card + orb composite above neighbouring tickets. filter:none keeps the
+	   surface crisp even on an idle/stale/detached ticket (defeats their saturate());
+	   placed after those rules so it wins on equal specificity via source order. */
+	.ticket.recording,
+	.ticket.draining {
+		z-index: 4;
+		overflow: hidden;
+	}
+	.ticket.recording button,
+	.ticket.draining button {
+		transform: translateX(-36%);
+		filter: none;
+	}
+
+	/* Recording orb — centred in the gap the sliding card opens on the right (right:18%
+	   + translateX(50%) puts its centre in the middle of the 36% gap). Scoped under
+	   .ticket so it out-specifies `.ticket button { width:100%; background; border }`:
+	   the draining variant is a real <button> (the ✕ delete) and would otherwise inherit
+	   the card surface and stretch full-width. While held it's a pointer-events:none
+	   PULSE; the draining ✕ button re-enables pointer events below. */
+	.ticket .voice-orb {
+		position: absolute;
+		top: 50%;
+		right: 18%;
+		transform: translate(50%, -50%);
+		z-index: 5;
+		box-sizing: border-box;
+		width: 34px;
+		height: 34px;
+		border: 0;
+		border-radius: 50%;
+		background: rgba(255, 253, 245, 0.97);
+		box-shadow: 0 1px 5px rgba(120, 40, 20, 0.32);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+	}
+	/* The drain-phase orb is the ✕ delete button — tappable (the pulse orb is a div and
+	   stays inert). Tap discards via the cancel route (Escape); leave it and the ring
+	   autosends; re-hold the card to resume. */
+	.ticket button.voice-orb {
+		pointer-events: auto;
+	}
+	.voice-orb .rec-pulse {
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		background: #d33a1c;
+		animation: rec-pulse 1.1s ease-in-out infinite;
+	}
+	@keyframes rec-pulse {
+		0%,
+		100% {
+			opacity: 1;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.35;
+			transform: scale(0.6);
+		}
+	}
+
+	/* Countdown ring: drains clockwise from 12 o'clock over --drain-ms (bound inline to
+	   the JS DRAIN_MS so the ring and the autosend timer share one source). The dash is
+	   the full circumference (2·π·16 ≈ 100.53); animating stroke-dashoffset
+	   0 → circumference empties it. `forwards` holds it empty at the end — the gesture
+	   resets right after. rotate(-90deg) moves the stroke's start point to 12 o'clock;
+	   if on-device it drains the wrong way, flip that sign or swap the keyframe ends. */
+	/* Ring is the flex-centred child at an EXPLICIT size — not position:absolute+inset:
+	   mobile WebKit won't stretch a viewBox <svg> to an inset box, it falls back to the
+	   SVG's intrinsic size, so the ring rendered huge and displaced from the orb. The ✕
+	   glyph is then absolutely centred ON TOP of it (a <span> centres reliably where the
+	   replaced <svg> doesn't). */
+	.drain-ring {
+		width: 30px;
+		height: 30px;
+		transform: rotate(-90deg);
+	}
+	.orb-x {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		z-index: 1;
+		font-size: 15px;
+		line-height: 1;
+		font-weight: 700;
+		color: #b3301a;
+	}
+	.drain-track {
+		fill: none;
+		stroke: rgba(210, 58, 28, 0.16);
+		stroke-width: 3;
+	}
+	.drain-progress {
+		fill: none;
+		stroke: #d33a1c;
+		stroke-width: 3;
+		stroke-linecap: round;
+		stroke-dasharray: 100.53;
+		animation: drain var(--drain-ms, 2500ms) linear forwards;
+	}
+	@keyframes drain {
+		from {
+			stroke-dashoffset: 0;
+		}
+		to {
+			stroke-dashoffset: 100.53;
+		}
+	}
+
+	/* Transient recording-error toast (mic denied / Baseten unreachable / not
+	   ready). Sits just above the pager; auto-clears after 4s. */
+	.voice-error {
+		position: fixed;
+		left: 50%;
+		bottom: calc(env(safe-area-inset-bottom, 0) + 64px);
+		transform: translateX(-50%);
+		z-index: 16;
+		max-width: calc(100vw - 40px);
+		padding: 10px 16px;
+		background: #8b2e1f;
+		color: #fff;
+		font-size: 12px;
+		letter-spacing: 0.06em;
+		border-radius: 2px;
+		box-shadow: 0 4px 14px rgba(80, 20, 10, 0.3);
+		animation: voice-error-in 160ms ease both;
+	}
+	@keyframes voice-error-in {
+		from {
+			opacity: 0;
+			transform: translate(-50%, 6px);
+		}
+		to {
+			opacity: 1;
+			transform: translate(-50%, 0);
+		}
+	}
 </style>

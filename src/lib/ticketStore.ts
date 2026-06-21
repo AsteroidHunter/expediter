@@ -16,6 +16,19 @@ export type Ticket = {
 	// Cleared back to false on the next upsert (a fresh Stop / PermissionRequest /
 	// Notification reactivates the ticket) or by resolveDeclineIfMatch.
 	working: boolean;
+	// True when the ticket's tmux session has >=1 attached client. Owned solely
+	// by reconcile (boot scan / tmux hooks / slow poll) via setAttached — the
+	// hook-event pipeline never sets it (upsert preserves the existing value).
+	// Drives the Attached vs Detached split on the phone: detached cards render
+	// greyed and re-attach on tap. Defaults true for a newly-upserted ticket.
+	attached: boolean;
+	// True while a speech-to-prompt dictation is capturing for this ticket. Owned
+	// by the /api/voice/* routes via setRecording (start → true; stop/cancel →
+	// false), mirroring how `attached` is owned by reconcile. Streams to the phone
+	// over the existing SSE and drives the /voice mock waveform (the phone has no
+	// local audio on that backend). Transient — upsert preserves it across
+	// re-upserts, defaulting false for a brand-new ticket.
+	recording: boolean;
 };
 
 type SessionTopic = {
@@ -64,7 +77,7 @@ const EVENT_PRIORITY: Record<EventType, number> = {
 	Idle: -1
 };
 
-export function upsert(ticket: Omit<Ticket, 'working'>): void {
+export function upsert(ticket: Omit<Ticket, 'working' | 'attached' | 'recording'>): void {
 	const existing = store.get(ticket.session_id);
 	// EVENT_PRIORITY guards against same-cycle Notification clobbering a
 	// PermissionRequest. Once a ticket is working the prior cycle is over, so
@@ -76,7 +89,16 @@ export function upsert(ticket: Omit<Ticket, 'working'>): void {
 	) {
 		return;
 	}
-	store.set(ticket.session_id, { ...ticket, working: false });
+	// `attached` is owned by reconcile and `recording` by the voice routes, not the
+	// event pipeline: preserve both across re-upserts, defaulting attached true /
+	// recording false for a brand-new ticket. reconcile / the voice routes set the
+	// real values via setAttached / setRecording.
+	store.set(ticket.session_id, {
+		...ticket,
+		working: false,
+		attached: existing?.attached ?? true,
+		recording: existing?.recording ?? false
+	});
 	notify();
 }
 
@@ -142,6 +164,32 @@ export function resolveDeclineIfMatch(session_id: string, created_at: number): b
 		working: false,
 		created_at: Date.now()
 	});
+	notify();
+	return true;
+}
+
+// Flip only the attach flag, leaving event_type / working / title / created_at
+// untouched. reconcile (boot scan, tmux hooks, slow poll) owns this flag; the
+// hook-event pipeline owns the rest, so the two never fight over a ticket.
+// No-ops (and skips notify) when the value is unchanged, keeping a steady-state
+// reconcile silent. Returns true only when it actually changed something.
+export function setAttached(session_id: string, attached: boolean): boolean {
+	const existing = store.get(session_id);
+	if (!existing || existing.attached === attached) return false;
+	store.set(session_id, { ...existing, attached });
+	notify();
+	return true;
+}
+
+// Flip only the recording flag, leaving every other field untouched. Owned by the
+// /api/voice/* routes (speech-to-prompt): start sets it true, stop/cancel set it
+// false. No-ops (and skips notify) when the value is unchanged, so a redundant set
+// stays silent. Returns true only when it actually changed something. Mirrors
+// setAttached — the two flags are independent and never fight over a ticket.
+export function setRecording(session_id: string, recording: boolean): boolean {
+	const existing = store.get(session_id);
+	if (!existing || existing.recording === recording) return false;
+	store.set(session_id, { ...existing, recording });
 	notify();
 	return true;
 }

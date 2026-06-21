@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta name="theme-color" content="#fffdf5" />
+		<title>Connect to Expediter</title>
+		<style>
+			/*
+			 * Functional default styling. The Expediter owner is free to restyle this
+			 * entirely. The setup logic only depends on these element ids/attributes,
+			 * so keep them (rename freely if you also update the script):
+			 *   #connecting  #install  #download  #continue  #status
+			 */
+			:root {
+				color-scheme: light;
+			}
+			body {
+				margin: 0;
+				font: 16px/1.5 ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+				background: #fffdf5;
+				color: #2a1f15;
+				-webkit-font-smoothing: antialiased;
+				padding: max(env(safe-area-inset-top), 18px) 20px max(env(safe-area-inset-bottom), 18px);
+			}
+			main {
+				max-width: 32rem;
+				margin: 0 auto;
+			}
+			h1 {
+				font-size: 1.3rem;
+				font-weight: 600;
+				letter-spacing: 0.01em;
+				margin: 0.2rem 0 0.9rem;
+			}
+			p {
+				margin: 0.7rem 0;
+			}
+			strong {
+				font-weight: 700;
+			}
+			ol {
+				padding-left: 1.25rem;
+			}
+			li {
+				margin: 0.5rem 0;
+			}
+			.btn {
+				display: inline-block;
+				background: #2a1f15;
+				color: #fffdf5;
+				padding: 0.7rem 1.15rem;
+				border-radius: 3px;
+				border: 1px solid #2a1f15;
+				text-decoration: none;
+				font: inherit;
+				font-weight: 600;
+				letter-spacing: 0.02em;
+				cursor: pointer;
+				-webkit-tap-highlight-color: transparent;
+			}
+			.btn.secondary {
+				background: transparent;
+				color: #2a1f15;
+				border: 1px solid #c9bd9a;
+			}
+			.muted {
+				color: rgba(42, 31, 21, 0.55);
+				font-size: 0.9rem;
+			}
+			.hidden {
+				display: none;
+			}
+			code {
+				background: #fff1c9;
+				border: 1px solid #ead68f;
+				padding: 0.08rem 0.35rem;
+				border-radius: 2px;
+				font: inherit;
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<!-- Shown while probing, and to already-trusted phones being forwarded. -->
+			<section id="connecting">
+				<h1>Connecting…</h1>
+				<p class="muted">Checking the secure connection to your Mac.</p>
+			</section>
+
+			<!-- Shown when this phone does not yet trust the Mac's certificate. -->
+			<section id="install" class="hidden">
+				<h1>One-time setup</h1>
+				<p>
+					To connect securely (and to use the microphone for voice), your phone needs to trust
+					this Mac's certificate. You only do this once per phone.
+				</p>
+				<p><a class="btn" id="download" href="/ca.crt">Download certificate</a></p>
+				<ol>
+					<li>Tap <strong>Download certificate</strong>, then tap <strong>Allow</strong>.</li>
+					<li>
+						Open <strong>Settings → General → VPN &amp; Device Management</strong>, tap the
+						<strong>Expediter Local CA</strong> profile, and <strong>Install</strong> it.
+					</li>
+					<li>
+						Open <strong>Settings → General → About → Certificate Trust Settings</strong> and turn
+						<strong>on</strong> full trust for <strong>Expediter Local CA</strong>.
+					</li>
+					<li>Come back to this page — it connects automatically.</li>
+				</ol>
+				<p><button class="btn secondary" id="continue" type="button">I've done this — connect</button></p>
+				<p class="muted" id="status" aria-live="polite"></p>
+				<p class="muted">
+					This must be done in <strong>Safari</strong> — other browsers can't install the profile.
+					Prefer to skip it? Run <code>expediter --http</code> on your Mac for a plain connection
+					(no microphone).
+				</p>
+			</section>
+		</main>
+
+		<script>
+			(function () {
+				// The doormat substitutes the real HTTPS port here at serve time.
+				var HTTPS_PORT = '__HTTPS_PORT__';
+				// The auth token rides in the URL fragment (never sent to the doormat).
+				// We carry it across to the HTTPS app, which reads it the same way.
+				var token = location.hash ? location.hash.slice(1) : '';
+				// Reuse whatever host the phone used to reach the doormat (an IP on a
+				// hotspot, a .local or IP on Wi-Fi). The leaf cert covers both, so the
+				// secure origin is just that same host on the HTTPS port.
+				var httpsBase = 'https://' + location.hostname + ':' + HTTPS_PORT;
+				var target = httpsBase + '/' + (token ? '#' + token : '');
+
+				var connecting = document.getElementById('connecting');
+				var install = document.getElementById('install');
+				var status = document.getElementById('status');
+				var polling = null;
+
+				function show(el) {
+					connecting.classList.add('hidden');
+					install.classList.add('hidden');
+					el.classList.remove('hidden');
+				}
+
+				function go() {
+					if (polling) clearInterval(polling);
+					location.replace(target);
+				}
+
+				// True only if the HTTPS origin completes a TLS handshake, i.e. the CA is
+				// trusted. An untrusted cert (or unreachable host) rejects the fetch. The
+				// no-cors mode means we don't care about the response body, only that the
+				// connection succeeded.
+				function probe() {
+					var ctrl = new AbortController();
+					var t = setTimeout(function () {
+						ctrl.abort();
+					}, 3000);
+					return fetch(httpsBase + '/', { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
+						.then(function () {
+							return true;
+						})
+						.catch(function () {
+							return false;
+						})
+						.finally(function () {
+							clearTimeout(t);
+						});
+				}
+
+				function showInstall() {
+					show(install);
+					if (polling) return;
+					// Once the user finishes the trust toggle and returns to Safari, a probe
+					// starts succeeding — connect without requiring the button tap.
+					polling = setInterval(function () {
+						probe().then(function (ok) {
+							if (ok) go();
+						});
+					}, 2500);
+				}
+
+				function recheck() {
+					probe().then(function (ok) {
+						if (ok) go();
+					});
+				}
+
+				// Re-probe the instant the user comes back from the Settings app.
+				window.addEventListener('pageshow', recheck);
+				document.addEventListener('visibilitychange', function () {
+					if (!document.hidden) recheck();
+				});
+
+				document.getElementById('continue').addEventListener('click', function () {
+					status.textContent = 'Checking…';
+					probe().then(function (ok) {
+						if (ok) go();
+						else
+							status.textContent =
+								'Not trusted yet. Make sure you turned on full trust in Certificate Trust Settings (step 3), then try again.';
+					});
+				});
+
+				// Returning (already-trusted) phones connect immediately; new phones see setup.
+				probe().then(function (ok) {
+					if (ok) go();
+					else showInstall();
+				});
+			})();
+		</script>
+	</body>
+</html>

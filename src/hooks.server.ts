@@ -2,7 +2,8 @@ import type { Handle } from '@sveltejs/kit';
 import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { getServerToken } from '$lib/token';
-import { runBootScan } from '$lib/server/bootScan';
+import { runBootScan, startReconcilePoll } from '$lib/server/bootScan';
+import { installTmuxHooks } from '$lib/server/tmuxHooks';
 
 // Boot-time session enumeration. Runs once per server-module load so the dock
 // reflects every claude session currently in tmux at daemon start, not just
@@ -13,6 +14,16 @@ import { runBootScan } from '$lib/server/bootScan';
 // out to tmux.
 if (process.env.NODE_ENV !== 'test') {
 	void runBootScan().catch((e) => console.warn('[bootScan]', e));
+	// Slow-poll safety net: a full reconcile every RECONCILE_POLL_MS catches
+	// detach/attach transitions whose tmux hook was missed and clears cards for
+	// panes that died without a SessionEnd. unref'd so it never blocks process
+	// exit; gated out of tests so no stray timer fires or shells out to tmux.
+	startReconcilePoll();
+	// Instant path: wire global tmux hooks so a client attach/detach pings the
+	// daemon (/api/tmux-event → light reconcile). Re-installed every boot —
+	// set-hook -g replaces, so hooks never stack. Best-effort: logs and no-ops if
+	// tmux isn't running or the bridge can't be located.
+	void installTmuxHooks().catch((e) => console.warn('[tmuxHooks]', e));
 }
 
 // adapter-node honors EXPEDITER_* envs because svelte.config.js sets envPrefix.
@@ -34,6 +45,17 @@ for (const key of DANGEROUS_ADAPTER_ENV) {
 }
 
 const PORT = (process.env.EXPEDITER_PORT ?? '5179').trim();
+
+// Opt-in per-request gate tracing for "phone can't connect" debugging. Gated on
+// DEBUG_EXPEDITER — deliberately NOT an EXPEDITER_* name, since adapter-node's
+// build/env.js throws at import on any unknown EXPEDITER_* var and would crash
+// the daemon. Logs to stderr (inherited by the launcher terminal). When this is
+// silent for a phone request, the request never reached the daemon at all (DNS/
+// mDNS, firewall, wrong IP, or wrong network) — look at the launcher's URL log.
+const DEBUG = !!process.env.DEBUG_EXPEDITER;
+function dbg(...args: unknown[]) {
+	if (DEBUG) console.error('[gate:debug]', ...args);
+}
 
 type IpRule =
 	| { kind: 'exact'; value: string }
@@ -85,25 +107,28 @@ export function isAllowedIp(ip: string | null): boolean {
 	return false;
 }
 
-// Host header check. After the design pivot, accepts any RFC1918 or link-local
-// IPv4 at the configured port plus loopback literals and `<name>.local` mDNS
-// hostnames. Token gate is the actual auth; this is cheap defense-in-depth
-// against DNS rebinding from arbitrary Host headers pointing at the daemon's
-// LAN IP.
+// Host header check. After the design pivot, accepts any RFC1918, link-local,
+// or Tailscale CGNAT IPv4 at the configured port plus loopback literals and
+// `<name>.local` mDNS hostnames. Token gate is the actual auth; this is cheap
+// defense-in-depth against DNS rebinding from arbitrary Host headers pointing
+// at the daemon's LAN IP.
 const HOST_LITERALS = new Set<string>([
 	`localhost:${PORT}`,
 	`127.0.0.1:${PORT}`,
 	`[::1]:${PORT}`
 ]);
 
-// One regex per RFC1918 / link-local range, anchored on full string and the
-// configured port. Each octet is range-checked separately below to reject
-// values >255 (the regex's \d{1,3} would accept up to 999).
+// One regex per accepted range — RFC1918, link-local, and Tailscale's CGNAT
+// block (100.64.0.0/10, the address a phone dials with `expediter --tailscale`)
+// — anchored on full string and the configured port. Each octet is
+// range-checked separately below to reject values >255 (the regex's \d{1,3}
+// would accept up to 999).
 const HOST_IP_PATTERNS: RegExp[] = [
 	new RegExp(`^10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
 	new RegExp(`^172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
 	new RegExp(`^192\\.168\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
-	new RegExp(`^169\\.254\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`)
+	new RegExp(`^169\\.254\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`),
+	new RegExp(`^100\\.(?:6[4-9]|[789]\\d|1[01]\\d|12[0-7])\\.\\d{1,3}\\.\\d{1,3}:${PORT}$`)
 ];
 
 // Single-label `<name>.local` mDNS hostname at the configured port. The label
@@ -157,6 +182,10 @@ function constantTimeEqual(a: string, b: string): boolean {
 	return timingSafeEqual(aBuf, bBuf);
 }
 
+// API paths trusted purely by loopback origin (no session token): the local
+// hook bridges POST here. Keep this list tight — every entry is a token bypass.
+const LOOPBACK_HOOK_PATHS = new Set(['/api/hooks/event', '/api/tmux-event']);
+
 export const handle: Handle = async ({ event, resolve }) => {
 	const host = event.request.headers.get('host');
 	let ip: string | null = null;
@@ -172,6 +201,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 			? `${pathname}?t=<redacted>`
 			: pathname;
 
+	// One line per inbound request, before any decision. This is the line that
+	// tells you a phone request actually arrived — and exactly which Host header
+	// and peer IP it presented, the two values the gate decides on.
+	dbg(
+		`IN ${event.request.method} path=${loggedPath} host=${host ?? '<none>'} ip=${ip ?? '<none>'} ` +
+			`hostAllowed=${isAllowedHost(host)} ipAllowed=${isAllowedIp(ip)} hasHeaderToken=${!!event.request.headers.get('x-expediter-token')}`
+	);
+
 	if (!isAllowedHost(host)) {
 		return reject('host-rejected', { host, ip, path: loggedPath });
 	}
@@ -180,21 +217,25 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// sent to the server, so the page must load to expose the fragment-grab
 	// snippet that stashes the token in sessionStorage.
 	if (!pathname.startsWith('/api/')) {
+		dbg(`ACCEPT path=${loggedPath} reason=public-asset`);
 		return frameDeny(await resolve(event));
 	}
 
 	// /api/token defers to its route handler, which does its own loopback check
 	// (the caller cannot provide a token before they have one).
 	if (pathname === '/api/token') {
+		dbg(`ACCEPT path=${loggedPath} reason=token-route (route does its own loopback check)`);
 		return frameDeny(await resolve(event));
 	}
 
-	// /api/hooks/event from loopback bypasses the token check — the hook script
-	// runs on the daemon's host and is trusted by virtue of loopback origin.
-	// Any process that can bind to 127.0.0.1 on this Mac is already running as
-	// the user; the token gate's job is to extend trust selectively to the
-	// phone, not to defend against the user's own local processes.
-	if (pathname === '/api/hooks/event' && isAllowedIp(ip)) {
+	// /api/hooks/event and /api/tmux-event from loopback bypass the token check —
+	// both are pinged by local hook scripts (claude hooks and tmux hooks) that run
+	// on the daemon's host and are trusted by virtue of loopback origin. Any
+	// process that can bind to 127.0.0.1 on this Mac is already running as the
+	// user; the token gate's job is to extend trust selectively to the phone, not
+	// to defend against the user's own local processes.
+	if (LOOPBACK_HOOK_PATHS.has(pathname) && isAllowedIp(ip)) {
+		dbg(`ACCEPT path=${loggedPath} reason=loopback-hook`);
 		return frameDeny(await resolve(event));
 	}
 
@@ -207,5 +248,6 @@ export const handle: Handle = async ({ event, resolve }) => {
 		return reject('token-mismatch', { host, ip, path: loggedPath });
 	}
 
+	dbg(`ACCEPT path=${loggedPath} reason=token-ok`);
 	return frameDeny(await resolve(event));
 };
