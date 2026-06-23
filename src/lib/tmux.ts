@@ -171,7 +171,17 @@ export function applyActivateResult(
 }
 
 export function raiseTerminalScript(tty: string | null, cached: TabLocation | null): string {
-	if (!tty) return 'tell application "Terminal" to activate';
+	if (!tty)
+		// System Events `set frontmost of process` brings Terminal forward in ~60ms;
+		// Terminal's own `activate` blocks ~2s per call once the Mac's WindowServer/
+		// LaunchServices has degraded (see the main branch below). Fall back to
+		// `activate` only if the process can't be addressed (Terminal not running),
+		// which also launches it.
+		return `try
+	tell application "System Events" to set frontmost of process "Terminal" to true
+on error
+	tell application "Terminal" to activate
+end try`;
 	// `set selected of t to true` switches the tab inside its host window.
 	// `set frontmost of w to true` brings that host window forward in the
 	// z-stack. We deliberately do NOT call `set index of w to 1` — it triggers
@@ -180,17 +190,21 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 	// rather than the one we just selected. Inner try/end blocks skip
 	// Terminal windows that don't expose tabs (Settings, etc.).
 	//
-	// Activation timing matters: `set frontmost of <window-expr> to true`
-	// issued in roughly the first 200ms after `activate` is silently dropped
-	// while Terminal is mid-activation from background — the script returns
-	// successfully but the z-stack isn't touched, so the tap lands on
-	// whichever window was previously frontmost. Polling `frontmost` does
-	// not help (the app-level property reads true while the window stack is
-	// still settling), and binding the window reference to a variable does
-	// not add enough latency on its own (stress-tested ~5/10). The reliable
-	// fix is an explicit `delay 0.2` after activate, gated on Terminal not
-	// already being frontmost so already-foregrounded taps stay fast
-	// (stress-tested 10/10 with the gated delay).
+	// We bring the app forward with System Events `set frontmost of process`,
+	// NOT Terminal's own `activate`. Once a Mac's WindowServer/LaunchServices has
+	// degraded (observed at ~11 days uptime, WindowServer pegged), AppleScript
+	// `activate` blocks ~2s per call for ANY app — measured as the entire tap-to-
+	// focus latency on this machine. System Events `set frontmost` has the
+	// identical effect in ~60ms and doesn't go through that degraded path.
+	//
+	// Activation timing still matters: `set frontmost of <window-expr> to true`
+	// issued in the first ~200ms after the app comes forward from the background
+	// is occasionally dropped while the window stack is still settling — the
+	// script returns successfully but the z-stack isn't touched, so the tap lands
+	// on whichever window was previously frontmost (reproduced at ~9/10 without a
+	// settle). The fix is a `delay 0.2` after activation, gated on Terminal not
+	// already being frontmost so already-foregrounded taps (switching sessions
+	// while looking at the Mac) skip it and stay fast.
 	const escaped = tty.replace(/"/g, '\\"');
 	// Warm (cache-hit) branch: resolve the window in ONE Apple Event via
 	// `window id <id>` instead of walking `count of windows` and reading
@@ -219,9 +233,9 @@ export function raiseTerminalScript(tty: string | null, cached: TabLocation | nu
 	// window so `set frontmost` still runs against a bound reference. The per-window
 	// `try` skips windows that don't expose tabs (Settings, etc.), as before.
 	return `
+tell application "Terminal" to set wasFront to frontmost
+tell application "System Events" to set frontmost of process "Terminal" to true
 tell application "Terminal"
-	set wasFront to frontmost
-	activate
 	if not wasFront then delay 0.2
 	set targetTTY to "${escaped}"${cachedBranch}
 	repeat with wi from 1 to (count of windows)

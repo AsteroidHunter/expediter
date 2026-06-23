@@ -24,9 +24,15 @@ import {
 
 // raiseTerminalScript ───────────────────────────────────────────────────────
 
-test('raiseTerminalScript with null tty returns activate-only script', () => {
+test('raiseTerminalScript with null tty returns a System Events activation (activate fallback)', () => {
 	const script = raiseTerminalScript(null, null);
-	expect(script).toBe('tell application "Terminal" to activate');
+	// Activation goes through System Events `set frontmost of process` — Terminal's
+	// own `activate` blocks ~2s on a degraded WindowServer. `activate` survives only
+	// as the on-error fallback for when the process can't be addressed.
+	expect(script).toContain(
+		'tell application "System Events" to set frontmost of process "Terminal" to true'
+	);
+	expect(script).toContain('tell application "Terminal" to activate');
 	expect(script).not.toContain('repeat');
 	expect(script).not.toContain('targetTTY');
 });
@@ -38,10 +44,16 @@ test('raiseTerminalScript with tty and no cache emits enumeration branch only', 
 	expect(script).toContain('return "miss:" & wid & ":" & ti');
 	expect(script).toContain('return "notfound"');
 	expect(script).not.toContain('return "hit"');
-	// Activation-transition guard: capture frontmost before activate and
-	// gate a 200ms settle delay on Terminal not already being foregrounded.
-	// Without this delay, `set frontmost` issued during activation is
-	// silently dropped and the wrong window lands frontmost.
+	// Activation goes through System Events, not Terminal `activate` (which blocks
+	// ~2s on a degraded WindowServer).
+	expect(script).toContain(
+		'tell application "System Events" to set frontmost of process "Terminal" to true'
+	);
+	expect(script).not.toContain('activate');
+	// Activation-transition guard: capture frontmost before activating and gate a
+	// 200ms settle delay on Terminal not already being foregrounded. Without this
+	// delay, `set frontmost` issued during activation is occasionally dropped and
+	// the wrong window lands frontmost.
 	expect(script).toContain('set wasFront to frontmost');
 	expect(script).toContain('if not wasFront then delay 0.2');
 });
