@@ -5,6 +5,7 @@ import {
 	applyActivateResult,
 	pickMostRecentTty,
 	pickTtyForWindow,
+	parseWarmCache,
 	focusPane,
 	FocusError,
 	sendKeysArgs,
@@ -45,9 +46,11 @@ test('raiseTerminalScript with tty and no cache emits enumeration branch only', 
 	expect(script).toContain('return "notfound"');
 	expect(script).not.toContain('return "hit"');
 	// Activation goes through System Events, not Terminal `activate` (which blocks
-	// ~2s on a degraded WindowServer).
+	// ~2s on a degraded WindowServer) — and the System Events raise is itself
+	// gated on Terminal not already being frontmost: it costs ~100ms even as a
+	// no-op, and tap-to-tap Terminal usually stays the active app.
 	expect(script).toContain(
-		'tell application "System Events" to set frontmost of process "Terminal" to true'
+		'if not wasFront then\n\ttell application "System Events" to set frontmost of process "Terminal" to true\nend if'
 	);
 	expect(script).not.toContain('activate');
 	// Activation-transition guard: capture frontmost before activating and gate a
@@ -77,8 +80,13 @@ test('raiseTerminalScript with cache resolves the window directly by id and bind
 	// Activation-transition guard must apply to cached taps too — the
 	// cached branch is what runs on the second+ tap to a tty, and a
 	// background-to-foreground transition still races without the delay.
+	// The System Events raise carries the same wasFront gate as the
+	// enumeration branch (they share a preamble).
 	expect(script).toContain('set wasFront to frontmost');
 	expect(script).toContain('if not wasFront then delay 0.2');
+	expect(script).toContain(
+		'if not wasFront then\n\ttell application "System Events" to set frontmost of process "Terminal" to true\nend if'
+	);
 	// Must NOT issue `set frontmost` against the unbound window expression —
 	// the bound `w` is what survives activation.
 	expect(script).not.toContain('set frontmost of window id 128573 to true');
@@ -90,6 +98,36 @@ test('raiseTerminalScript with cache resolves the window directly by id and bind
 test('raiseTerminalScript escapes embedded double quotes in tty', () => {
 	const script = raiseTerminalScript('/dev/ttys"injected', null);
 	expect(script).toContain('set targetTTY to "/dev/ttys\\"injected"');
+});
+
+// parseWarmCache ─────────────────────────────────────────────────────────────
+
+test('parseWarmCache parses windowId|tabIndex|tty rows into cache entries', () => {
+	const out = '22303|1|/dev/ttys000\n37868|2|/dev/ttys026\n';
+	const entries = parseWarmCache(out);
+	expect(entries.size).toBe(2);
+	expect(entries.get('/dev/ttys000')).toEqual({ windowId: 22303, tabIndex: 1 });
+	expect(entries.get('/dev/ttys026')).toEqual({ windowId: 37868, tabIndex: 2 });
+});
+
+test('parseWarmCache skips malformed rows', () => {
+	const out = [
+		'22303|1|/dev/ttys000',
+		'not-a-number|1|/dev/ttys001', // non-numeric window id
+		'22304|x|/dev/ttys002', // non-numeric tab index
+		'22305|3|', // empty tty
+		'22306|4', // missing column
+		'22307|5|/dev/ttys003|extra', // extra column
+		''
+	].join('\n');
+	const entries = parseWarmCache(out);
+	expect(entries.size).toBe(1);
+	expect(entries.get('/dev/ttys000')).toEqual({ windowId: 22303, tabIndex: 1 });
+});
+
+test('parseWarmCache returns an empty map for empty output', () => {
+	expect(parseWarmCache('').size).toBe(0);
+	expect(parseWarmCache('\n\n').size).toBe(0);
 });
 
 // parseActivateResult ───────────────────────────────────────────────────────

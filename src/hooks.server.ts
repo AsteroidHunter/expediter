@@ -4,6 +4,7 @@ import { Buffer } from 'node:buffer';
 import { getServerToken } from '$lib/token';
 import { runBootScan, startReconcilePoll } from '$lib/server/bootScan';
 import { installTmuxHooks } from '$lib/server/tmuxHooks';
+import { warmFocusCache } from '$lib/tmux';
 
 // Boot-time session enumeration. Runs once per server-module load so the dock
 // reflects every claude session currently in tmux at daemon start, not just
@@ -24,6 +25,10 @@ if (process.env.NODE_ENV !== 'test') {
 	// set-hook -g replaces, so hooks never stack. Best-effort: logs and no-ops if
 	// tmux isn't running or the bridge can't be located.
 	void installTmuxHooks().catch((e) => console.warn('[tmuxHooks]', e));
+	// Prime the tty→tab focus cache so the first tap on each session after a
+	// daemon restart is a warm hit instead of paying the per-window Terminal
+	// enumeration. Best-effort and never throws (no-ops without Terminal/macOS).
+	void warmFocusCache();
 }
 
 // adapter-node honors EXPEDITER_* envs because svelte.config.js sets envPrefix.
