@@ -50,14 +50,17 @@ test('raiseTerminalScript with tty and no cache emits enumeration branch only', 
 	// gated on Terminal not already being frontmost: it costs ~100ms even as a
 	// no-op, and tap-to-tap Terminal usually stays the active app.
 	expect(script).toContain(
-		'if not wasFront then\n\ttell application "System Events" to set frontmost of process "Terminal" to true\nend if'
+		'if not wasFront then set frontmost of process "Terminal" to true'
 	);
 	expect(script).not.toContain('activate');
 	// Activation-transition guard: capture frontmost before activating and gate a
 	// 200ms settle delay on Terminal not already being foregrounded. Without this
 	// delay, `set frontmost` issued during activation is occasionally dropped and
-	// the wrong window lands frontmost.
-	expect(script).toContain('set wasFront to frontmost');
+	// the wrong window lands frontmost. The read comes from System Events, NOT
+	// Terminal's own `frontmost` — Terminal self-reports false even while active
+	// on this machine, which would defeat the gate.
+	expect(script).toContain('set wasFront to frontmost of process "Terminal"');
+	expect(script).not.toContain('tell application "Terminal" to set wasFront');
 	expect(script).toContain('if not wasFront then delay 0.2');
 });
 
@@ -82,10 +85,10 @@ test('raiseTerminalScript with cache resolves the window directly by id and bind
 	// background-to-foreground transition still races without the delay.
 	// The System Events raise carries the same wasFront gate as the
 	// enumeration branch (they share a preamble).
-	expect(script).toContain('set wasFront to frontmost');
+	expect(script).toContain('set wasFront to frontmost of process "Terminal"');
 	expect(script).toContain('if not wasFront then delay 0.2');
 	expect(script).toContain(
-		'if not wasFront then\n\ttell application "System Events" to set frontmost of process "Terminal" to true\nend if'
+		'if not wasFront then set frontmost of process "Terminal" to true'
 	);
 	// Must NOT issue `set frontmost` against the unbound window expression —
 	// the bound `w` is what survives activation.

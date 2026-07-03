@@ -243,6 +243,13 @@ end try`;
 	// dogfooding at the Mac — tap-to-tap, Terminal stays the active app. Skipping
 	// it (plus the settle delay below) cuts ~300ms off every such tap.
 	//
+	// wasFront is read from System Events, NOT from Terminal's own `frontmost`
+	// property: on this machine Terminal self-reports frontmost=false even while
+	// System Events (and the WindowServer) say it IS the active app — verified
+	// side by side — so a Terminal-sourced gate never fires and every tap pays
+	// the raise + settle. System Events is also what the raise writes to, so the
+	// gate and the raise see the same view of the world.
+	//
 	// Activation timing still matters: `set frontmost of <window-expr> to true`
 	// issued in the first ~200ms after the app comes forward from the background
 	// is occasionally dropped while the window stack is still settling — the
@@ -279,10 +286,10 @@ end try`;
 	// window so `set frontmost` still runs against a bound reference. The per-window
 	// `try` skips windows that don't expose tabs (Settings, etc.), as before.
 	return `
-tell application "Terminal" to set wasFront to frontmost
-if not wasFront then
-	tell application "System Events" to set frontmost of process "Terminal" to true
-end if
+tell application "System Events"
+	set wasFront to frontmost of process "Terminal"
+	if not wasFront then set frontmost of process "Terminal" to true
+end tell
 tell application "Terminal"
 	if not wasFront then delay 0.2
 	set targetTTY to "${escaped}"${cachedBranch}
