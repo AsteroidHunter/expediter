@@ -67,6 +67,17 @@ if (useHttps) {
 	server = http.createServer(handler);
 }
 
+// Keep idle phone connections open for 3 minutes instead of Node's 5-second
+// default. Safari reuses a connection for ~2.5 minutes, so with a 5s server
+// timeout nearly every tap more than 5s after the last one pays a fresh
+// TCP+TLS handshake (2-3 network round trips — the bulk of tap latency on a
+// hotspot), and iOS is known to reuse a connection the server already closed,
+// dropping the request with "network connection was lost". Outliving Safari's
+// reuse window removes both. headersTimeout must exceed keepAliveTimeout
+// (Node requirement) or keep-alive sockets get destroyed mid-request.
+server.keepAliveTimeout = 180_000;
+server.headersTimeout = 185_000;
+
 // Attach the Baseten audio WebSocket to the app server's `upgrade` event (the
 // doormat is plaintext cert-bootstrap only, so audio never rides it). adapter-node's
 // handler can't speak WS, so this is server-level, not a route. Its own inline
