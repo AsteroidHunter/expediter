@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { raiseTab, warmEnumerate } from './focusHost';
 
 const execFileAsync = promisify(execFile);
 
@@ -98,19 +99,6 @@ export function pickTtyForWindow(stdout: string, windowId: string): string | nul
 	return rows[0].tty;
 }
 
-async function clientTtyForWindow(windowId: string): Promise<string | null> {
-	try {
-		const { stdout } = await execFileAsync('tmux', [
-			'list-clients',
-			'-F',
-			'#{client_activity}|#{client_tty}|#{window_id}'
-		]);
-		return pickTtyForWindow(stdout, windowId);
-	} catch {
-		return null;
-	}
-}
-
 async function clientTtyForSession(session: string): Promise<string | null> {
 	try {
 		const { stdout } = await execFileAsync('tmux', [
@@ -170,77 +158,50 @@ export function applyActivateResult(
 	// cache untouched so a stale entry isn't blown away by a malformed response.
 }
 
-export function raiseTerminalScript(tty: string | null, cached: TabLocation | null): string {
-	if (!tty) return 'tell application "Terminal" to activate';
-	// `set selected of t to true` switches the tab inside its host window.
-	// `set frontmost of w to true` brings that host window forward in the
-	// z-stack. We deliberately do NOT call `set index of w to 1` — it triggers
-	// Terminal to re-evaluate which tab is the "primary" tab in its window
-	// and snaps focus to whichever tab Terminal considers the default,
-	// rather than the one we just selected. Inner try/end blocks skip
-	// Terminal windows that don't expose tabs (Settings, etc.).
-	//
-	// Activation timing matters: `set frontmost of <window-expr> to true`
-	// issued in roughly the first 200ms after `activate` is silently dropped
-	// while Terminal is mid-activation from background — the script returns
-	// successfully but the z-stack isn't touched, so the tap lands on
-	// whichever window was previously frontmost. Polling `frontmost` does
-	// not help (the app-level property reads true while the window stack is
-	// still settling), and binding the window reference to a variable does
-	// not add enough latency on its own (stress-tested ~5/10). The reliable
-	// fix is an explicit `delay 0.2` after activate, gated on Terminal not
-	// already being frontmost so already-foregrounded taps stay fast
-	// (stress-tested 10/10 with the gated delay).
-	const escaped = tty.replace(/"/g, '\\"');
-	// Warm (cache-hit) branch: resolve the window in ONE Apple Event via
-	// `window id <id>` instead of walking `count of windows` and reading
-	// `id of window wi` one at a time. That walk cost an Apple Event per window
-	// (~30ms each), so every warm tap was O(window count × z-order depth) — a tab
-	// buried behind a dozen Terminal windows took hundreds of ms even on a cache
-	// hit. We still bind the resolved window to `w` and act on the bound
-	// reference: `set frontmost` against the bare `window id <id>` specifier is
-	// silently dropped mid-activation, whereas `w` survives. A stale id (window
-	// closed / tab moved / tty no longer matches) throws or falls out of the try
-	// and drops through to the full enumeration below, which refreshes the cache.
-	const cachedBranch = cached
-		? `
-	try
-		set w to window id ${cached.windowId}
-		if tty of tab ${cached.tabIndex} of w is targetTTY then
-			set selected of tab ${cached.tabIndex} of w to true
-			set frontmost of w to true
-			return "hit"
-		end if
-	end try`
-		: '';
-	// Cold/enumeration branch (no cache, or a cache miss): scan each window with a
-	// single `tty of tabs of window wi` read — one Apple Event per window instead
-	// of one per tab — and match the tty in-memory, binding `w` only on the matched
-	// window so `set frontmost` still runs against a bound reference. The per-window
-	// `try` skips windows that don't expose tabs (Settings, etc.), as before.
-	return `
-tell application "Terminal"
-	set wasFront to frontmost
-	activate
-	if not wasFront then delay 0.2
-	set targetTTY to "${escaped}"${cachedBranch}
-	repeat with wi from 1 to (count of windows)
-		try
-			set theTtys to tty of tabs of window wi
-			repeat with ti from 1 to (count of theTtys)
-				if item ti of theTtys is targetTTY then
-					set w to window wi
-					set wid to id of w
-					set selected of tab ti of w to true
-					set frontmost of w to true
-					return "miss:" & wid & ":" & ti
-				end if
-			end repeat
-		end try
-	end repeat
-	return "notfound"
-end tell`;
+// Parses the warm-cache enumeration output — one "windowId|tabIndex|tty" row
+// per Terminal tab — into cache entries. Malformed rows (missing columns,
+// non-numeric ids, empty tty) are silently skipped, matching the other parsers
+// here. Pure for unit-testing.
+export function parseWarmCache(stdout: string): Map<string, TabLocation> {
+	const entries = new Map<string, TabLocation>();
+	for (const line of stdout.split('\n')) {
+		const parts = line.trim().split('|');
+		if (parts.length !== 3) continue;
+		const windowId = Number(parts[0]);
+		const tabIndex = Number(parts[1]);
+		const tty = parts[2].trim();
+		if (!Number.isFinite(windowId) || !Number.isFinite(tabIndex) || !tty) continue;
+		entries.set(tty, { windowId, tabIndex });
+	}
+	return entries;
 }
+
+// Pre-populate ttyToTab with every (tty → window id, tab index) currently open
+// in Terminal. Called fire-and-forget at daemon boot (hooks.server.ts): the
+// module-scope cache is empty exactly then, so without this the first tap on
+// every session after a restart pays the per-window enumeration in the focus
+// host. Going through the host also spawns it and warms its Apple Event
+// connections at boot, so the first real tap skips the ~150ms cold handshake
+// too. Entries that go stale later (tab moved, window closed) are already
+// handled by the host's tty-validation + enumeration fallback. Never throws —
+// on a Mac without Terminal running, or a non-macOS dev box, the cache just
+// stays cold.
+export async function warmFocusCache(): Promise<void> {
+	try {
+		const rows = await warmEnumerate();
+		for (const [tty, loc] of parseWarmCache(rows)) {
+			ttyToTab.set(tty, loc);
+		}
+		debugFocus(`[focus] warm cache primed: ${ttyToTab.size} ttys`);
+	} catch {
+		// Terminal not running / no osascript — first taps fall back to enumeration.
+	}
+}
+
+// The Terminal raise itself — cache-hit resolve, enumeration fallback,
+// wasFront gating, settle delay — lives in the persistent focus host
+// (focusHost.ts), which replaced the spawn-per-tap osascript scripts. The
+// host's HELPER_SOURCE carries the full invariant history in its comments.
 
 export async function focusPane(pane: string): Promise<void> {
 	if (!pane || !/^%[0-9]+$/.test(pane)) {
@@ -249,19 +210,32 @@ export async function focusPane(pane: string): Promise<void> {
 
 	let windowId: string;
 	let session: string;
+	let clientRows: string;
 	try {
+		// ONE tmux spawn resolves the pane AND lists the attached clients:
+		// display-message prints its single line first, then list-clients appends
+		// one row per client. Chained via ';' (like select-window/select-pane
+		// below) — each tmux spawn costs ~25ms, so folding the second query into
+		// the first takes it off every tap's critical path.
 		const { stdout } = await execFileAsync('tmux', [
 			'display-message',
 			'-p',
 			'-t',
 			pane,
-			'#{window_id}|#{session_name}'
+			'#{window_id}|#{session_name}',
+			';',
+			'list-clients',
+			'-F',
+			'#{client_activity}|#{client_tty}|#{window_id}'
 		]);
+		const nl = stdout.indexOf('\n');
+		const first = nl >= 0 ? stdout.slice(0, nl) : stdout;
+		clientRows = nl >= 0 ? stdout.slice(nl + 1) : '';
 		// window_id (`@N`) never contains a pipe, so split on the first one;
 		// the remainder is the session name.
-		const sep = stdout.indexOf('|');
-		windowId = sep >= 0 ? stdout.slice(0, sep).trim() : '';
-		session = (sep >= 0 ? stdout.slice(sep + 1) : stdout).trim();
+		const sep = first.indexOf('|');
+		windowId = sep >= 0 ? first.slice(0, sep).trim() : '';
+		session = (sep >= 0 ? first.slice(sep + 1) : first).trim();
 	} catch {
 		throw new FocusError(`pane '${pane}' no longer exists`);
 	}
@@ -278,7 +252,7 @@ export async function focusPane(pane: string): Promise<void> {
 	// which would erase that distinction, so we capture it first. Falls back to
 	// the session's most-recently-active client when no attached client currently
 	// has this window on screen (e.g. the user navigated away in every tab).
-	let tty = windowId ? await clientTtyForWindow(windowId) : null;
+	let tty = windowId ? pickTtyForWindow(clientRows, windowId) : null;
 	if (!tty) tty = await clientTtyForSession(session);
 	debugFocus(`[focus] pane=${pane} window=${windowId} session=${session} tty=${tty ?? '<none>'}`);
 
@@ -288,43 +262,54 @@ export async function focusPane(pane: string): Promise<void> {
 	// across windows wouldn't switch), and select-window alone falls back to
 	// whichever pane was last active (wrong when two Claude panes share a
 	// window). Chained in one tmux invocation via ';' to avoid a second process
-	// spawn.
-	try {
-		await execFileAsync('tmux', [
-			'select-window',
-			'-t',
-			pane,
-			';',
-			'select-pane',
-			'-t',
-			pane
-		]);
-	} catch {
-		throw new FocusError(`tmux select-window/select-pane failed for '${pane}'`);
-	}
+	// spawn. It runs CONCURRENTLY with the osascript raise below: the two act on
+	// different layers (tmux content inside the client vs Terminal window
+	// z-order) and neither reads state the other writes — the tty was already
+	// resolved above — so overlapping them takes the ~30ms tmux call off the
+	// critical path. The failure is captured (not thrown) so the raise's own
+	// error handling stays intact, and re-checked after the raise.
+	const selectFailure = execFileAsync('tmux', [
+		'select-window',
+		'-t',
+		pane,
+		';',
+		'select-pane',
+		'-t',
+		pane
+	]).then(
+		() => null,
+		() => new FocusError(`tmux select-window/select-pane failed for '${pane}'`)
+	);
 
 	// const pre = await captureTerminalState();
 	// console.log(`[focus] state pre=${pre}`);
 
 	const cached = tty ? ttyToTab.get(tty) ?? null : null;
+	const tRaise = Date.now();
+	let so: string;
 	try {
-		const { stdout, stderr } = await execFileAsync('osascript', [
-			'-e',
-			raiseTerminalScript(tty, cached)
-		]);
-		const so = stdout.trim();
-		const se = stderr.trim();
-		if (se) console.log(`[focus] osascript stderr=${se}`);
-		if (tty) {
-			const result = parseActivateResult(so);
-			applyActivateResult(ttyToTab, tty, result);
-			debugFocus(`[focus] activate tty=${tty} result=${so || '<empty>'} cached=${cached ? 'y' : 'n'}`);
-		}
+		so = (await raiseTab(tty, cached)).trim();
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		console.log(`[focus] osascript threw: ${msg}`);
-		throw new FocusError('osascript Terminal.app activate failed');
+		console.log(`[focus] focus host threw: ${msg}`);
+		throw new FocusError('Terminal raise failed');
 	}
+	// 'error:' is the host's in-band failure token (its handler threw — e.g.
+	// Terminal quit mid-request). Loud like the throw above, not a silent miss.
+	if (so.startsWith('error:')) {
+		console.log(`[focus] focus host ${so}`);
+		throw new FocusError('Terminal raise failed');
+	}
+	if (tty) {
+		const result = parseActivateResult(so);
+		applyActivateResult(ttyToTab, tty, result);
+		debugFocus(
+			`[focus] activate tty=${tty} result=${so || '<empty>'} cached=${cached ? 'y' : 'n'} osa=${Date.now() - tRaise}ms`
+		);
+	}
+
+	const selectErr = await selectFailure;
+	if (selectErr) throw selectErr;
 
 	// const post = await captureTerminalState();
 	// const moved = pre !== post;
@@ -366,12 +351,22 @@ export async function attachSession(pane: string): Promise<void> {
 
 	// Escape for embedding in the AppleScript string literal, then wrap the
 	// session in shell quotes inside the command so a name with spaces still
-	// resolves. `do script` runs the command in a new Terminal window.
+	// resolves. `do script` runs the command in a new Terminal window (and
+	// launches Terminal if it isn't running). The raise goes through System
+	// Events `set frontmost of process` for the same reason as
+	// raiseTerminalScript: AppleScript `activate` blocks ~2s per call on a
+	// degraded WindowServer/LaunchServices, and this machine pays that cost
+	// chronically. `activate` survives only as the on-error fallback for when
+	// the process can't be addressed yet.
 	const escapedSession = session.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 	const script = `tell application "Terminal"
 	do script "tmux attach -t \\"${escapedSession}\\""
-	activate
-end tell`;
+end tell
+try
+	tell application "System Events" to set frontmost of process "Terminal" to true
+on error
+	tell application "Terminal" to activate
+end try`;
 
 	try {
 		await execFileAsync('osascript', ['-e', script]);
