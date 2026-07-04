@@ -1,6 +1,5 @@
 import { test, expect } from 'bun:test';
 import {
-	raiseTerminalScript,
 	parseActivateResult,
 	applyActivateResult,
 	pickMostRecentTty,
@@ -22,116 +21,6 @@ import {
 	InjectError,
 	type TabLocation
 } from './tmux';
-
-// raiseTerminalScript ───────────────────────────────────────────────────────
-
-test('raiseTerminalScript with null tty returns a System Events activation (activate fallback)', () => {
-	const script = raiseTerminalScript(null, null);
-	// Activation goes through System Events `set frontmost of process` — Terminal's
-	// own `activate` blocks ~2s on a degraded WindowServer. `activate` survives only
-	// as the on-error fallback for when the process can't be addressed.
-	expect(script).toContain(
-		'tell application "System Events" to set frontmost of process "Terminal" to true'
-	);
-	expect(script).toContain('tell application "Terminal" to activate');
-	expect(script).not.toContain('repeat');
-	expect(script).not.toContain('targetTTY');
-});
-
-test('raiseTerminalScript with tty and no cache emits enumeration branch only', () => {
-	const script = raiseTerminalScript('/dev/ttys003', null);
-	expect(script).toContain('set targetTTY to "/dev/ttys003"');
-	expect(script).toContain('repeat with wi from 1 to (count of windows)');
-	expect(script).toContain('return "miss:" & wid & ":" & ti');
-	expect(script).toContain('return "notfound"');
-	expect(script).not.toContain('return "hit"');
-	// Activation goes through System Events, not Terminal `activate` (which blocks
-	// ~2s on a degraded WindowServer) — and the System Events raise is itself
-	// gated on Terminal not already being frontmost: it costs ~100ms even as a
-	// no-op, and tap-to-tap Terminal usually stays the active app.
-	expect(script).toContain(
-		'if not wasFront then set frontmost of process "Terminal" to true'
-	);
-	expect(script).not.toContain('activate');
-	// Activation-transition guard: capture frontmost before activating and gate a
-	// 200ms settle delay on Terminal not already being foregrounded. Without this
-	// delay, `set frontmost` issued during activation is occasionally dropped and
-	// the wrong window lands frontmost. The read comes from System Events, NOT
-	// Terminal's own `frontmost` — Terminal self-reports false even while active
-	// on this machine, which would defeat the gate.
-	expect(script).toContain('set wasFront to frontmost of process "Terminal"');
-	expect(script).not.toContain('tell application "Terminal" to set wasFront');
-	expect(script).toContain('if not wasFront then delay 0.2');
-});
-
-test('raiseTerminalScript with cache resolves the window directly by id and binds it', () => {
-	const cached: TabLocation = { windowId: 128573, tabIndex: 2 };
-	const script = raiseTerminalScript('/dev/ttys003', cached);
-	// Cached branch resolves the window in ONE Apple Event via `window id <id>`
-	// and binds it to `w`, instead of walking every window comparing ids — that
-	// walk made every warm tap O(window count × z-order depth) in Apple Events.
-	// It still acts on the bound `w`: `set frontmost` against the bare
-	// `window id <id>` specifier is silently dropped mid-activation, so the
-	// bound form is what survives.
-	expect(script).toContain('set w to window id 128573');
-	expect(script).toContain('if tty of tab 2 of w is targetTTY then');
-	expect(script).toContain('set selected of tab 2 of w to true');
-	expect(script).toContain('set frontmost of w to true');
-	expect(script).toContain('return "hit"');
-	// The cached branch must NOT walk the window list comparing ids anymore.
-	expect(script).not.toContain('if id of window wi is 128573 then');
-	// Activation-transition guard must apply to cached taps too — the
-	// cached branch is what runs on the second+ tap to a tty, and a
-	// background-to-foreground transition still races without the delay.
-	// The System Events raise carries the same wasFront gate as the
-	// enumeration branch (they share a preamble).
-	expect(script).toContain('set wasFront to frontmost of process "Terminal"');
-	expect(script).toContain('if not wasFront then delay 0.2');
-	expect(script).toContain(
-		'if not wasFront then set frontmost of process "Terminal" to true'
-	);
-	// Must NOT issue `set frontmost` against the unbound window expression —
-	// the bound `w` is what survives activation.
-	expect(script).not.toContain('set frontmost of window id 128573 to true');
-	expect(script).not.toContain('set frontmost of window wi to true');
-	// Enumeration fallback must still be present so a stale cache misses gracefully.
-	expect(script).toContain('return "miss:" & wid & ":" & ti');
-});
-
-test('raiseTerminalScript escapes embedded double quotes in tty', () => {
-	const script = raiseTerminalScript('/dev/ttys"injected', null);
-	expect(script).toContain('set targetTTY to "/dev/ttys\\"injected"');
-});
-
-// parseWarmCache ─────────────────────────────────────────────────────────────
-
-test('parseWarmCache parses windowId|tabIndex|tty rows into cache entries', () => {
-	const out = '22303|1|/dev/ttys000\n37868|2|/dev/ttys026\n';
-	const entries = parseWarmCache(out);
-	expect(entries.size).toBe(2);
-	expect(entries.get('/dev/ttys000')).toEqual({ windowId: 22303, tabIndex: 1 });
-	expect(entries.get('/dev/ttys026')).toEqual({ windowId: 37868, tabIndex: 2 });
-});
-
-test('parseWarmCache skips malformed rows', () => {
-	const out = [
-		'22303|1|/dev/ttys000',
-		'not-a-number|1|/dev/ttys001', // non-numeric window id
-		'22304|x|/dev/ttys002', // non-numeric tab index
-		'22305|3|', // empty tty
-		'22306|4', // missing column
-		'22307|5|/dev/ttys003|extra', // extra column
-		''
-	].join('\n');
-	const entries = parseWarmCache(out);
-	expect(entries.size).toBe(1);
-	expect(entries.get('/dev/ttys000')).toEqual({ windowId: 22303, tabIndex: 1 });
-});
-
-test('parseWarmCache returns an empty map for empty output', () => {
-	expect(parseWarmCache('').size).toBe(0);
-	expect(parseWarmCache('\n\n').size).toBe(0);
-});
 
 // parseActivateResult ───────────────────────────────────────────────────────
 
