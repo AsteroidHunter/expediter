@@ -7,6 +7,16 @@ export type SessionEntry = {
 	tmux_pane: string;
 	cwd: string;
 	transcript_path: string;
+	// True for a session running on another machine over ssh: tmux_pane is the
+	// local pane holding the ssh client, transcript_path is a far-side path
+	// (stored, never read — decision 9), and prune/reseed judge liveness by
+	// pane existence rather than pane-runs-claude. Absent means local.
+	remote?: boolean;
+	// Latest payload title for a remote session. The Mac can't read a remote
+	// transcript, so boot reseed recovers the title from here instead
+	// (decision 13). Absent for local sessions (their titles re-derive from
+	// the local transcript).
+	title?: string;
 };
 
 export type SessionsMap = Record<string, SessionEntry>;
@@ -56,12 +66,17 @@ export async function loadSessions(): Promise<SessionsMap> {
 		) {
 			continue;
 		}
-		map[key] = {
+		const entry: SessionEntry = {
 			session_id: v.session_id,
 			tmux_pane: v.tmux_pane,
 			cwd: v.cwd,
 			transcript_path: v.transcript_path
 		};
+		// Optional fields are copied only when well-typed, so a sessions.json
+		// written before these fields existed parses as local/untitled.
+		if (v.remote === true) entry.remote = true;
+		if (typeof v.title === 'string' && v.title) entry.title = v.title;
+		map[key] = entry;
 	}
 	return map;
 }
@@ -88,6 +103,19 @@ async function writeSessions(map: SessionsMap): Promise<void> {
 export async function recordSession(entry: SessionEntry): Promise<void> {
 	const map = await loadSessions();
 	map[entry.session_id] = entry;
+	await writeSessions(map);
+}
+
+// Updates the persisted title of an existing entry — the write path behind
+// decision 13 (remote titles must survive a daemon restart, and the transcript
+// they'd otherwise re-derive from is on the far box). No-ops when the entry is
+// missing (SessionStart hasn't landed yet) or the title is unchanged, so the
+// per-event call from the hook handler stays write-free in the steady state.
+export async function updateSessionTitle(session_id: string, title: string): Promise<void> {
+	const map = await loadSessions();
+	const entry = map[session_id];
+	if (!entry || entry.title === title) return;
+	entry.title = title;
 	await writeSessions(map);
 }
 
