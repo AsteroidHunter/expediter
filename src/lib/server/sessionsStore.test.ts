@@ -7,6 +7,7 @@ import {
 	recordSession,
 	forgetSession,
 	pruneStaleSessions,
+	updateSessionTitle,
 	type SessionEntry
 } from './sessionsStore';
 
@@ -98,6 +99,68 @@ test('pruneStaleSessions drops entries whose tmux_pane is not in the live set', 
 test('pruneStaleSessions on a missing file is a no-op', async () => {
 	await pruneStaleSessions(new Set(['%1']), new Set(['%1']));
 	expect(await loadSessions()).toEqual({});
+});
+
+// Remote entries are judged by the all-panes set; local entries stay on the
+// claude-pane set. A local entry whose pane exists but no longer runs claude
+// must drop even though the pane itself is alive.
+test('pruneStaleSessions keeps remote entries on live non-claude panes and drops dead ones', async () => {
+	await recordSession({ ...makeEntry('remote-live', '%10'), remote: true });
+	await recordSession({ ...makeEntry('remote-dead', '%11'), remote: true });
+	await recordSession(makeEntry('local-on-ssh-pane', '%10'));
+
+	// %10 exists (running ssh) but is not a claude pane; %11 is gone entirely.
+	await pruneStaleSessions(new Set<string>(), new Set(['%10']));
+
+	const map = await loadSessions();
+	expect(map['remote-live']).toBeDefined();
+	expect(map['remote-dead']).toBeUndefined();
+	expect(map['local-on-ssh-pane']).toBeUndefined();
+});
+
+test('loadSessions round-trips remote/title and leaves them absent for local entries', async () => {
+	await recordSession({ ...makeEntry('r1', '%1'), remote: true, title: 'gpu box' });
+	await recordSession(makeEntry('l1', '%2'));
+
+	const map = await loadSessions();
+	expect(map['r1']?.remote).toBe(true);
+	expect(map['r1']?.title).toBe('gpu box');
+	expect(map['l1']?.remote).toBeUndefined();
+	expect(map['l1']?.title).toBeUndefined();
+});
+
+test('loadSessions drops ill-typed remote/title values instead of the whole entry', async () => {
+	const sessionsFile = process.env.EXPEDITER_SESSIONS_FILE!;
+	const { mkdirSync, writeFileSync } = await import('node:fs');
+	mkdirSync(path.dirname(sessionsFile), { recursive: true });
+	writeFileSync(
+		sessionsFile,
+		JSON.stringify({
+			odd: {
+				session_id: 'odd',
+				tmux_pane: '%5',
+				cwd: '/c',
+				transcript_path: '/t',
+				remote: 'yes',
+				title: 42
+			}
+		})
+	);
+
+	const map = await loadSessions();
+	expect(map['odd']).toBeDefined();
+	expect(map['odd']?.remote).toBeUndefined();
+	expect(map['odd']?.title).toBeUndefined();
+});
+
+test('updateSessionTitle updates an existing entry and no-ops on a missing one', async () => {
+	await recordSession({ ...makeEntry('titled', '%1'), remote: true, title: 'before' });
+
+	await updateSessionTitle('titled', 'after');
+	expect((await loadSessions())['titled']?.title).toBe('after');
+
+	await updateSessionTitle('ghost', 'anything');
+	expect((await loadSessions())['ghost']).toBeUndefined();
 });
 
 test('loadSessions drops malformed per-entry shapes but keeps valid ones', async () => {

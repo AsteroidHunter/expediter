@@ -15,6 +15,8 @@ import {
 } from '$lib/ticketStore';
 import { whimsicalName } from '$lib/whimsicalName';
 import { loadSessions } from '$lib/server/sessionsStore';
+import { setCorrelationDepsForTest, type CorrelationDeps } from '$lib/server/sshCorrelation';
+import type { PaneRow } from '$lib/server/bootScan';
 
 // Unique session_id per test so module-level state doesn't leak.
 let testCounter = 0;
@@ -582,6 +584,323 @@ test('Stop on a pane with a placeholder removes the placeholder first', async ()
 	expect(list().find((t) => t.session_id === 'pending:%33')).toBeUndefined();
 	expect(list().find((t) => t.session_id === id)?.event_type).toBe('Stop');
 
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// ─── remote sessions ────────────────────────────────────────────────────────
+
+// Stubbed correlation deps: one local pane %9 (shell pid 900) owning an ssh
+// client (pid 450) whose local port matches the SSH_CONNECTION below. The
+// setCorrelationDepsForTest seam is reset after each remote test.
+const REMOTE_CONN = '100.64.0.7 52814 10.1.2.3 22';
+
+function remotePane(pane_id: string, pane_pid: number, cmd = 'zsh'): PaneRow {
+	return {
+		pane_id,
+		pane_pid,
+		pane_current_command: cmd,
+		pane_current_path: '/',
+		session_attached: true
+	};
+}
+
+function stubCorrelation(overrides: Partial<CorrelationDeps> = {}): void {
+	setCorrelationDepsForTest({
+		loadSessions: async () => ({}),
+		listPanes: async () => [remotePane('%9', 900)],
+		lsofEstablishedPids: async () => [450],
+		processCommand: async () => 'ssh',
+		parentPid: async (pid) => (pid === 450 ? 900 : null),
+		...overrides
+	});
+}
+
+function useTempSessionsFileForRemote(): { dir: string; done: () => void } {
+	const dir = mkdtempSync(path.join(os.tmpdir(), 'expediter-remote-'));
+	process.env.EXPEDITER_SESSIONS_FILE = path.join(dir, 'sessions.json');
+	return {
+		dir,
+		done: () => {
+			delete process.env.EXPEDITER_SESSIONS_FILE;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	};
+}
+
+// A remote SessionStart correlates the pane, upserts a remote ticket carrying
+// the payload title, and persists remote+title to sessions.json for reseed.
+test('remote SessionStart resolves the pane and upserts a remote ticket with the payload title', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const id = nextId();
+	const result = await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/home/user/proj',
+		transcript_path: '/remote/home/user/.claude/projects/x/t.jsonl',
+		title: 'gpu box refactor'
+	});
+	expect(result.status).toBe(200);
+
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.tmux_pane).toBe('%9');
+	expect(ticket?.remote).toBe(true);
+	expect(ticket?.event_type).toBe('Idle');
+	expect(ticket?.title).toBe('gpu box refactor');
+
+	await new Promise((r) => setTimeout(r, 50));
+	const persisted = await loadSessions();
+	expect(persisted[id]?.remote).toBe(true);
+	expect(persisted[id]?.title).toBe('gpu box refactor');
+	expect(persisted[id]?.tmux_pane).toBe('%9');
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// Decision 10: correlation failure is a loud 422 and no ticket — never an
+// unfocusable ticket.
+test('remote event with failed correlation returns 422 and creates no ticket', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation({ lsofEstablishedPids: async () => [] }); // walk dead-ends at lsof
+
+	const id = nextId();
+	const result = await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj'
+	});
+	expect(result.status).toBe(422);
+	expect(String((result.body as { error?: string }).error)).toContain('lsof');
+	expect(list().find((t) => t.session_id === id)).toBeUndefined();
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+});
+
+// remote:true with NEITHER identifier falls through to the existing 400, not
+// a correlation attempt (checklist 1.4).
+test('remote event with neither ssh_connection nor tmux_pane returns 400', async () => {
+	const result = await callHandler({
+		hook_event_name: 'Stop',
+		session_id: nextId(),
+		remote: true,
+		cwd: '/remote/proj'
+	});
+	expect(result.status).toBe(400);
+});
+
+// Decision 7: the payload title is cached and preferred over the whimsical
+// fallback, and persists across subsequent title-less events for the session.
+test('remote payload title is cached and preferred over the whimsical fallback', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		title: 'tunnel debugging'
+	});
+	expect(getCachedTitle(id)).toBe('tunnel debugging');
+	expect(list().find((t) => t.session_id === id)?.title).toBe('tunnel debugging');
+
+	// A later event without a title keeps the cached one.
+	await callHandler({
+		hook_event_name: 'PermissionRequest',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj'
+	});
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.title).toBe('tunnel debugging');
+	expect(ticket?.title).not.toBe(whimsicalName(id));
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// A remote title change mid-session (e.g. /rename on the far side) updates the
+// persisted sessions.json title so a daemon restart reseeds the new name
+// (decision 13).
+test('a changed remote payload title updates the persisted session title', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		transcript_path: '/remote/.claude/t.jsonl',
+		title: 'first name'
+	});
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		title: 'renamed session'
+	});
+
+	await new Promise((r) => setTimeout(r, 50));
+	expect((await loadSessions())[id]?.title).toBe('renamed session');
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// Decision 9: local transcript reads are gated off for remote sessions. The
+// transcript here is deliberately a READABLE local file with a custom-title
+// line — if the SessionStart pre-fill or topic refresh ran anyway, the cache
+// would pick up "local leak"; it must stay empty (whimsical ticket).
+test('remote SessionStart skips the local transcript pre-fill even for a readable path', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const transcriptDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const transcriptFile = path.join(transcriptDir, 'transcript.jsonl');
+	writeFileSync(
+		transcriptFile,
+		JSON.stringify({ type: 'custom-title', customTitle: 'local leak' }) + '\n'
+	);
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		transcript_path: transcriptFile
+		// no payload title
+	});
+
+	await new Promise((r) => setTimeout(r, 80)); // pre-fill would have landed by now
+	expect(getCachedTitle(id)).toBe('');
+	expect(list().find((t) => t.session_id === id)?.title).toBe(whimsicalName(id));
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	rmSync(transcriptDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// Remote PermissionRequests get no decline watcher (the real transcript is on
+// the far box). A denial line appended to a readable local file at the same
+// path must therefore have no effect.
+test('remote PermissionRequest spawns no decline watcher', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const tempDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const tempFile = path.join(tempDir, 'transcript.jsonl');
+	writeFileSync(tempFile, '');
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'PermissionRequest',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		transcript_path: tempFile
+	});
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('PermissionRequest');
+
+	await new Promise((r) => setTimeout(r, 80));
+	appendFileSync(
+		tempFile,
+		JSON.stringify({
+			type: 'user',
+			message: {
+				content: [
+					{
+						type: 'tool_result',
+						is_error: true,
+						content: "The user doesn't want to proceed with this tool use."
+					}
+				]
+			}
+		}) + '\n'
+	);
+	await new Promise((r) => setTimeout(r, 250));
+
+	// Still PermissionRequest — a watcher would have lifted it to Stop.
+	expect(list().find((t) => t.session_id === id)?.event_type).toBe('PermissionRequest');
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	rmSync(tempDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// The steady-state fast path: after SessionStart records the session, a
+// follow-up event resolves through sessions.json + live-pane validation and
+// never needs lsof.
+test('a follow-up remote event resolves via the sessions.json fast path (no lsof)', async () => {
+	const temp = useTempSessionsFileForRemote();
+	let lsofCalls = 0;
+	// loadSessions dep must be the REAL one so the fast path sees what the
+	// handler recorded; only count lsof to prove the slow path stayed cold
+	// after the first event.
+	const { loadSessions: realLoad } = await import('$lib/server/sessionsStore');
+	setCorrelationDepsForTest({
+		loadSessions: realLoad,
+		listPanes: async () => [remotePane('%9', 900)],
+		lsofEstablishedPids: async () => {
+			lsofCalls++;
+			return [450];
+		},
+		processCommand: async () => 'ssh',
+		parentPid: async (pid) => (pid === 450 ? 900 : null)
+	});
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		transcript_path: '/remote/.claude/t.jsonl'
+	});
+	const afterStart = lsofCalls;
+
+	const followUp = await callHandler({
+		hook_event_name: 'UserPromptSubmit',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj'
+	});
+	expect((followUp.body as { action?: string }).action).toBe('marked_working');
+	expect(list().find((t) => t.session_id === id)?.working).toBe(true);
+	expect(lsofCalls).toBe(afterStart); // fast path — lsof never ran again
+
+	setCorrelationDepsForTest(null);
+	temp.done();
 	remove(id);
 	deleteSessionTopic(id);
 });
