@@ -87,7 +87,7 @@ test('pruneStaleSessions drops entries whose tmux_pane is not in the live set', 
 	await recordSession(makeEntry('drop-me', '%2'));
 	await recordSession(makeEntry('also-keep', '%3'));
 
-	await pruneStaleSessions(new Set(['%1', '%3']));
+	await pruneStaleSessions(new Set(['%1', '%3']), new Set(['%1', '%3']));
 
 	const map = await loadSessions();
 	expect(map['keep-me']).toBeDefined();
@@ -96,7 +96,7 @@ test('pruneStaleSessions drops entries whose tmux_pane is not in the live set', 
 });
 
 test('pruneStaleSessions on a missing file is a no-op', async () => {
-	await pruneStaleSessions(new Set(['%1']));
+	await pruneStaleSessions(new Set(['%1']), new Set(['%1']));
 	expect(await loadSessions()).toEqual({});
 });
 

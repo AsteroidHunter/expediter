@@ -126,14 +126,21 @@ export async function forgetSession(session_id: string): Promise<void> {
 	await writeSessions(map);
 }
 
-// Drops every entry whose tmux_pane isn't in the live set. Called once at
-// boot to clean up orphans left behind by SIGKILL'd claudes (where SessionEnd
-// never fired). No-ops the write if nothing changed.
-export async function pruneStaleSessions(livePaneIds: Set<string>): Promise<void> {
+// Drops every entry whose tmux_pane is no longer alive, cleaning up orphans
+// left behind by SIGKILL'd claudes (where SessionEnd never fired). Liveness is
+// judged per entry: a local entry's pane must still run claude
+// (liveClaudePaneIds), while a remote entry's pane runs `ssh` by design, so
+// mere pane existence (allPaneIds) is the strongest liveness signal this
+// machine has for it. No-ops the write if nothing changed.
+export async function pruneStaleSessions(
+	liveClaudePaneIds: Set<string>,
+	allPaneIds: Set<string>
+): Promise<void> {
 	const map = await loadSessions();
 	let changed = false;
 	for (const [key, entry] of Object.entries(map)) {
-		if (!livePaneIds.has(entry.tmux_pane)) {
+		const liveSet = entry.remote ? allPaneIds : liveClaudePaneIds;
+		if (!liveSet.has(entry.tmux_pane)) {
 			delete map[key];
 			changed = true;
 		}
