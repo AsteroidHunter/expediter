@@ -20,7 +20,11 @@
 #      ~/.tmux.conf, plus the "# Added/Created by Expediter installer" comment
 #      that install.sh wrote above it. Deletes the file if nothing else is in
 #      it. Backs up before touching.
-#   8. Removes ~/.expediter-install.log.
+#   8. Splices the marker-delimited remote-sessions block (Host +
+#      RemoteForward) out of ~/.ssh/config. Backs up first. Never deletes the
+#      file itself, even if it ends up empty — an empty ssh config is
+#      equivalent to a missing one, and nothing in ~/.ssh gets deleted.
+#   9. Removes ~/.expediter-install.log.
 #
 # What it does NOT do:
 #   - Touch the cloned Expediter repo (delete it yourself if you want).
@@ -42,6 +46,7 @@ CONFIG_DIR="$HOME/.config/expediter"
 CONFIG_FILE="$CONFIG_DIR/config"
 SETTINGS="$HOME/.claude/settings.json"
 TMUX_CONF="$HOME/.tmux.conf"
+SSH_CONFIG="$HOME/.ssh/config"
 INSTALL_LOG="$HOME/.expediter-install.log"
 
 # --- flags -----------------------------------------------------------------
@@ -225,8 +230,9 @@ fi
 if [ "$VERBOSE" = 1 ]; then
 	printf '\nThis will remove the expediter shims, the config file, the hook entries\n'
 	printf 'from your claude code settings, the source-file line from your tmux conf,\n'
-	printf 'and the install log. It will NOT touch the cloned repo, claude code,\n'
-	printf 'homebrew, tmux, bun, your PATH, or any install-time backups.\n\n'
+	printf 'the remote-sessions block from your ssh config, and the install log. It\n'
+	printf 'will NOT touch the cloned repo, claude code, homebrew, tmux, bun, your\n'
+	printf 'PATH, or any install-time backups.\n\n'
 	prompt_keypress "yn" "Continue? (y / n) "
 else
 	printf 'Are you sure you want to uninstall expediter? '
@@ -442,9 +448,62 @@ else
 	printf '%s⊘%s No expediter entries in ~/.tmux.conf (or no .tmux.conf).\n' "$DIM" "$RESET"
 fi
 
-# --- 7. Install log --------------------------------------------------------
+# --- 7. ssh config -----------------------------------------------------------
 
-section "6. Install log"
+section "6. Remote tunnel"
+printf 'Removing the expediter remote-sessions block from ~/.ssh/config.\n'
+printf 'A timestamped backup is saved first.\n\n'
+
+if [ -f "$SSH_CONFIG" ] && grep -Fq "# >>> expediter remote-sessions >>>" "$SSH_CONFIG"; then
+	BACKUP="$SSH_CONFIG.expediter-uninstall-bak.$TIMESTAMP"
+	cp "$SSH_CONFIG" "$BACKUP"
+	printf '%s✓%s Backed up ~/.ssh/config → %s\n' "$GREEN" "$RESET" "$BACKUP"
+
+	# Splice every marker-delimited block (a corrupt/unterminated block is
+	# swallowed to EOF), plus the single blank line the installer left above
+	# it. Unlike the tmux.conf splice, the file is never deleted even when it
+	# ends up empty: an empty ssh config behaves exactly like a missing one,
+	# and we don't delete anything under ~/.ssh on principle.
+	count=$(python3 - "$SSH_CONFIG" <<'PY'
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+BEGIN = "# >>> expediter remote-sessions >>>"
+END = "# <<< expediter remote-sessions <<<"
+
+lines = config_path.read_text().splitlines()
+out = []
+i = 0
+removed = 0
+while i < len(lines):
+    if lines[i].strip() == BEGIN:
+        j = i + 1
+        while j < len(lines) and lines[j].strip() != END:
+            j += 1
+        removed += 1
+        i = j + 1
+        if out and not out[-1].strip():
+            out.pop()
+        continue
+    out.append(lines[i])
+    i += 1
+
+while out and not out[-1].strip():
+    out.pop()
+
+config_path.write_text(("\n".join(out) + "\n") if out else "")
+print(removed)
+PY
+)
+	printf '%s✓%s Removed %s remote-sessions block(s) from ~/.ssh/config.\n' "$GREEN" "$RESET" "$count"
+else
+	printf '%s⊘%s No expediter block in ~/.ssh/config (or no config file).\n' "$DIM" "$RESET"
+fi
+
+# --- 8. Install log --------------------------------------------------------
+
+section "7. Install log"
 printf 'Removing ~/.expediter-install.log.\n\n'
 
 if [ -f "$INSTALL_LOG" ]; then

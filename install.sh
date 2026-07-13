@@ -16,6 +16,9 @@
 #   7. Offers to merge Expediter's hook entries into ~/.claude/settings.json,
 #      with a timestamped backup.
 #   8. Offers to source expediter.tmux.conf from ~/.tmux.conf, with backup.
+#   9. Optionally writes a marker-delimited Host block with
+#      `RemoteForward 5179 localhost:5179` to ~/.ssh/config for remote-session
+#      tickets (skippable; idempotent — re-runs rewrite the block in place).
 
 set -euo pipefail
 
@@ -547,6 +550,103 @@ case "$REPLY" in
 		spinner "Polishing tmux ..." "tmux polished!" polish_tmux
 		;;
 esac
+
+# --- 5. Remote sessions (optional) ------------------------------------------
+
+# write_remote_block <patterns> — write (or rewrite in place) the
+# marker-delimited expediter block in ~/.ssh/config:
+#
+#   # >>> expediter remote-sessions >>>
+#   Host <patterns>
+#     RemoteForward 5179 localhost:5179
+#   # <<< expediter remote-sessions <<<
+#
+# The RemoteForward makes the remote box's localhost:5179 reach this Mac's
+# daemon, so the (unmodified) hook URL works there. Scoped to the named Host
+# patterns, never `Host *` — a global tunnel would expose the daemon's
+# loopback-trusted hook endpoint to every box the user ever sshes into.
+# Timestamped backup first when the file has content; markers make re-runs
+# idempotent (the block is replaced, not stacked).
+write_remote_block() {
+	local patterns="$1"
+	local ssh_dir="$HOME/.ssh"
+	local ssh_config="$ssh_dir/config"
+	if [ ! -d "$ssh_dir" ]; then
+		mkdir -p "$ssh_dir"
+		chmod 700 "$ssh_dir"
+	fi
+	if [ ! -f "$ssh_config" ]; then
+		: > "$ssh_config"
+		chmod 600 "$ssh_config"
+	elif [ -s "$ssh_config" ]; then
+		cp "$ssh_config" "$ssh_config.expediter-bak.$(date +%Y%m%d-%H%M%S)"
+	fi
+	python3 - "$ssh_config" "$patterns" <<'PY'
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+patterns = sys.argv[2]
+
+BEGIN = "# >>> expediter remote-sessions >>>"
+END = "# <<< expediter remote-sessions <<<"
+
+block = [
+    BEGIN,
+    f"Host {patterns}",
+    "  RemoteForward 5179 localhost:5179",
+    END,
+]
+
+lines = config_path.read_text().splitlines()
+
+out = []
+i = 0
+replaced = False
+while i < len(lines):
+    if lines[i].strip() == BEGIN:
+        # Skip through the old block (to END, or EOF if unterminated) and
+        # emit the fresh one in its place. A duplicate stray block from a
+        # hand-edit is collapsed rather than preserved.
+        j = i + 1
+        while j < len(lines) and lines[j].strip() != END:
+            j += 1
+        if not replaced:
+            out.extend(block)
+            replaced = True
+        i = j + 1
+        continue
+    out.append(lines[i])
+    i += 1
+
+if not replaced:
+    if out and out[-1].strip():
+        out.append("")
+    out.extend(block)
+
+config_path.write_text("\n".join(out) + "\n")
+PY
+}
+
+SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
+section "5. Remote sessions (optional)"
+printf 'Run claude on other machines over ssh and get tickets for them too.\n'
+printf 'Enter the ssh host pattern(s) to enable, space-separated, exactly as you\n'
+printf 'type them after `ssh` (e.g. `devbox` or `devbox ml-rig`). Each host also\n'
+printf 'needs a one-time run of install-remote.sh on its side -- see the README'\''s\n'
+printf 'Remote sessions section. Press enter to skip.\n\n'
+
+printf 'hosts: '
+read -r REMOTE_HOSTS || REMOTE_HOSTS=""
+# Trim surrounding whitespace; an all-whitespace answer means skip.
+REMOTE_HOSTS="$(printf '%s' "$REMOTE_HOSTS" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+if [ -z "$REMOTE_HOSTS" ]; then
+	printf '\n%s⊘%s Skipped. Re-run ./install.sh anytime to add remote hosts.\n' "$DIM" "$RESET"
+else
+	write_remote_block "$REMOTE_HOSTS"
+	printf '\n%s✓%s Reverse-tunnel block written to ~/.ssh/config for: %s\n' "$GREEN" "$RESET" "$REMOTE_HOSTS"
+fi
 
 # --- done ------------------------------------------------------------------
 

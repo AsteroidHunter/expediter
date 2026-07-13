@@ -53,6 +53,7 @@ cd expediter
    - `claudex` -- opens a fresh tmux session with `claude` and `expediter` in side-by-side panes, so you can start a session with one command.
 6. Offer to merge Expediter's hook entries into `~/.claude/settings.json` (with a timestamped backup).
 7. Offer to apply Expediter's tmux styling via `source-file` in `~/.tmux.conf` (with a backup if you already have one).
+8. Ask which ssh hosts (if any) should get remote-session tickets, and write a scoped `RemoteForward` block to `~/.ssh/config` for them (skippable; see [Remote sessions](#remote-sessions-ssh)).
 
 </details>
 
@@ -109,6 +110,26 @@ Expediter needs your phone to reach your Mac at its LAN IP. That's fine on home 
 If you switch networks (say, coffee shop to home), your Mac gets a new IP and the old QR points at the wrong address. Re-run `expediter` to get a fresh one.
 
 **Not on the same network at all?** If both devices run [Tailscale](https://tailscale.com/), `expediter --tailscale` puts your Mac's tailnet address in the QR instead of the LAN IP, so your phone can connect from anywhere -- cellular included, and it sidesteps client isolation too. The flag applies to that run only; the certificate step is the same one-time flow.
+
+## Remote sessions (ssh)
+
+Claude running on another machine -- a dev server, a shared GPU box -- can get tickets too. The topology: tmux stays on your Mac, a local pane runs `ssh <host>`, and claude runs there in the plain ssh session (no tmux needed on the remote). Tickets behave exactly like local ones: they show on your phone, tap-to-focus raises the local ssh pane, `/rename` titles carry over, and tickets survive daemon restarts.
+
+**One-time setup, two halves:**
+
+1. **Mac side** -- the installer's "Remote sessions" prompt writes a reverse-tunnel block for your chosen host(s) into `~/.ssh/config` (`RemoteForward 5179 localhost:5179`, scoped to those hosts only, marker-delimited so re-runs rewrite it cleanly). Skipped it during install? Just re-run `./install.sh` -- it's idempotent.
+2. **Remote side** -- copy the mini-client over and run it:
+
+   ```bash
+   scp install-remote.sh bin/expediter-hook.sh <host>:
+   ssh <host> bash install-remote.sh
+   ```
+
+   It needs only `python3` and `curl`, touches nothing outside your home directory on that box (fine for shared machines, no root), and merges the same hook entries into the remote's `~/.claude/settings.json`.
+
+**Steady state: `ssh <host>`, run `claude`. That's it** -- no wrapper commands, no flags, no per-session setup. The hook on the remote notices it's in an ssh session, sends its events through the tunnel, and the daemon matches the connection back to the exact local pane holding your `ssh` -- so multiple sessions to the same host each get their own ticket.
+
+**When it won't work (and fails loudly):** the daemon matches remote events to panes by the ssh connection's client port, so anything that obscures that port breaks the match -- source-NAT between Mac and remote, `ProxyJump`/`mosh`, or ssh connection multiplexing (`ControlMaster`). In those cases events are rejected with a logged reason and no ticket appears; you'll never get a ticket that can't focus. Two honest limits: the Mac can't see whether the far-end claude itself is alive (a ticket lives as long as its local ssh pane does), and if someone else on a shared box already holds port 5179, the tunnel silently stays closed -- no tickets until the port frees up.
 
 ## Security & access control
 
@@ -171,7 +192,8 @@ Contributors working on a branch can skip the pull with `expediter update --dev`
 4. Remove `~/.config/expediter/config` (and the parent directory if it ends up empty).
 5. Splice Expediter's hook entries out of `~/.claude/settings.json` (timestamped backup first).
 6. Splice the `source-file` line for `expediter.tmux.conf` out of `~/.tmux.conf` (timestamped backup first; deletes the file if it ends up empty).
-7. Remove `~/.expediter-install.log`.
+7. Splice the remote-sessions `RemoteForward` block out of `~/.ssh/config` (timestamped backup first; never deletes the file itself).
+8. Remove `~/.expediter-install.log`.
 
 It does NOT touch the cloned repo, Claude Code, Homebrew, tmux, Bun, your `PATH`, or any install-time backups.
 
