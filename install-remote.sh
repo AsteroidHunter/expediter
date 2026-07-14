@@ -2,7 +2,7 @@
 # install-remote.sh — set up the Expediter mini-client on a REMOTE box.
 #
 # Run this ON the remote machine (the one you ssh into and run claude on).
-# The normal path: on the Mac run `expediter remote install <host>`, then ssh
+# The normal path: on the Mac run `expediter install remote <host>`, then ssh
 # into the box as usual and paste the command it printed:
 #
 #   curl -fsSL https://raw.githubusercontent.com/AsteroidHunter/expediter/main/install-remote.sh | bash
@@ -31,7 +31,7 @@
 # How it works afterwards: the hook script detects it is in an ssh session
 # (no $TMUX_PANE, $SSH_CONNECTION set) and POSTs each claude event to
 # localhost:5179 — which the RemoteForward tunnel, written into the Mac's
-# ~/.ssh/config by `expediter remote install <host>`, carries back to the Mac
+# ~/.ssh/config by `expediter install remote <host>`, carries back to the Mac
 # daemon. Steady state is zero-friction: `ssh <host>`, run `claude`, tickets
 # appear.
 
@@ -309,5 +309,5 @@ fi
 printf '\n✦ Expediter mini-client is ready on this machine.\n\n'
 printf 'Reminders:\n'
 printf '  - The Mac side needs the reverse-tunnel block in ~/.ssh/config for this\n'
-printf '    host (`expediter remote install <host>` on the Mac writes it).\n'
+printf '    host (`expediter install remote <host>` on the Mac writes it).\n'
 printf '  - Steady state: ssh in from a local tmux pane and run `claude`. Nothing else.\n'
