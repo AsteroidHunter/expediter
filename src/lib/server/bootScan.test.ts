@@ -5,7 +5,8 @@ import os from 'node:os';
 import {
 	slugify,
 	parsePaneRows,
-	isClaudePane,
+	paneAgent,
+	isLocalAgentPane,
 	parseSessionMeta,
 	upsertPlaceholder,
 	runBootScan,
@@ -79,7 +80,7 @@ test('parsePaneRows handles trailing newline gracefully', () => {
 	expect(parsePaneRows('%1|1|claude|1|/p\n').length).toBe(1);
 });
 
-// ─── isClaudePane ──────────────────────────────────────────────────────────
+// ─── paneAgent / isLocalAgentPane ──────────────────────────────────────────
 
 function row(cmd: string): PaneRow {
 	return {
@@ -91,16 +92,25 @@ function row(cmd: string): PaneRow {
 	};
 }
 
-test('isClaudePane accepts claude and claude.exe', () => {
-	expect(isClaudePane(row('claude'))).toBe(true);
-	expect(isClaudePane(row('claude.exe'))).toBe(true);
+test('paneAgent classifies claude and codex panes', () => {
+	expect(paneAgent(row('claude'))).toBe('claude');
+	expect(paneAgent(row('claude.exe'))).toBe('claude');
+	expect(paneAgent(row('codex'))).toBe('codex');
+	expect(paneAgent(row('codex.exe'))).toBe('codex');
 });
 
-test('isClaudePane rejects bash, vim, and look-alikes', () => {
-	expect(isClaudePane(row('bash'))).toBe(false);
-	expect(isClaudePane(row('vim'))).toBe(false);
-	expect(isClaudePane(row('claudette'))).toBe(false);
-	expect(isClaudePane(row('myclaude'))).toBe(false);
+test('paneAgent rejects bash, vim, and look-alikes', () => {
+	expect(paneAgent(row('bash'))).toBeNull();
+	expect(paneAgent(row('vim'))).toBeNull();
+	expect(paneAgent(row('claudette'))).toBeNull();
+	expect(paneAgent(row('myclaude'))).toBeNull();
+	expect(paneAgent(row('codexx'))).toBeNull();
+});
+
+test('isLocalAgentPane covers both agents and rejects everything else', () => {
+	expect(isLocalAgentPane(row('claude'))).toBe(true);
+	expect(isLocalAgentPane(row('codex'))).toBe(true);
+	expect(isLocalAgentPane(row('ssh'))).toBe(false);
 });
 
 // ─── parseSessionMeta ──────────────────────────────────────────────────────
@@ -222,7 +232,7 @@ test('runBootScan prefers live metadata over a stale persisted entry for the sam
 	expect(list().find((t) => t.session_id === 'dead-session')).toBeUndefined();
 });
 
-test('runBootScan falls back to the persisted entry when no metadata matches the pane', async () => {
+test('runBootScan falls back to a pid-valid persisted entry when no metadata matches the pane', async () => {
 	useTempSessionsFile();
 	cleanups.push(() => {
 		remove('persisted-session');
@@ -233,18 +243,212 @@ test('runBootScan falls back to the persisted entry when no metadata matches the
 		session_id: 'persisted-session',
 		tmux_pane: '%50',
 		cwd: '/p',
-		transcript_path: '/p/x.jsonl'
+		transcript_path: '/p/x.jsonl',
+		agent_pid: 5001
 	});
 
 	const deps: BootScanDeps = {
 		listPanes: async () => [pane('%50', 5000, '/p')],
 		readSessionMetas: async () => [],
-		parentPid: async () => null
+		// The recorded agent pid is alive and still a child of the pane shell.
+		parentPid: async (pid) => (pid === 5001 ? 5000 : null)
 	};
 
 	await runBootScan(deps);
 
 	expect(list().find((t) => t.tmux_pane === '%50')?.session_id).toBe('persisted-session');
+});
+
+// ─── agent_pid boot guard (local entries only) ──────────────────────────────
+
+// A persisted local entry whose agent_pid is DEAD (parentPid → null) must not
+// reclaim the pane: the process was replaced, so the identity is stale. The
+// pane degrades to a placeholder that the next hook event rekeys.
+test('runBootScan rejects a persisted entry whose agent_pid is dead', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('dead-pid-session');
+		remove('pending:%51');
+	});
+
+	await recordSession({
+		session_id: 'dead-pid-session',
+		tmux_pane: '%51',
+		cwd: '/p',
+		transcript_path: '/p/x.jsonl',
+		agent_pid: 5101
+	});
+
+	await runBootScan({
+		listPanes: async () => [pane('%51', 5100, '/p')],
+		readSessionMetas: async () => [],
+		parentPid: async () => null // pid is gone
+	});
+
+	const ticket = list().find((t) => t.tmux_pane === '%51');
+	expect(ticket?.session_id).toBe('pending:%51');
+	expect(list().find((t) => t.session_id === 'dead-pid-session')).toBeUndefined();
+});
+
+// Same-pane-process-replaced: the pid is alive but reparented (a NEW agent
+// process owns the pane's shell now — parentPid returns a different shell).
+test('runBootScan rejects a persisted entry whose agent_pid moved to another pane', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('moved-pid-session');
+		remove('pending:%52');
+	});
+
+	await recordSession({
+		session_id: 'moved-pid-session',
+		tmux_pane: '%52',
+		cwd: '/p',
+		transcript_path: '/p/x.jsonl',
+		agent_pid: 5201
+	});
+
+	await runBootScan({
+		listPanes: async () => [pane('%52', 5200, '/p')],
+		readSessionMetas: async () => [],
+		parentPid: async (pid) => (pid === 5201 ? 9999 : null) // alive, different shell
+	});
+
+	expect(list().find((t) => t.tmux_pane === '%52')?.session_id).toBe('pending:%52');
+});
+
+// An entry written before the agent_pid field existed (or whose resolution
+// failed at SessionStart) is unverifiable — fail toward the placeholder.
+test('runBootScan rejects a persisted entry with no agent_pid recorded', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('no-pid-session');
+		remove('pending:%53');
+	});
+
+	await recordSession({
+		session_id: 'no-pid-session',
+		tmux_pane: '%53',
+		cwd: '/p',
+		transcript_path: '/p/x.jsonl'
+	});
+
+	await runBootScan({
+		listPanes: async () => [pane('%53', 5300, '/p')],
+		readSessionMetas: async () => [],
+		parentPid: async () => 5300 // would validate any pid — but there is none to check
+	});
+
+	expect(list().find((t) => t.tmux_pane === '%53')?.session_id).toBe('pending:%53');
+});
+
+// ─── codex panes (local-agent set) ──────────────────────────────────────────
+
+function codexPane(pane_id: string, pane_pid: number, cwd: string, attached = true): PaneRow {
+	return {
+		pane_id,
+		pane_pid,
+		pane_current_command: 'codex',
+		pane_current_path: cwd,
+		session_attached: attached
+	};
+}
+
+// A codex pane with no metadata (codex writes none) and no persisted entry
+// seeds the same pending: placeholder a claude pane would — stamped codex.
+test('runBootScan seeds a codex placeholder for a bare codex pane', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('pending:%60'));
+
+	await runBootScan({
+		listPanes: async () => [codexPane('%60', 6000, '/q')],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	const ticket = list().find((t) => t.tmux_pane === '%60');
+	expect(ticket?.session_id).toBe('pending:%60');
+	expect(ticket?.agent).toBe('codex');
+});
+
+// A pid-valid persisted codex entry reclaims its pane at boot, with the agent
+// re-derived from the stored transcript_path's /.codex/ segment.
+test('runBootScan reseeds a pid-valid codex entry with agent codex', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('codex-session');
+		remove('pending:%61');
+	});
+
+	await recordSession({
+		session_id: 'codex-session',
+		tmux_pane: '%61',
+		cwd: '/q',
+		transcript_path: path.join(os.homedir(), '.codex/sessions/2026/07/14/rollout-x.jsonl'),
+		agent_pid: 6101
+	});
+
+	await runBootScan({
+		listPanes: async () => [codexPane('%61', 6100, '/q')],
+		readSessionMetas: async () => [],
+		parentPid: async (pid) => (pid === 6101 ? 6100 : null)
+	});
+
+	const ticket = list().find((t) => t.tmux_pane === '%61');
+	expect(ticket?.session_id).toBe('codex-session');
+	expect(ticket?.agent).toBe('codex');
+});
+
+// The local GC rule covers codex panes: a codex ticket whose pane stopped
+// running codex (agent exited, shell remains) is reaped like a claude one.
+test('reconcile GCs a codex ticket whose pane no longer runs an agent', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('codex-gone'));
+
+	upsert({
+		session_id: 'codex-gone',
+		tmux_pane: '%62',
+		cwd: '/q',
+		title: 'codex work',
+		event_type: 'Stop',
+		created_at: Date.now() - 10_000,
+		agent: 'codex'
+	});
+
+	await runBootScan({
+		listPanes: async () => [
+			{
+				pane_id: '%62',
+				pane_pid: 6200,
+				pane_current_command: 'zsh', // codex exited; bare shell remains
+				pane_current_path: '/q',
+				session_attached: true
+			}
+		],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	expect(list().find((t) => t.session_id === 'codex-gone')).toBeUndefined();
+});
+
+// Claude metadata files never hijack a codex pane: the metadata branch is
+// claude-only, so a codex pane whose shell pid collides with a claude meta's
+// parent still goes to its own persisted entry / placeholder.
+test('runBootScan does not apply claude metadata to a codex pane', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('pending:%63'));
+
+	await runBootScan({
+		listPanes: async () => [codexPane('%63', 6300, '/q')],
+		readSessionMetas: async () => [
+			{ pid: 6301, sessionId: 'claude-meta-session', name: 'claude thing', cwd: '/q' }
+		],
+		parentPid: async (pid) => (pid === 6301 ? 6300 : null) // maps onto the codex pane's shell
+	});
+
+	const ticket = list().find((t) => t.tmux_pane === '%63');
+	expect(ticket?.session_id).toBe('pending:%63');
+	expect(ticket?.agent).toBe('codex');
 });
 
 test('runBootScan seeds a placeholder when neither metadata nor persistence matches', async () => {

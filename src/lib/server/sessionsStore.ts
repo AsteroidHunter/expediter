@@ -17,6 +17,14 @@ export type SessionEntry = {
 	// (decision 13). Absent for local sessions (their titles re-derive from
 	// the local transcript).
 	title?: string;
+	// Pid of the LOCAL agent process (claude/codex) behind this session,
+	// resolved at SessionStart via a pane-pid → child walk. Boot recovery
+	// accepts a local entry only while this pid is alive and still parented by
+	// the same pane shell — closing the hole where a replaced process in the
+	// same pane inherits a dead session's identity. Never set for remote
+	// entries: there is no local agent process to check, and far-end liveness
+	// is accepted blindness (remote decisions 5/6).
+	agent_pid?: number;
 };
 
 export type SessionsMap = Record<string, SessionEntry>;
@@ -76,6 +84,9 @@ export async function loadSessions(): Promise<SessionsMap> {
 		// written before these fields existed parses as local/untitled.
 		if (v.remote === true) entry.remote = true;
 		if (typeof v.title === 'string' && v.title) entry.title = v.title;
+		if (typeof v.agent_pid === 'number' && Number.isFinite(v.agent_pid) && v.agent_pid > 0) {
+			entry.agent_pid = v.agent_pid;
+		}
 		map[key] = entry;
 	}
 	return map;
@@ -127,19 +138,19 @@ export async function forgetSession(session_id: string): Promise<void> {
 }
 
 // Drops every entry whose tmux_pane is no longer alive, cleaning up orphans
-// left behind by SIGKILL'd claudes (where SessionEnd never fired). Liveness is
-// judged per entry: a local entry's pane must still run claude
-// (liveClaudePaneIds), while a remote entry's pane runs `ssh` by design, so
-// mere pane existence (allPaneIds) is the strongest liveness signal this
-// machine has for it. No-ops the write if nothing changed.
+// left behind by SIGKILL'd agents (where SessionEnd never fired). Liveness is
+// judged per entry: a local entry's pane must still run an agent binary
+// (liveAgentPaneIds — claude or codex), while a remote entry's pane runs `ssh`
+// by design, so mere pane existence (allPaneIds) is the strongest liveness
+// signal this machine has for it. No-ops the write if nothing changed.
 export async function pruneStaleSessions(
-	liveClaudePaneIds: Set<string>,
+	liveAgentPaneIds: Set<string>,
 	allPaneIds: Set<string>
 ): Promise<void> {
 	const map = await loadSessions();
 	let changed = false;
 	for (const [key, entry] of Object.entries(map)) {
-		const liveSet = entry.remote ? allPaneIds : liveClaudePaneIds;
+		const liveSet = entry.remote ? allPaneIds : liveAgentPaneIds;
 		if (!liveSet.has(entry.tmux_pane)) {
 			delete map[key];
 			changed = true;

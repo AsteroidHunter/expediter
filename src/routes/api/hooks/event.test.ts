@@ -16,7 +16,12 @@ import {
 import { whimsicalName } from '$lib/whimsicalName';
 import { loadSessions } from '$lib/server/sessionsStore';
 import { setCorrelationDepsForTest, type CorrelationDeps } from '$lib/server/sshCorrelation';
-import type { PaneRow } from '$lib/server/bootScan';
+import { setAgentPidResolverForTest, type PaneRow } from '$lib/server/bootScan';
+
+// Keep SessionStart hermetic: the default agent-pid resolver shells out to
+// tmux/pgrep/ps, and pane ids like %1 can exist on the developer's live tmux.
+// Individual tests that exercise the guard swap in their own resolver.
+setAgentPidResolverForTest(async () => null);
 
 // Unique session_id per test so module-level state doesn't leak.
 let testCounter = 0;
@@ -944,6 +949,156 @@ test('Stop does not spawn a watcher (denial line in transcript has no effect)', 
 	expect(list().find((t) => t.session_id === id)).toBeDefined();
 
 	rmSync(tempDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// ─── agent stamping (codex-compatibility) ────────────────────────────────────
+
+// The agent is derived from transcript_path's segment and stamped at upsert.
+test('SessionStart with a /.codex/ transcript_path stamps agent codex', async () => {
+	const sessionsDir = mkdtempSync(path.join(os.tmpdir(), 'expediter-sessions-'));
+	process.env.EXPEDITER_SESSIONS_FILE = path.join(sessionsDir, 'sessions.json');
+	const id = nextId();
+
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		tmux_pane: '%201',
+		cwd: '/tmp/proj',
+		transcript_path: path.join(os.homedir(), '.codex/sessions/2026/07/14/rollout-x.jsonl')
+	});
+
+	expect(list().find((t) => t.session_id === id)?.agent).toBe('codex');
+
+	delete process.env.EXPEDITER_SESSIONS_FILE;
+	rmSync(sessionsDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+test('SessionStart with a /.claude/ transcript_path stamps agent claude', async () => {
+	const sessionsDir = mkdtempSync(path.join(os.tmpdir(), 'expediter-sessions-'));
+	process.env.EXPEDITER_SESSIONS_FILE = path.join(sessionsDir, 'sessions.json');
+	const transcriptDir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-test-'));
+	const transcriptFile = path.join(transcriptDir, 'transcript.jsonl');
+	writeFileSync(transcriptFile, '');
+	const id = nextId();
+
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		tmux_pane: '%202',
+		cwd: '/tmp/proj',
+		transcript_path: transcriptFile
+	});
+
+	expect(list().find((t) => t.session_id === id)?.agent).toBe('claude');
+
+	delete process.env.EXPEDITER_SESSIONS_FILE;
+	rmSync(sessionsDir, { recursive: true, force: true });
+	rmSync(transcriptDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+test('Stop with a codex transcript_path stamps agent codex on the upsert', async () => {
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		tmux_pane: '%203',
+		cwd: '/tmp/proj',
+		transcript_path: path.join(os.homedir(), '.codex/sessions/2026/07/14/rollout-y.jsonl')
+	});
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.event_type).toBe('Stop');
+	expect(ticket?.agent).toBe('codex');
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// An event with no transcript_path must not flip an existing codex ticket
+// back to the claude default — upsert preserves the stored agent.
+test('an upsert without transcript_path preserves the existing agent', async () => {
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'Stop',
+		session_id: id,
+		tmux_pane: '%204',
+		cwd: '/tmp/proj',
+		transcript_path: path.join(os.homedir(), '.codex/sessions/2026/07/14/rollout-z.jsonl')
+	});
+	expect(list().find((t) => t.session_id === id)?.agent).toBe('codex');
+
+	await callHandler({
+		hook_event_name: 'PermissionRequest',
+		session_id: id,
+		tmux_pane: '%204',
+		cwd: '/tmp/proj'
+	});
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.event_type).toBe('PermissionRequest');
+	expect(ticket?.agent).toBe('codex');
+
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// ─── agent_pid recording at SessionStart (boot-guard source) ────────────────
+
+test('SessionStart records agent_pid from the resolver for local sessions', async () => {
+	const sessionsDir = mkdtempSync(path.join(os.tmpdir(), 'expediter-sessions-'));
+	process.env.EXPEDITER_SESSIONS_FILE = path.join(sessionsDir, 'sessions.json');
+	setAgentPidResolverForTest(async (paneId) => (paneId === '%205' ? 44321 : null));
+	const id = nextId();
+
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		tmux_pane: '%205',
+		cwd: '/tmp/proj',
+		transcript_path: path.join(os.homedir(), '.codex/sessions/2026/07/14/rollout-p.jsonl')
+	});
+
+	await new Promise((r) => setTimeout(r, 50));
+	const persisted = await loadSessions();
+	expect(persisted[id]?.agent_pid).toBe(44321);
+
+	setAgentPidResolverForTest(async () => null);
+	delete process.env.EXPEDITER_SESSIONS_FILE;
+	rmSync(sessionsDir, { recursive: true, force: true });
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+test('a remote SessionStart never records an agent_pid (far-side process)', async () => {
+	const temp = useTempSessionsFileForRemote();
+	// A resolver that would "find" a pid for any pane — remote must skip it.
+	setAgentPidResolverForTest(async () => 55555);
+	stubCorrelation();
+	const id = nextId();
+
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/home/bob/proj',
+		transcript_path: '/home/bob/.codex/sessions/2026/07/14/rollout-r.jsonl'
+	});
+
+	await new Promise((r) => setTimeout(r, 50));
+	const persisted = await loadSessions();
+	expect(persisted[id]).toBeDefined();
+	expect(persisted[id]?.agent_pid).toBeUndefined();
+	expect(persisted[id]?.remote).toBe(true);
+	// Far-side /.codex/ path classifies by segment despite the alien prefix.
+	expect(list().find((t) => t.session_id === id)?.agent).toBe('codex');
+
+	setAgentPidResolverForTest(async () => null);
+	setCorrelationDepsForTest(null);
+	temp.done();
 	remove(id);
 	deleteSessionTopic(id);
 });

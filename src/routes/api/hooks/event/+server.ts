@@ -22,6 +22,8 @@ import { watchForDecline } from '$lib/declineWatcher';
 import { whimsicalName } from '$lib/whimsicalName';
 import { recordSession, forgetSession, updateSessionTitle } from '$lib/server/sessionsStore';
 import { resolveRemotePane } from '$lib/server/sshCorrelation';
+import { resolveAgentPid } from '$lib/server/bootScan';
+import { agentForPath } from '$lib/agent';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -117,6 +119,13 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'missing hook_event_name or session_id' }, { status: 400 });
 	}
 
+	// Which agent fired this event, derived from transcript_path's segment
+	// (`/.claude/` vs `/.codex/`). Remote payloads carry their far-side path —
+	// stored, never read — which is exactly enough to classify. Events without
+	// a transcript_path pass `undefined` into upsert, which preserves the
+	// ticket's existing agent (and defaults claude for a brand-new ticket).
+	const agent = transcript_path ? (agentForPath(transcript_path) ?? undefined) : undefined;
+
 	// Remote events carry no tmux_pane — the far side can't know it. Resolve
 	// the local ssh pane from the payload's $SSH_CONNECTION before branching,
 	// so every branch below sees a pane exactly as it would for a local event.
@@ -173,6 +182,13 @@ export const POST: RequestHandler = async ({ request }) => {
 		// placeholder, or a prior/diverged session_id) before upserting the
 		// authoritative one, so the pane never shows two tickets.
 		cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id));
+		// Pid guard for boot recovery (local sessions only): record the agent
+		// process's pid so a later boot scan accepts this entry only while that
+		// pid is alive and still under this pane. Skipped for remote sessions —
+		// the agent process lives on the far box, and remote entries keep the
+		// pane-existence guard (remote decisions 5/6). Resolution failure just
+		// omits the field: boot recovery degrades to the placeholder.
+		const agent_pid = remote ? null : await resolveAgentPid(tmux_pane);
 		// Persist before upserting so a daemon crash between the two leaves the
 		// session discoverable on the next boot scan. Awaited so the on-disk
 		// side effect is observable to anything that polls sessions.json right
@@ -184,7 +200,8 @@ export const POST: RequestHandler = async ({ request }) => {
 			cwd: cwd ?? '',
 			transcript_path,
 			...(remote ? { remote: true } : {}),
-			...(payloadTitle ? { title: payloadTitle } : {})
+			...(payloadTitle ? { title: payloadTitle } : {}),
+			...(agent_pid ? { agent_pid } : {})
 		}).catch((e) => console.warn('[sessionStart] recordSession failed', e));
 		upsert({
 			session_id,
@@ -193,7 +210,8 @@ export const POST: RequestHandler = async ({ request }) => {
 			title: resolveDisplayTitle(session_id),
 			event_type: 'Idle',
 			created_at: Date.now(),
-			remote
+			remote,
+			agent
 		});
 		// Fire-and-forget title pre-fill. In chat-title mode resolveDisplayTitle
 		// already returned a whimsical fallback; this upgrades it as soon as the
@@ -284,7 +302,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		title: resolveDisplayTitle(session_id),
 		event_type: eventType,
 		created_at,
-		remote
+		remote,
+		agent
 	});
 
 	// Claude Code emits no hook event when the user manually declines or

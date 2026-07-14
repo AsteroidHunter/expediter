@@ -8,6 +8,7 @@ import { upsert, setCachedTitle, setAttached, list, remove, findByPane } from '$
 import { whimsicalName } from '$lib/whimsicalName';
 import { getTitleSource } from '$lib/config';
 import { latestCustomTitle } from '$lib/transcript';
+import { agentForCommand, agentForPath, type Agent } from '$lib/agent';
 import {
 	loadSessions,
 	recordSession,
@@ -17,10 +18,16 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-const CLAUDE_COMMANDS = new Set(['claude', 'claude.exe']);
+// Local-pane agent detection: which agent binary (claude | codex) runs in the
+// pane's foreground, or null for any other command. Generalizes the old
+// claude-only CLAUDE_COMMANDS set — the local lifecycle rules (placeholder
+// seeding, prune, GC) apply to every agent pane identically.
+export function paneAgent(row: PaneRow): Agent | null {
+	return agentForCommand(row.pane_current_command);
+}
 
-export function isClaudePane(row: PaneRow): boolean {
-	return CLAUDE_COMMANDS.has(row.pane_current_command);
+export function isLocalAgentPane(row: PaneRow): boolean {
+	return paneAgent(row) !== null;
 }
 
 export type PaneRow = {
@@ -151,6 +158,63 @@ export async function parentPid(pid: number): Promise<number | null> {
 	}
 }
 
+// Resolve the pid of the agent process (claude/codex) running in a pane:
+// pane shell pid → direct children → first child whose command basename is a
+// known agent binary. Called by the hook server at SessionStart (local
+// sessions only) to record the agent_pid guard on the persisted entry. Any
+// failure — pane gone, no children, ps racing a dying pid — resolves null,
+// which simply degrades boot recovery for that session to the placeholder.
+async function defaultResolveAgentPid(paneId: string): Promise<number | null> {
+	let panePid: number;
+	try {
+		const { stdout } = await execFileAsync('tmux', [
+			'display-message',
+			'-p',
+			'-t',
+			paneId,
+			'#{pane_pid}'
+		]);
+		panePid = Number(stdout.trim());
+	} catch {
+		return null;
+	}
+	if (!Number.isFinite(panePid) || panePid <= 0) return null;
+	let kids: string;
+	try {
+		({ stdout: kids } = await execFileAsync('pgrep', ['-P', String(panePid)]));
+	} catch {
+		return null; // pgrep exits non-zero when the shell has no children
+	}
+	for (const line of kids.split('\n')) {
+		const pid = Number(line.trim());
+		if (!Number.isFinite(pid) || pid <= 0) continue;
+		try {
+			const { stdout: comm } = await execFileAsync('ps', ['-o', 'comm=', '-p', String(pid)]);
+			const base = comm.trim().split('/').pop() ?? '';
+			if (agentForCommand(base)) return pid;
+		} catch {
+			continue; // pid died between pgrep and ps
+		}
+	}
+	return null;
+}
+
+// Injectable indirection so the hook-server tests don't shell out to the real
+// tmux/pgrep/ps (pane ids like %1 can exist on the developer's live tmux and
+// would resolve nondeterministically). Mirrors sshCorrelation's
+// setCorrelationDepsForTest pattern.
+let agentPidResolver: (paneId: string) => Promise<number | null> = defaultResolveAgentPid;
+
+export function setAgentPidResolverForTest(
+	fn?: (paneId: string) => Promise<number | null>
+): void {
+	agentPidResolver = fn ?? defaultResolveAgentPid;
+}
+
+export function resolveAgentPid(paneId: string): Promise<number | null> {
+	return agentPidResolver(paneId);
+}
+
 // Mirrors resolveDisplayTitle from the hook handler: chat-title mode returns
 // a deterministic whimsical fallback so the ticket never renders blank; haiku
 // mode leaves the title empty for the SSE live-patch to fill in later.
@@ -167,7 +231,11 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 		title: initialTitle,
 		event_type: 'Idle',
 		created_at: Date.now(),
-		remote: entry.remote ?? false
+		remote: entry.remote ?? false,
+		// Re-derived from the stored transcript_path on every reseed (segment
+		// match — classifies far-side remote paths too); entries never persist
+		// an agent field of their own.
+		agent: agentForPath(entry.transcript_path) ?? 'claude'
 	});
 	// A remote entry's transcript_path points at the far box — unreadable here
 	// (decision 9). The persisted title passed in initialTitle is the only
@@ -182,7 +250,7 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 		.catch(() => {});
 }
 
-export function upsertPlaceholder(pane_id: string, cwd: string): void {
+export function upsertPlaceholder(pane_id: string, cwd: string, agent: Agent = 'claude'): void {
 	const key = `pending:${pane_id}`;
 	upsert({
 		session_id: key,
@@ -190,7 +258,8 @@ export function upsertPlaceholder(pane_id: string, cwd: string): void {
 		cwd,
 		title: whimsicalName(key),
 		event_type: 'Idle',
-		created_at: Date.now()
+		created_at: Date.now(),
+		agent
 	});
 }
 
@@ -209,9 +278,10 @@ export type BootScanDeps = {
 const defaultDeps: BootScanDeps = { listPanes, readSessionMetas, parentPid };
 
 // Full reconcile: read tmux truth, refresh the attach flag on existing tickets,
-// seed Idle tickets for claude panes that have none yet (attached OR detached),
-// and GC tickets whose pane is gone. Used by the boot scan and the slow poll —
-// the heavyweight path (reads ~/.claude/sessions metadata + a ps walk + disk).
+// seed Idle tickets for local agent panes (claude or codex) that have none yet
+// (attached OR detached), and GC tickets whose pane is gone. Used by the boot
+// scan and the slow poll — the heavyweight path (reads ~/.claude/sessions
+// metadata + a ps walk + disk).
 // It NEVER overwrites event_type / working / title on a ticket that already
 // exists: those belong to the hook-event pipeline, and re-seeding would race it.
 async function fullReconcile(deps: BootScanDeps): Promise<void> {
@@ -228,15 +298,15 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 		console.warn('[reconcile] tmux list-panes failed (tmux not running?):', err);
 		return;
 	}
-	const claudePanes = panes.filter(isClaudePane);
+	const agentPanes = panes.filter(isLocalAgentPane);
 	// livePaneIds intentionally includes detached panes: a detached session is
-	// still alive (its claude process is running), so pruneStaleSessions must
+	// still alive (its agent process is running), so pruneStaleSessions must
 	// not drop its persisted record just because no client is attached.
-	const livePaneIds = new Set(claudePanes.map((p) => p.pane_id));
-	// Remote tickets are judged against ALL panes, not claude panes: their
+	const livePaneIds = new Set(agentPanes.map((p) => p.pane_id));
+	// Remote tickets are judged against ALL panes, not agent panes: their
 	// local pane runs `ssh`, and pane existence is the strongest liveness
-	// signal this machine has for a far-end claude (decision 5 — an exited
-	// remote claude behind a live ssh pane is accepted blindness).
+	// signal this machine has for a far-end agent (decision 5 — an exited
+	// remote agent behind a live ssh pane is accepted blindness).
 	const allPaneIds = new Set(panes.map((p) => p.pane_id));
 
 	const persisted = await loadSessions();
@@ -245,7 +315,7 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 	const byPane = new Map<string, SessionEntry>();
 	for (const entry of Object.values(persisted)) {
 		// Remote entries are excluded: they reseed through their own loop below,
-		// and a remote entry whose pane now runs a *local* claude is stale by
+		// and a remote entry whose pane now runs a *local* agent is stale by
 		// definition (the topology changed under it) — the placeholder path plus
 		// the first real hook event rekey the pane correctly.
 		if (!entry.remote && livePaneIds.has(entry.tmux_pane)) byPane.set(entry.tmux_pane, entry);
@@ -262,11 +332,11 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 		metaByShellPid.set(ppid, meta);
 	}
 
-	for (const pane of claudePanes) {
+	for (const pane of agentPanes) {
 		// A ticket already bound to this pane (the steady-state poll case): only
 		// refresh its attach flag. Never re-seed — that would clobber
 		// event_type / working / title owned by the hook pipeline. Session-id
-		// divergence (a rewind, or a new claude in a reused pane) is healed by the
+		// divergence (a rewind, or a new agent in a reused pane) is healed by the
 		// hook pipeline's dropPaneTicketsExcept / rebindPaneTicket, not here.
 		const existing = findByPane(pane.pane_id);
 		if (existing) {
@@ -274,11 +344,14 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 			continue;
 		}
 		// No ticket yet — seed one (attached OR detached) and set its real attach
-		// flag. Metadata-first: the persisted entry can be stale (the previous
-		// claude in this pane exited and a new one took its place), so the live
-		// metadata file wins to avoid keying the ticket by a dead session_id,
-		// which would break markWorking lookups for the live claude's hook events.
-		const meta = metaByShellPid.get(pane.pane_pid);
+		// flag. Metadata-first for claude panes: the persisted entry can be stale
+		// (the previous claude in this pane exited and a new one took its place),
+		// so the live metadata file wins to avoid keying the ticket by a dead
+		// session_id, which would break markWorking lookups for the live claude's
+		// hook events. Codex writes no such file — its panes go straight to the
+		// pid-guarded persisted entry below.
+		const meta =
+			paneAgent(pane) === 'claude' ? metaByShellPid.get(pane.pane_pid) : undefined;
 		if (meta) {
 			const transcriptPath = path.join(
 				os.homedir(),
@@ -300,17 +373,25 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 			setAttached(entry.session_id, pane.session_attached);
 			continue;
 		}
-		// Fallback: claude hasn't written a metadata file yet (older versions,
-		// or brand-new process). Use the persisted entry if we have one.
+		// Fallback: the pid-guarded persisted entry (both agents). Accept it only
+		// if its recorded agent_pid is alive and still parented by this pane's
+		// shell — a dead or reparented pid means the process was replaced and the
+		// entry's identity is stale (the same-pane-process-replaced hole). Local
+		// entries only; remote entries reseed through their own loop below under
+		// premain's pane-existence guard.
 		const persistedEntry = byPane.get(pane.pane_id);
-		if (persistedEntry) {
+		if (
+			persistedEntry &&
+			typeof persistedEntry.agent_pid === 'number' &&
+			(await deps.parentPid(persistedEntry.agent_pid)) === pane.pane_pid
+		) {
 			upsertIdle(persistedEntry, bootScanInitialTitle(persistedEntry.session_id));
 			setAttached(persistedEntry.session_id, pane.session_attached);
 			continue;
 		}
-		// Neither metadata nor persistence — the first real hook event will
-		// reconcile the placeholder via dropPaneTicketsExcept.
-		upsertPlaceholder(pane.pane_id, pane.pane_current_path);
+		// Neither metadata nor a pid-valid persisted entry — the first real hook
+		// event will reconcile the placeholder via dropPaneTicketsExcept.
+		upsertPlaceholder(pane.pane_id, pane.pane_current_path, paneAgent(pane) ?? 'claude');
 		setAttached(`pending:${pane.pane_id}`, pane.session_attached);
 	}
 
@@ -330,8 +411,8 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 	// ssh pane is still alive comes back as an Idle ticket carrying the
 	// persisted title (the far-side transcript is unreadable here, so the
 	// title cannot be re-derived — decision 13). Panes without a persisted
-	// remote entry get nothing: `pending:` placeholders are for claude panes
-	// only, and a non-claude pane with no remote history is just a shell.
+	// remote entry get nothing: `pending:` placeholders are for local agent
+	// panes only, and a non-agent pane with no remote history is just a shell.
 	for (const entry of Object.values(persisted)) {
 		if (!entry.remote) continue;
 		const row = rowByPane.get(entry.tmux_pane);
@@ -342,10 +423,11 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 	}
 
 	// GC: drop tickets whose pane is gone. A local ticket needs its pane to
-	// still be a live *claude* pane (claude exited without SessionEnd → reap);
-	// a remote ticket's pane legitimately runs `ssh`, so it lives as long as
-	// the pane itself does (decision 5). The created_at guard spares tickets
-	// the hook pipeline created during the await above (younger than `start`).
+	// still be a live *agent* pane (the agent exited without SessionEnd →
+	// reap); a remote ticket's pane legitimately runs `ssh`, so it lives as
+	// long as the pane itself does (decision 5). The created_at guard spares
+	// tickets the hook pipeline created during the await above (younger than
+	// `start`).
 	for (const ticket of list()) {
 		const paneAlive = ticket.remote
 			? allPaneIds.has(ticket.tmux_pane)
@@ -368,9 +450,9 @@ async function lightSync(deps: BootScanDeps): Promise<void> {
 		console.warn('[reconcile:light] tmux list-panes failed:', err);
 		return;
 	}
-	// ALL panes, not just claude panes: a remote ticket's pane runs `ssh`, and
+	// ALL panes, not just agent panes: a remote ticket's pane runs `ssh`, and
 	// its detach/attach flips must land instantly too (settled 2026-07-12). A
-	// local ticket whose pane no longer runs claude is moribund either way —
+	// local ticket whose pane no longer runs an agent is moribund either way —
 	// flipping its flag until the next full reconcile GCs it is harmless.
 	const attachedByPane = new Map<string, boolean>();
 	for (const p of panes) {

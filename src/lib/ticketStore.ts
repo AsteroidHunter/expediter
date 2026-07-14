@@ -1,3 +1,5 @@
+import type { Agent } from './agent';
+
 export type EventType = 'Stop' | 'PermissionRequest' | 'Notification' | 'Idle';
 
 // `title` may be empty string when the async topic refresh has not yet
@@ -36,6 +38,12 @@ export type Ticket = {
 	// transcript lives on the far box. Set from the hook payload; local events
 	// never carry it.
 	remote: boolean;
+	// Which coding agent drives this session (claude | codex). Derived from the
+	// hook payload's transcript_path (segment match — works for far-side remote
+	// paths too) or, for boot-scan placeholders, the pane's foreground command.
+	// Selects the per-agent edges (transcript parser, title source, decline
+	// matcher, summarizer) and renders as the card's agent badge.
+	agent: Agent;
 };
 
 type SessionTopic = {
@@ -85,7 +93,10 @@ const EVENT_PRIORITY: Record<EventType, number> = {
 };
 
 export function upsert(
-	ticket: Omit<Ticket, 'working' | 'attached' | 'recording' | 'remote'> & { remote?: boolean }
+	ticket: Omit<Ticket, 'working' | 'attached' | 'recording' | 'remote' | 'agent'> & {
+		remote?: boolean;
+		agent?: Agent;
+	}
 ): void {
 	const existing = store.get(ticket.session_id);
 	// EVENT_PRIORITY guards against same-cycle Notification clobbering a
@@ -101,10 +112,13 @@ export function upsert(
 	// `attached` is owned by reconcile and `recording` by the voice routes, not the
 	// event pipeline: preserve both across re-upserts, defaulting attached true /
 	// recording false for a brand-new ticket. reconcile / the voice routes set the
-	// real values via setAttached / setRecording.
+	// real values via setAttached / setRecording. `agent` preserves the existing
+	// value when the caller can't derive one (an event without transcript_path
+	// must not flip a codex ticket back to the claude default).
 	store.set(ticket.session_id, {
 		...ticket,
 		remote: ticket.remote ?? false,
+		agent: ticket.agent ?? existing?.agent ?? 'claude',
 		working: false,
 		attached: existing?.attached ?? true,
 		recording: existing?.recording ?? false
