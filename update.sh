@@ -14,8 +14,11 @@
 #   3. Rewrites the `expediter` / `claudex` shims and the config file, and
 #      re-copies the cc-clock / cc-dates status-bar helpers (which install.sh
 #      copies into ~/.local/bin rather than referencing from the repo).
-#   4. Re-merges Expediter's hook entries into ~/.claude/settings.json so any
-#      newly added events are registered. Idempotent; backs up first.
+#   4. Re-merges Expediter's hook entries into each wired agent's hook file
+#      (`hooked_agents` in ~/.expediter/config.json; a missing key means a
+#      pre-codex install and defaults to claude-only): ~/.claude/settings.json
+#      for claude, ~/.codex/hooks.json + recomputed hooks.state trust entries
+#      in ~/.codex/config.toml for codex. Idempotent; backs up first.
 #
 # What it does NOT do:
 #   - Re-check or install Claude Code, tmux, Homebrew, or Bun.
@@ -369,15 +372,76 @@ printf '%s✓%s Shims, config, and helpers refreshed.\n' "$GREEN" "$RESET"
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
 section "4. Hooks"
-printf 'Re-syncing expediter hook entries in ~/.claude/settings.json.\n'
-printf 'A timestamped backup is saved first if the file exists.\n\n'
+printf 'Re-syncing expediter hook entries for the wired agents.\n'
+printf 'Timestamped backups are saved first when the files exist.\n\n'
 
+# Which agents to re-merge comes from the install-time choice, so a deliberate
+# claude-only (or codex-only) setup is never silently widened by an update.
+# A missing key means the install predates codex support: with codex on PATH
+# and a terminal attached, ask once (the daemon's startup nudge points here)
+# and persist the answer; otherwise default to claude for this run without
+# persisting, so a future codex install still gets the ask.
+HOOKED_AGENTS="$(python3 - "$HOME/.expediter/config.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    agents = data.get("hooked_agents")
+    if isinstance(agents, list) and all(a in ("claude", "codex") for a in agents) and agents:
+        print(" ".join(agents))
+    else:
+        print("<unset>")
+except Exception:
+    print("<unset>")
+PY
+)"
+
+if [ "$HOOKED_AGENTS" = "<unset>" ]; then
+	HOOKED_AGENTS="claude"
+	if command -v codex >/dev/null 2>&1 && [ -t 0 ]; then
+		printf 'Codex is installed on this machine, but expediter has no recorded agent choice yet.\n'
+		printf 'Which should the expediter track?\n\n'
+		printf '  y  - both claude code and codex %s(default)%s\n' "$DIM" "$RESET"
+		printf '  cc - claude code only\n'
+		printf '  co - codex only\n\n'
+		while true; do
+			printf 'answer [y]: '
+			read -r choice || true
+			case "${choice:-y}" in
+				y) HOOKED_AGENTS="claude codex"; break ;;
+				cc) HOOKED_AGENTS="claude"; break ;;
+				co) HOOKED_AGENTS="codex"; break ;;
+			esac
+		done
+		python3 - "$HOME/.expediter/config.json" $HOOKED_AGENTS >>"$LOG" 2>&1 <<'PY'
+import json, os, sys
+config_path = sys.argv[1]
+agents = sys.argv[2:]
+data = {}
+try:
+    with open(config_path) as f:
+        parsed = json.load(f)
+    if isinstance(parsed, dict):
+        data = parsed
+except Exception:
+    pass
+data["hooked_agents"] = agents
+os.makedirs(os.path.dirname(config_path), exist_ok=True)
+with open(config_path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+		printf '\n'
+	fi
+fi
+
+HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
+if [[ " $HOOKED_AGENTS " == *" claude "* ]]; then
 # Same merge install.sh uses: idempotent (dedupes on matcher + hook script), so
 # re-running picks up any events added since the last install without
 # duplicating existing ones.
 mkdir -p "$HOME/.claude"
 SETTINGS="$HOME/.claude/settings.json"
-HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
 if [ -f "$SETTINGS" ]; then
 	BACKUP="$SETTINGS.expediter-bak.$(date +%Y%m%d-%H%M%S)"
 	cp "$SETTINGS" "$BACKUP"
@@ -469,7 +533,30 @@ then
 	err "⚠ Failed to merge hooks into ~/.claude/settings.json. See $LOG for details."
 	exit 1
 fi
-printf '%s✓%s Hooks synced.\n' "$GREEN" "$RESET"
+printf '%s✓%s Claude code hooks synced.\n' "$GREEN" "$RESET"
+fi
+
+# Codex re-merge: same writer install.sh uses. Recomputes and rewrites the
+# hooks.state trust entries whenever the hook definitions changed (e.g. the
+# repo moved, or a new event was added), so codex keeps running the hooks with
+# no review prompt.
+if [[ " $HOOKED_AGENTS " == *" codex "* ]]; then
+	CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+	STAMP="$(date +%Y%m%d-%H%M%S)"
+	if [ -f "$CODEX_DIR/hooks.json" ]; then
+		cp "$CODEX_DIR/hooks.json" "$CODEX_DIR/hooks.json.expediter-bak.$STAMP"
+	fi
+	if [ -f "$CODEX_DIR/config.toml" ]; then
+		cp "$CODEX_DIR/config.toml" "$CODEX_DIR/config.toml.expediter-bak.$STAMP"
+	fi
+	if ! python3 "$REPO/bin/codex-hooks-merge.py" "$CODEX_DIR" "$HOOK_SCRIPT" >>"$LOG" 2>&1; then
+		err ""
+		err "⚠ Failed to merge hooks into $CODEX_DIR/hooks.json. See $LOG for details."
+		exit 1
+	fi
+	printf '%s✓%s Codex hooks synced and marked trusted (hooks.state in %s/config.toml);\n' "$GREEN" "$RESET" "$CODEX_DIR"
+	printf '  review anytime with /hooks inside codex.\n'
+fi
 
 # --- done ------------------------------------------------------------------
 

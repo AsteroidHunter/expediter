@@ -566,6 +566,53 @@ async function printAccess() {
 	}
 }
 
+// Hook-registration check, driven by the install-time `hooked_agents` choice
+// (codex-compatibility 4.6). Warn when a recorded agent's hook file no longer
+// registers expediter-hook.sh (hooks were removed or the file was reset), and
+// nudge exactly once per start when codex is on PATH with no recorded choice
+// at all (a pre-codex install) — `expediter update` asks and records it. A
+// recorded choice that excludes codex stays silent. Warnings go to stderr and
+// never block startup: tickets for the other agent still work.
+{
+	let cfg = null;
+	try {
+		const parsed = JSON.parse(await fs.readFile(CONFIG_FILE, 'utf8'));
+		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cfg = parsed;
+	} catch {
+		// no config yet — treated as no recorded choice
+	}
+	const recorded = Array.isArray(cfg?.hooked_agents)
+		? cfg.hooked_agents.filter((a) => a === 'claude' || a === 'codex')
+		: null;
+	const hookFileOf = {
+		claude: path.join(os.homedir(), '.claude', 'settings.json'),
+		codex: path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hooks.json')
+	};
+	for (const agent of recorded ?? ['claude']) {
+		let registered = false;
+		try {
+			registered = (await fs.readFile(hookFileOf[agent], 'utf8')).includes('expediter-hook.sh');
+		} catch {
+			// missing hook file = not registered
+		}
+		if (!registered) {
+			console.error(
+				`expediter: ${agent === 'codex' ? 'codex' : 'claude code'} hooks are not registered — ` +
+					'sessions will not show up as tickets. Run `expediter update` to fix.'
+			);
+		}
+	}
+	if (recorded === null) {
+		const probe = spawnSync('/bin/sh', ['-c', 'command -v codex'], { stdio: 'ignore' });
+		if (probe.status === 0) {
+			console.error(
+				'expediter: codex is installed but expediter has no recorded agent choice yet — ' +
+					'run `expediter update` to wire codex in (or record a claude-only choice).'
+			);
+		}
+	}
+}
+
 dbg(`transport=${transport} port=${PORT} (loopback probe ${transport}://127.0.0.1:${PORT}/)`);
 
 // Validate --tailscale before touching the daemon: with no tailnet address

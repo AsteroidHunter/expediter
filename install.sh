@@ -6,15 +6,19 @@
 #
 # What it does, in order:
 #   1. Verifies macOS (Expediter assumes macOS + USB-tethered phone).
-#   2. Checks for Claude Code; offers to install it via the official installer.
+#   2. Checks for the coding agents (Claude Code / Codex); requires at least
+#      one, offers the official installer for whichever is missing, and asks
+#      which to wire when both are present. The choice is recorded as
+#      `hooked_agents` in ~/.expediter/config.json.
 #   3. Checks for tmux / Homebrew / Bun and offers to install whatever is
 #      missing via a single confirmation.
 #   4. Runs `bun install` + `bun run build` to produce build/index.js.
 #   5. Writes ~/.config/expediter/config with EXPEDITER_HOME=<clone path>.
 #   6. Installs `expediter` and `claudex` shims into ~/.local/bin and ensures
 #      that directory is on PATH (added to ~/.zshrc if missing).
-#   7. Offers to merge Expediter's hook entries into ~/.claude/settings.json,
-#      with a timestamped backup.
+#   7. Merges Expediter's hook entries into the chosen agents' hook files
+#      (~/.claude/settings.json; ~/.codex/hooks.json plus pre-trusted
+#      hooks.state entries in ~/.codex/config.toml), with timestamped backups.
 #   8. Offers to source expediter.tmux.conf from ~/.tmux.conf, with backup.
 #
 # Remote machines are NOT configured here: `expediter install remote <host>`
@@ -181,6 +185,29 @@ prompt_keypress() {
 	done
 }
 
+# prompt_token <space-separated-valid-tokens> <default-or-empty> <prompt-text>
+# Line-based cousin of prompt_keypress for multi-character answers (cc / co).
+# Empty input takes the default when one is given; invalid input re-prompts.
+# Stores the matched token in REPLY.
+prompt_token() {
+	local valid=" $1 "
+	local default="$2"
+	local prompt="$3"
+	local line
+	while true; do
+		printf '%s' "$prompt"
+		read -r line || true
+		if [ -z "$line" ] && [ -n "$default" ]; then
+			REPLY="$default"
+			return 0
+		fi
+		if [ -n "$line" ] && [[ "$valid" == *" $line "* ]]; then
+			REPLY="$line"
+			return 0
+		fi
+	done
+}
+
 # --- 0. preflight ----------------------------------------------------------
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -197,48 +224,132 @@ if [ "$REPLY" != "y" ]; then
 	exit 0
 fi
 
-# --- 1. Claude Code check --------------------------------------------------
+# --- 1. Coding agent check ---------------------------------------------------
+
+# install_claude_code / install_codex — hand off to each agent's official
+# installer with inherited stdio (their TUIs take over the terminal; both
+# open /dev/tty for input, so the curl|bash pipeline's exhausted stdin does
+# not block keyboard input). Both drop binaries that land on PATH via
+# ~/.local/bin, which is exported below before the re-check.
+install_claude_code() {
+	printf '\nHanding off to the official claude code installer ...\n\n'
+	bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+	export PATH="$HOME/.local/bin:$PATH"
+	if ! command -v claude >/dev/null 2>&1; then
+		err ""
+		err "⚠ Claude code install completed but \`claude\` is still not on PATH."
+		err "  Open a new terminal and re-run this script."
+		exit 1
+	fi
+	printf '%s✓%s Claude code installed!\n' "$GREEN" "$RESET"
+}
+
+install_codex() {
+	printf '\nHanding off to the official codex installer ...\n\n'
+	bash -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+	export PATH="$HOME/.local/bin:$PATH"
+	if ! command -v codex >/dev/null 2>&1; then
+		err ""
+		err "⚠ Codex install completed but \`codex\` is still not on PATH."
+		err "  Open a new terminal and re-run this script."
+		exit 1
+	fi
+	printf '%s✓%s Codex installed!\n' "$GREEN" "$RESET"
+}
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
-section "1. Claude Code check"
-printf 'The expediter currently only works with claude code.\n\n'
+section "1. Coding agent check"
+printf 'The expediter works with claude code and codex. At least one is required.\n\n'
 
 # The `command -v` check is instant; the spinner helper expects a long-running
 # backgrounded command. Show a brief static spinner frame instead for visual
 # consistency with the longer-running phases below, then resolve.
 if [ -t 1 ]; then
-	printf '%s%s%s Checking if you have claude code installed ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
+	printf '%s%s%s Checking for claude code and codex ...' "$GREEN" "${SPIN_FRAMES[0]}" "$RESET"
 	sleep 0.2
 	printf '\r\033[K'
 fi
 
-if command -v claude >/dev/null 2>&1; then
+HAVE_CLAUDE=0
+HAVE_CODEX=0
+command -v claude >/dev/null 2>&1 && HAVE_CLAUDE=1
+command -v codex >/dev/null 2>&1 && HAVE_CODEX=1
+
+# HOOKED_AGENTS is the space-separated set of harnesses Expediter wires hooks
+# into, persisted below as `hooked_agents` in ~/.expediter/config.json and
+# consulted by update.sh and the daemon's startup warning — so a deliberate
+# claude-only choice is never silently overridden by a later update.
+HOOKED_AGENTS=""
+
+if [ "$HAVE_CLAUDE" = 1 ] && [ "$HAVE_CODEX" = 1 ]; then
+	printf '%s✓%s Claude code and codex detected!\n\n' "$GREEN" "$RESET"
+	printf 'Which should the expediter track?\n\n'
+	printf '  y  - both %s(default)%s\n' "$DIM" "$RESET"
+	printf '  cc - claude code only\n'
+	printf '  co - codex only\n\n'
+	prompt_token "y cc co" "y" "answer [y]: "
+	case "$REPLY" in
+		y) HOOKED_AGENTS="claude codex" ;;
+		cc) HOOKED_AGENTS="claude" ;;
+		co) HOOKED_AGENTS="codex" ;;
+	esac
+elif [ "$HAVE_CLAUDE" = 1 ]; then
 	printf '%s✓%s Claude code detected!\n' "$GREEN" "$RESET"
+	HOOKED_AGENTS="claude"
+elif [ "$HAVE_CODEX" = 1 ]; then
+	printf '%s✓%s Codex detected!\n' "$GREEN" "$RESET"
+	HOOKED_AGENTS="codex"
 else
-	printf 'Seems like you don'\''t have claude code installed.\n\n'
-	prompt_keypress "yn" "Would you like to install it? (y / n) "
-	if [ "$REPLY" = "y" ]; then
-		printf '\nHanding off to the official claude code installer ...\n\n'
-		# Inherited stdio: Claude Code's TUI takes over the terminal. The
-		# binary opens /dev/tty for input, so the curl|bash pipeline's
-		# exhausted stdin does not block keyboard input. See the
-		# stdout-redaction decision in the wiki plan for the mechanical detail.
-		bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-		# Native installer drops the binary at ~/.local/bin/claude.
-		export PATH="$HOME/.local/bin:$PATH"
-		if ! command -v claude >/dev/null 2>&1; then
-			err ""
-			err "⚠ Claude code install completed but \`claude\` is still not on PATH."
-			err "  Open a new terminal and re-run this script."
+	printf 'Seems like you don'\''t have claude code or codex installed.\n\n'
+	printf '  b  - install both\n'
+	printf '  cc - install claude code\n'
+	printf '  co - install codex\n'
+	printf '  n  - neither, exit\n\n'
+	prompt_token "b cc co n" "" "answer: "
+	case "$REPLY" in
+		b)
+			install_claude_code
+			install_codex
+			HOOKED_AGENTS="claude codex"
+			;;
+		cc)
+			install_claude_code
+			HOOKED_AGENTS="claude"
+			;;
+		co)
+			install_codex
+			HOOKED_AGENTS="codex"
+			;;
+		n)
+			printf '\nIf you wish to use the expediter, please install claude code or codex. You can do so manually here:\n'
+			printf '  https://docs.claude.com/en/docs/claude-code/setup\n'
+			printf '  https://developers.openai.com/codex/cli\n'
 			exit 1
-		fi
-		printf '%s✓%s Claude code installed!\n' "$GREEN" "$RESET"
-	else
-		printf '\nIf you wish to use the expediter, please install claude code. You can do so manually here:\n'
-		printf '  https://docs.claude.com/en/docs/claude-code/setup\n'
-		exit 1
-	fi
+			;;
+	esac
 fi
+
+# Persist the wired-harness choice. Merge-preserving write so other settings
+# (transport, title_source, ...) survive a re-install.
+mkdir -p "$HOME/.expediter"
+run_quiet python3 - "$HOME/.expediter/config.json" $HOOKED_AGENTS <<'PY'
+import json, os, sys
+config_path = sys.argv[1]
+agents = sys.argv[2:]
+data = {}
+try:
+    with open(config_path) as f:
+        parsed = json.load(f)
+    if isinstance(parsed, dict):
+        data = parsed
+except Exception:
+    pass
+data["hooked_agents"] = agents
+os.makedirs(os.path.dirname(config_path), exist_ok=True)
+with open(config_path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
 
 # --- 2. Tmux check ---------------------------------------------------------
 
@@ -402,13 +513,14 @@ case ":$PATH:" in
 		;;
 esac
 
-# Silent: merge hooks into ~/.claude/settings.json. Auto-merged without a
-# y/n prompt — see the silent-hooks decision in the wiki plan. Timestamped
-# backup taken first if settings.json already exists. python3's merge output
-# is captured into the install log; non-zero exit surfaces a friendly error.
+# Silent: merge hooks into the chosen agents' hook files. Auto-merged without
+# a y/n prompt — see the silent-hooks decision in the wiki plan. Timestamped
+# backups taken first when the files exist. python3's merge output is captured
+# into the install log; non-zero exit surfaces a friendly error.
+HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
+if [[ " $HOOKED_AGENTS " == *" claude "* ]]; then
 mkdir -p "$HOME/.claude"
 SETTINGS="$HOME/.claude/settings.json"
-HOOK_SCRIPT="$REPO/bin/expediter-hook.sh"
 if [ -f "$SETTINGS" ]; then
 	BACKUP="$SETTINGS.expediter-bak.$(date +%Y%m%d-%H%M%S)"
 	cp "$SETTINGS" "$BACKUP"
@@ -499,6 +611,32 @@ then
 	err ""
 	err "⚠ Failed to merge hooks into ~/.claude/settings.json. See $LOG for details."
 	exit 1
+fi
+fi
+
+# Codex hooks: write/merge $CODEX_HOME/hooks.json (five events) and pre-trust
+# exactly those hooks via [hooks.state] entries in $CODEX_HOME/config.toml so
+# codex runs them with no review prompt — the user consented by running this
+# installer, and the trust is pinned to Expediter's hooks alone. Honors a
+# $CODEX_HOME override because that is where codex itself reads hooks.json.
+if [[ " $HOOKED_AGENTS " == *" codex "* ]]; then
+	CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+	STAMP="$(date +%Y%m%d-%H%M%S)"
+	if [ -f "$CODEX_DIR/hooks.json" ]; then
+		cp "$CODEX_DIR/hooks.json" "$CODEX_DIR/hooks.json.expediter-bak.$STAMP"
+	fi
+	if [ -f "$CODEX_DIR/config.toml" ]; then
+		cp "$CODEX_DIR/config.toml" "$CODEX_DIR/config.toml.expediter-bak.$STAMP"
+	fi
+	if ! python3 "$REPO/bin/codex-hooks-merge.py" "$CODEX_DIR" "$HOOK_SCRIPT" >>"$LOG" 2>&1; then
+		err ""
+		err "⚠ Failed to merge hooks into $CODEX_DIR/hooks.json. See $LOG for details."
+		exit 1
+	fi
+	# Transparency: the trust entries are the one thing this installer writes
+	# that changes how another tool treats code execution — say so out loud.
+	printf '%s✓%s Codex hooks registered and marked trusted (hooks.state in %s/config.toml).\n' "$GREEN" "$RESET" "$CODEX_DIR"
+	printf '  You can review them anytime with /hooks inside codex.\n'
 fi
 
 # Conditional surfacing: only emits a line if PATH was actually appended.

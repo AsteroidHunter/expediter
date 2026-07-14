@@ -32,12 +32,14 @@
 #   - Touch Claude Code, Homebrew, tmux, or Bun (each has its own uninstaller).
 #   - Remove ~/.local/bin from PATH in your shell rc — that directory is shared
 #     with other tools (Claude Code installs into it too).
-#   - Touch ~/.expediter/config.json if you created one (we never created it).
+#   - Touch ~/.expediter/config.json (it holds your preferences — transport,
+#     title source, hooked agents — and is harmless without the daemon).
 #   - Delete install-time backups (*.expediter-bak.<timestamp>).
 
 set -uo pipefail
 
 PORT="${EXPEDITER_PORT:-5179}"
+REPO="$(cd "$(dirname "$0")" && pwd)"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 SHIM_EXPEDITER="$HOME/.local/bin/expediter"
 SHIM_CLAUDEX="$HOME/.local/bin/claudex"
@@ -230,10 +232,11 @@ fi
 
 if [ "$VERBOSE" = 1 ]; then
 	printf '\nThis will remove the expediter shims, the config file, the hook entries\n'
-	printf 'from your claude code settings, the source-file line from your tmux conf,\n'
-	printf 'the remote-sessions block from your ssh config, and the install log. It\n'
-	printf 'will NOT touch the cloned repo, claude code, homebrew, tmux, bun, your\n'
-	printf 'PATH, or any install-time backups.\n\n'
+	printf 'from your claude code and codex settings (including their hooks.state\n'
+	printf 'trust entries), the source-file line from your tmux conf, the\n'
+	printf 'remote-sessions block from your ssh config, and the install log. It\n'
+	printf 'will NOT touch the cloned repo, claude code, codex, homebrew, tmux, bun,\n'
+	printf 'your PATH, or any install-time backups.\n\n'
 	prompt_keypress "yn" "Continue? (y / n) "
 else
 	printf 'Are you sure you want to uninstall expediter? '
@@ -384,6 +387,26 @@ PY
 	printf '%s✓%s Removed %s expediter hook block(s) from settings.json.\n' "$GREEN" "$RESET" "$count"
 else
 	printf '%s⊘%s No expediter entries in settings.json (or settings.json absent).\n' "$DIM" "$RESET"
+fi
+
+# Codex side: splice our hook groups out of $CODEX_HOME/hooks.json and delete
+# their [hooks.state] trust entries from $CODEX_HOME/config.toml (backups
+# first). If you registered your own codex hooks after Expediter's in the same
+# event, codex may re-show its standard review prompt for them (their index
+# shifted) — accept once and they are re-trusted.
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+if [ -f "$CODEX_DIR/hooks.json" ] && grep -Fq "expediter-hook.sh" "$CODEX_DIR/hooks.json"; then
+	cp "$CODEX_DIR/hooks.json" "$CODEX_DIR/hooks.json.expediter-uninstall-bak.$TIMESTAMP"
+	if [ -f "$CODEX_DIR/config.toml" ]; then
+		cp "$CODEX_DIR/config.toml" "$CODEX_DIR/config.toml.expediter-uninstall-bak.$TIMESTAMP"
+	fi
+	if codex_out=$(python3 "$REPO/bin/codex-hooks-merge.py" "$CODEX_DIR" "$REPO/bin/expediter-hook.sh" --uninstall 2>&1); then
+		printf '%s✓%s %s\n' "$GREEN" "$RESET" "$codex_out"
+	else
+		printf '%s⚠%s Could not splice codex hooks: %s\n' "$BOLD" "$RESET" "$codex_out"
+	fi
+else
+	printf '%s⊘%s No expediter entries in codex hooks.json (or file absent).\n' "$DIM" "$RESET"
 fi
 
 # --- 6. tmux.conf ----------------------------------------------------------
