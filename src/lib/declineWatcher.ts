@@ -2,14 +2,18 @@ import { watch, createReadStream, type FSWatcher } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { agentForPath } from './agent';
 
-// Watcher for a single PermissionRequest ticket. Tails the same Claude Code
-// transcript JSONL that the hook payload's `transcript_path` points at and
-// fires `onDecline` when the user manually declines or interrupts the prompt
-// (Claude Code emits no hook event for that path, so a transcript-level
-// signal is the only Claude-Code-independent way to detect resolution).
+// Watcher for a single PermissionRequest ticket. Tails the transcript the
+// hook payload's `transcript_path` points at — Claude Code's JSONL or Codex's
+// rollout — and fires `onDecline` when the user manually declines or
+// interrupts the prompt (neither agent emits a hook event for that path, so a
+// transcript-level signal is the only agent-independent way to detect
+// resolution). Local sessions only: the hook server never starts a watcher
+// for remote tickets (their transcript lives on the far box).
 
 const TRANSCRIPT_ROOT = path.resolve(path.join(os.homedir(), '.claude'));
+const CODEX_TRANSCRIPT_ROOT = path.resolve(path.join(os.homedir(), '.codex'));
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEBOUNCE_MS = 50;
 // Verified verbatim against a captured transcript JSONL for both "Deny" and
@@ -24,7 +28,10 @@ const DENIAL_PREFIX = "The user doesn't want to proceed with this tool use";
 // shared helper there.
 function isWithinTranscriptRoot(p: string): boolean {
 	const resolved = path.resolve(p);
-	return resolved === TRANSCRIPT_ROOT || resolved.startsWith(TRANSCRIPT_ROOT + path.sep);
+	for (const root of [TRANSCRIPT_ROOT, CODEX_TRANSCRIPT_ROOT]) {
+		if (resolved === root || resolved.startsWith(root + path.sep)) return true;
+	}
+	return false;
 }
 
 type ToolResultBlock = {
@@ -50,6 +57,33 @@ function lineIsDenial(parsed: TranscriptLine): boolean {
 		) {
 			return true;
 		}
+	}
+	return false;
+}
+
+// Codex's decline signal is typed, not an English string: a manual decline or
+// interrupt appends {"type":"event_msg","payload":{"type":"turn_aborted",
+// "reason":"interrupted",…}} to the rollout (shape pinned live on 0.144.1).
+// The "aborted by user after Ns" custom_tool_call_output the abort also
+// writes is matched as a secondary signal.
+type CodexRolloutLine = {
+	type?: string;
+	payload?: { type?: string; reason?: unknown; output?: unknown };
+};
+
+function lineIsCodexDecline(parsed: CodexRolloutLine): boolean {
+	const p = parsed.payload;
+	if (!p) return false;
+	if (parsed.type === 'event_msg' && p.type === 'turn_aborted' && p.reason === 'interrupted') {
+		return true;
+	}
+	if (
+		parsed.type === 'response_item' &&
+		p.type === 'custom_tool_call_output' &&
+		typeof p.output === 'string' &&
+		p.output.startsWith('aborted by user')
+	) {
+		return true;
 	}
 	return false;
 }
@@ -80,6 +114,12 @@ export function watchForDecline(opts: DeclineWatcherOpts): () => void {
 		console.warn(`[decline] rejected path outside root: ${opts.transcriptPath}`);
 		return () => {};
 	}
+	// Matcher is selected by the transcript's agent: Claude's denial-string
+	// tool_result vs Codex's typed turn_aborted event.
+	const lineIsDecline =
+		agentForPath(path.resolve(opts.transcriptPath)) === 'codex'
+			? lineIsCodexDecline
+			: lineIsDenial;
 
 	let cancelled = false;
 	let offset = 0;
@@ -149,13 +189,13 @@ export function watchForDecline(opts: DeclineWatcherOpts): () => void {
 
 		for (const line of slice.split('\n')) {
 			if (!line) continue;
-			let parsed: TranscriptLine;
+			let parsed: TranscriptLine & CodexRolloutLine;
 			try {
 				parsed = JSON.parse(line);
 			} catch {
 				continue;
 			}
-			if (lineIsDenial(parsed)) {
+			if (lineIsDecline(parsed)) {
 				cancel();
 				opts.onDecline();
 				return;

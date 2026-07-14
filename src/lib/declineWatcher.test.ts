@@ -176,3 +176,180 @@ test('ignores denial-shaped content present in the file before the watcher start
 	expect(fired).toBe(false);
 	cancel();
 });
+
+// ─── Codex rollouts (turn_aborted matcher) ───────────────────────────────────
+
+// Codex fixtures live under ~/.codex/ to satisfy the extended containment
+// check. Line shapes pinned verbatim from real 0.144.1 rollouts
+// (codex-compatibility plan, phase 0).
+function withCodexRollout(): { file: string; done: () => void } {
+	const dir = mkdtempSync(path.join(os.homedir(), '.codex', '.expediter-decline-test-'));
+	const file = path.join(dir, 'rollout-test.jsonl');
+	writeFileSync(file, '');
+	return { file, done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+const codexAbortLine =
+	JSON.stringify({
+		timestamp: '2026-07-09T23:58:21.225Z',
+		type: 'event_msg',
+		payload: {
+			type: 'turn_aborted',
+			turn_id: '019f4950-d1d8-7843-9a65-9f7b868a8402',
+			reason: 'interrupted',
+			completed_at: 1783641501,
+			duration_ms: 40005
+		}
+	}) + '\n';
+
+const codexAbortedToolOutputLine =
+	JSON.stringify({
+		timestamp: '2026-07-09T23:58:21.219Z',
+		type: 'response_item',
+		payload: {
+			type: 'custom_tool_call_output',
+			call_id: 'call_n07TaNoheREkgeLh6JtphrPS',
+			output: 'aborted by user after 36.1s'
+		}
+	}) + '\n';
+
+test('fires onDecline when a codex turn_aborted line is appended', async () => {
+	const rollout = withCodexRollout();
+	let fired = false;
+	const cancel = watchForDecline({
+		transcriptPath: rollout.file,
+		sessionId: 'codex-decline',
+		createdAt: 0,
+		onDecline: () => {
+			fired = true;
+		}
+	});
+
+	await sleep(80);
+	appendFileSync(rollout.file, codexAbortLine);
+
+	expect(await waitFor(() => fired)).toBe(true);
+	cancel();
+	rollout.done();
+});
+
+test('fires onDecline on the secondary "aborted by user" tool-output signal', async () => {
+	const rollout = withCodexRollout();
+	let fired = false;
+	const cancel = watchForDecline({
+		transcriptPath: rollout.file,
+		sessionId: 'codex-decline-secondary',
+		createdAt: 0,
+		onDecline: () => {
+			fired = true;
+		}
+	});
+
+	await sleep(80);
+	appendFileSync(rollout.file, codexAbortedToolOutputLine);
+
+	expect(await waitFor(() => fired)).toBe(true);
+	cancel();
+	rollout.done();
+});
+
+test('does not fire on unrelated codex rollout lines', async () => {
+	const rollout = withCodexRollout();
+	let fired = false;
+	const cancel = watchForDecline({
+		transcriptPath: rollout.file,
+		sessionId: 'codex-no-decline',
+		createdAt: 0,
+		onDecline: () => {
+			fired = true;
+		}
+	});
+
+	await sleep(80);
+	appendFileSync(
+		rollout.file,
+		[
+			JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'hi' } }),
+			JSON.stringify({ type: 'event_msg', payload: { type: 'token_count' } }),
+			JSON.stringify({
+				type: 'response_item',
+				payload: { type: 'function_call_output', call_id: 'x', output: 'Plan updated' }
+			})
+		].join('\n') + '\n'
+	);
+	await sleep(300);
+
+	expect(fired).toBe(false);
+	cancel();
+	rollout.done();
+});
+
+test('does not fire on a turn_aborted with a non-interrupted reason', async () => {
+	const rollout = withCodexRollout();
+	let fired = false;
+	const cancel = watchForDecline({
+		transcriptPath: rollout.file,
+		sessionId: 'codex-other-abort',
+		createdAt: 0,
+		onDecline: () => {
+			fired = true;
+		}
+	});
+
+	await sleep(80);
+	appendFileSync(
+		rollout.file,
+		JSON.stringify({
+			type: 'event_msg',
+			payload: { type: 'turn_aborted', turn_id: 'x', reason: 'replaced' }
+		}) + '\n'
+	);
+	await sleep(300);
+
+	expect(fired).toBe(false);
+	cancel();
+	rollout.done();
+});
+
+// Matcher selection is by path segment: a codex-shaped abort line appended to
+// a ~/.claude transcript must not fire (the claude matcher is active there),
+// and a claude denial line in a ~/.codex rollout must not fire either.
+test('matcher selection: codex abort line in a claude transcript does not fire', async () => {
+	let fired = false;
+	const cancel = watchForDecline({
+		transcriptPath: tempFile, // ~/.claude temp from beforeEach
+		sessionId: 'cross-agent-1',
+		createdAt: 0,
+		onDecline: () => {
+			fired = true;
+		}
+	});
+
+	await sleep(80);
+	appendFileSync(tempFile, codexAbortLine);
+	await sleep(300);
+
+	expect(fired).toBe(false);
+	cancel();
+});
+
+test('matcher selection: claude denial line in a codex rollout does not fire', async () => {
+	const rollout = withCodexRollout();
+	let fired = false;
+	const cancel = watchForDecline({
+		transcriptPath: rollout.file,
+		sessionId: 'cross-agent-2',
+		createdAt: 0,
+		onDecline: () => {
+			fired = true;
+		}
+	});
+
+	await sleep(80);
+	appendFileSync(rollout.file, denialLine);
+	await sleep(300);
+
+	expect(fired).toBe(false);
+	cancel();
+	rollout.done();
+});

@@ -2,7 +2,8 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { latestCustomTitle, recentTranscriptText } from './transcript';
+import { Database } from 'bun:sqlite';
+import { latestCustomTitle, recentTranscriptText, codexThreadTitle } from './transcript';
 
 // Tests must write under ~/.claude/ to pass transcript.ts's TRANSCRIPT_ROOT
 // containment check (same constraint the production gate enforces).
@@ -198,4 +199,138 @@ test('recentTranscriptText rejects paths outside ~/.claude/', async () => {
 	writeFileSync(outsideFile, JSON.stringify({ type: 'user', message: { content: 'leaked' } }));
 	expect(await recentTranscriptText(outsideFile)).toBeNull();
 	rmSync(outside, { recursive: true, force: true });
+});
+
+// ─── Codex rollout reader (recentTranscriptText, agent-routed) ───────────────
+
+// Codex fixtures live under ~/.codex/ to satisfy the extended containment
+// check, mirroring how the Claude fixtures live under ~/.claude/. Line shapes
+// are pinned verbatim from real 0.144.1 rollouts (codex-compatibility plan,
+// phase 0).
+function withCodexTempFile(): { file: string; done: () => void } {
+	const dir = mkdtempSync(path.join(os.homedir(), '.codex', '.expediter-transcript-test-'));
+	return {
+		file: path.join(dir, 'rollout-test.jsonl'),
+		done: () => rmSync(dir, { recursive: true, force: true })
+	};
+}
+
+const codexUserLine = JSON.stringify({
+	timestamp: '2026-07-14T11:42:25.000Z',
+	type: 'response_item',
+	payload: {
+		type: 'message',
+		role: 'user',
+		content: [{ type: 'input_text', text: 'Run the shell command: echo hi' }]
+	}
+});
+
+const codexAssistantLine = JSON.stringify({
+	timestamp: '2026-07-14T11:42:31.000Z',
+	type: 'response_item',
+	payload: {
+		type: 'message',
+		role: 'assistant',
+		content: [{ type: 'output_text', text: 'done' }],
+		phase: 'commentary'
+	}
+});
+
+test('recentTranscriptText reads codex rollout user/assistant turns', async () => {
+	const t = withCodexTempFile();
+	writeFileSync(
+		t.file,
+		[
+			JSON.stringify({ type: 'session_meta', payload: { id: 'abc' } }),
+			codexUserLine,
+			JSON.stringify({ type: 'event_msg', payload: { type: 'token_count' } }),
+			JSON.stringify({ type: 'response_item', payload: { type: 'reasoning' } }),
+			codexAssistantLine
+		].join('\n')
+	);
+	const out = await recentTranscriptText(t.file);
+	expect(out).toContain('User: Run the shell command: echo hi');
+	expect(out).toContain('Assistant: done');
+	t.done();
+});
+
+test('recentTranscriptText skips codex function_call and event_msg lines', async () => {
+	const t = withCodexTempFile();
+	writeFileSync(
+		t.file,
+		[
+			JSON.stringify({
+				type: 'response_item',
+				payload: { type: 'function_call', name: 'update_plan', arguments: '{}' }
+			}),
+			JSON.stringify({
+				type: 'event_msg',
+				payload: { type: 'agent_message', message: 'not a turn line' }
+			})
+		].join('\n')
+	);
+	expect(await recentTranscriptText(t.file)).toBeNull();
+	t.done();
+});
+
+test('latestCustomTitle returns null quietly for a codex rollout (no custom-title lines)', async () => {
+	const t = withCodexTempFile();
+	writeFileSync(t.file, [codexUserLine, codexAssistantLine].join('\n'));
+	expect(await latestCustomTitle(t.file)).toBeNull();
+	t.done();
+});
+
+// ─── codexThreadTitle (threads.title in the state db) ────────────────────────
+
+function makeStateDb(rows: Array<{ id: string; title: string | null }>): {
+	dbPath: string;
+	done: () => void;
+} {
+	const dir = mkdtempSync(path.join(os.tmpdir(), 'expediter-codex-db-'));
+	const dbPath = path.join(dir, 'state_5.sqlite');
+	const db = new Database(dbPath, { create: true });
+	db.run('CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, updated_at INTEGER)');
+	for (const row of rows) {
+		db.prepare('INSERT INTO threads (id, title, cwd, updated_at) VALUES (?, ?, ?, ?)').run(
+			row.id,
+			row.title,
+			'/tmp/x',
+			123
+		);
+	}
+	db.close();
+	return { dbPath, done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test('codexThreadTitle returns the thread title by session id', async () => {
+	const fixture = makeStateDb([
+		{ id: '019f6206-08ca-72f3-a5b6-0a427bb9848c', title: 'Fix the flaky boot test' },
+		{ id: 'other-thread', title: 'Something else' }
+	]);
+	expect(await codexThreadTitle('019f6206-08ca-72f3-a5b6-0a427bb9848c', fixture.dbPath)).toBe(
+		'Fix the flaky boot test'
+	);
+	fixture.done();
+});
+
+test('codexThreadTitle returns null for a missing row', async () => {
+	const fixture = makeStateDb([{ id: 'some-thread', title: 'A title' }]);
+	expect(await codexThreadTitle('not-present', fixture.dbPath)).toBeNull();
+	fixture.done();
+});
+
+test('codexThreadTitle returns null when the db file is missing', async () => {
+	expect(await codexThreadTitle('any-id', '/nonexistent/dir/state_5.sqlite')).toBeNull();
+});
+
+test('codexThreadTitle trims whitespace and rejects empty/null titles', async () => {
+	const fixture = makeStateDb([
+		{ id: 'spaced', title: '  padded title  ' },
+		{ id: 'blank', title: '   ' },
+		{ id: 'nullish', title: null }
+	]);
+	expect(await codexThreadTitle('spaced', fixture.dbPath)).toBe('padded title');
+	expect(await codexThreadTitle('blank', fixture.dbPath)).toBeNull();
+	expect(await codexThreadTitle('nullish', fixture.dbPath)).toBeNull();
+	fixture.done();
 });
