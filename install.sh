@@ -17,7 +17,7 @@
 #      with a timestamped backup.
 #   8. Offers to source expediter.tmux.conf from ~/.tmux.conf, with backup.
 #
-# Remote machines are NOT configured here: `expediter remote install <host>`
+# Remote machines are NOT configured here: `expediter install remote <host>`
 # (after this install) is the one path that writes ssh-config tunnel blocks.
 
 set -euo pipefail
@@ -555,7 +555,7 @@ esac
 
 # Closing message — copy locked verbatim against the wiki plan's checklist 6.4
 # (remote-session-tickets). Remote machines are set up after install via
-# `expediter remote install <name>`, never by a prompt here.
+# `expediter install remote <name>`, never by a prompt here.
 
 printf '\n%s✦%s Expediter is ready!\n\n' "$GREEN" "$RESET"
 printf '%sNext steps:%s\n\n' "$BOLD" "$RESET"
@@ -571,4 +571,4 @@ printf '     no files to move. Prefer plain HTTP with no certificate? Run %sexpe
 printf '  %s4.%s After running the expediter and scanning the QR code, %sall claude or codex\n' "$BOLD" "$RESET" "$BOLD"
 printf '     sessions that run within tmux%s will show up as tickets on the phone!\n\n' "$RESET"
 printf '(If you run claude or codex on a remote machine and wish to link it with the\n'
-printf 'expediter, run the following: expediter remote install how)\n\n'
+printf 'expediter, run the following: expediter install remote how)\n\n'

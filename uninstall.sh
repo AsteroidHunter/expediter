@@ -21,7 +21,7 @@
 #      that install.sh wrote above it. Deletes the file if nothing else is in
 #      it. Backs up before touching.
 #   8. Splices every marker-delimited remote-sessions block (one per host,
-#      written by `expediter remote install <name>`) out of ~/.ssh/config.
+#      written by `expediter install remote <name>`) out of ~/.ssh/config.
 #      Backs up first. Never deletes the file itself, even if it ends up
 #      empty — an empty ssh config is equivalent to a missing one, and
 #      nothing in ~/.ssh gets deleted.
@@ -462,7 +462,7 @@ if [ -f "$SSH_CONFIG" ] && grep -Fq "# >>> expediter remote-sessions" "$SSH_CONF
 
 	# Splice every marker-delimited block (a corrupt/unterminated block is
 	# swallowed to EOF), plus the single blank line the installer left above
-	# it. Markers are matched by prefix: `expediter remote install <name>`
+	# it. Markers are matched by prefix: `expediter install remote <name>`
 	# writes one block per host with the host name in the marker
 	# (`# >>> expediter remote-sessions: <name> >>>`), and the pre-release
 	# host-less form is caught by the same prefix. Unlike the tmux.conf

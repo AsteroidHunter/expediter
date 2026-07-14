@@ -69,20 +69,20 @@ if (process.argv[2] === 'update') {
 	process.exit(res.status ?? 1);
 }
 
-// `expediter remote install <name>` / `expediter remote uninstall <name>` —
+// `expediter install remote <name>` / `expediter uninstall remote <name>` —
 // remote-session setup (one marker-delimited ~/.ssh/config block per host, so
 // machines are added and removed independently). Handled before anything else
 // so it never starts the daemon, and it never opens an ssh connection itself:
 // the Mac half writes local config and prints the command the user pastes on
-// the box. `expediter remote install how` prints the plain-language steps.
-if (process.argv[2] === 'remote') {
-	const action = process.argv[3];
+// the box. `expediter install remote how` prints the plain-language steps.
+if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
+	const action = process.argv[2];
 	const name = process.argv[4];
 
 	const HOW_TEXT = [
 		'To link a remote machine:',
 		'',
-		'  1. On this Mac, run: expediter remote install <name>',
+		'  1. On this Mac, run: expediter install remote <name>',
 		'     <name> is what you type after `ssh` (e.g. devbox). This sets up the',
 		'     connection path and prints the install command for step 2.',
 		'',
@@ -91,15 +91,15 @@ if (process.argv[2] === 'remote') {
 		'',
 		'  3. That\'s it. From then on: ssh in, run claude -- tickets appear on your phone.',
 		'',
-		'To undo, run: expediter remote uninstall <name>',
+		'To undo, run: expediter uninstall remote <name>',
 		'The installation is per-machine -- to link more machines, repeat the steps',
 		'above with each machine\'s host name.'
 	].join('\n');
 
-	if (action !== 'install' && action !== 'uninstall') {
-		console.error('Usage: expediter remote install <name>     set up tickets for an ssh host');
-		console.error('       expediter remote uninstall <name>   undo it for that host');
-		console.error('       expediter remote install how        print the setup steps');
+	if (process.argv[3] !== 'remote') {
+		console.error('Usage: expediter install remote <name>     set up tickets for an ssh host');
+		console.error('       expediter uninstall remote <name>   undo it for that host');
+		console.error('       expediter install remote how        print the setup steps');
 		process.exit(1);
 	}
 	if (action === 'install' && name === 'how') {
@@ -108,9 +108,9 @@ if (process.argv[2] === 'remote') {
 	}
 	if (!name) {
 		console.error(
-			`expediter: remote ${action} needs the host name you normally type after \`ssh\`.`
+			`expediter: ${action} remote needs the host name you normally type after \`ssh\`.`
 		);
-		console.error('Run `expediter remote install how` for the full steps.');
+		console.error('Run `expediter install remote how` for the full steps.');
 		process.exit(1);
 	}
 	if (!/^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(name)) {
@@ -245,14 +245,14 @@ if (process.argv[2] === 'remote') {
 // Any other bare word in the subcommand slot is a mistake. Error loudly
 // instead of falling through to the daemon-start path — silently launching
 // the daemon (and its QR) on a typo'd subcommand buries the user's actual
-// error. Flags (-*) pass through untouched; `update` and `remote` were
-// dispatched above.
+// error. Flags (-*) pass through untouched; `update`, `install`, and
+// `uninstall` were dispatched above.
 if (process.argv[2] && !process.argv[2].startsWith('-')) {
 	const word = process.argv[2];
 	console.error(`expediter: unknown command "${word}"`);
-	if ((word === 'install' || word === 'uninstall') && process.argv[3] === 'remote') {
+	if (word === 'remote' && (process.argv[3] === 'install' || process.argv[3] === 'uninstall')) {
 		const rest = process.argv.slice(4).join(' ');
-		console.error(`Did you mean: expediter remote ${word} ${rest || '<name>'}`);
+		console.error(`Did you mean: expediter ${process.argv[3]} remote ${rest || '<name>'}`);
 	} else {
 		console.error('Run `expediter --help` for usage.');
 	}
@@ -264,15 +264,15 @@ if (SHOW_HELP) {
 		'Usage: expediter [--http|--https] [--tailscale] [--print-url] [--title default|haiku] [--steps "..."] [--help]'
 	);
 	console.log('   or: expediter update [--dev]');
-	console.log('   or: expediter remote install <name> | uninstall <name> | install how');
+	console.log('   or: expediter install remote <name> | uninstall remote <name> | install remote how');
 	console.log('');
 	console.log('  update                 Pull the latest and rebuild in place.');
 	console.log('                         Add --dev (or --no-pull) to skip the pull and rebuild the');
 	console.log('                         current checkout, e.g. when updating from a feature branch.');
-	console.log('  remote install <name>  Set up tickets for claude sessions on an ssh host: writes');
+	console.log('  install remote <name>  Set up tickets for claude sessions on an ssh host: writes');
 	console.log('                         that host\'s tunnel block into ~/.ssh/config and prints the');
-	console.log('                         command to paste on the box. `expediter remote install how`');
-	console.log('                         prints the plain-language steps; `remote uninstall <name>`');
+	console.log('                         command to paste on the box. `expediter install remote how`');
+	console.log('                         prints the plain-language steps; `uninstall remote <name>`');
 	console.log('                         undoes that host.');
 	console.log('  --print-url            Also print the tethered URL as text (default: QR only).');
 	console.log('                         Use this only if your phone cannot scan the QR — the URL');

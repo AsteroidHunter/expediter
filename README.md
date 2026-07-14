@@ -116,12 +116,12 @@ If you switch networks (say, coffee shop to home), your Mac gets a new IP and th
 
 Claude running on another machine -- a dev server, a shared GPU box -- can get tickets too. The topology: tmux stays on your Mac, a local pane runs `ssh <host>`, and claude runs there in the plain ssh session (no tmux needed on the remote). Tickets behave exactly like local ones: they show on your phone, tap-to-focus raises the local ssh pane, `/rename` titles carry over, and tickets survive daemon restarts.
 
-**One-time setup, two halves** (forgot the flow later? `expediter remote install how` reprints it):
+**One-time setup, two halves** (forgot the flow later? `expediter install remote how` reprints it):
 
 1. **Mac side** -- run:
 
    ```bash
-   expediter remote install <name>
+   expediter install remote <name>
    ```
 
    `<name>` is whatever you type after `ssh` (e.g. `devbox`). This writes a reverse-tunnel block for that host into `~/.ssh/config` (`RemoteForward 5179 localhost:5179`, scoped to that host only, marker-delimited; re-runs rewrite it cleanly), then prints the command for step 2. It never opens an ssh connection itself.
@@ -134,7 +134,7 @@ Claude running on another machine -- a dev server, a shared GPU box -- can get t
 
    It needs only `python3` and `curl`, touches nothing outside your home directory on that box (fine for shared machines, no root), and merges the same hook entries into the remote's `~/.claude/settings.json`.
 
-Each machine gets its own entry -- to link more machines, repeat both steps with each host's name. Undo a machine with `expediter remote uninstall <name>`: it removes that host's tunnel block and prints the matching cleanup command to paste on the box (`install-remote.sh --uninstall`), which removes the hook entries and `~/.expediter/` there.
+Each machine gets its own entry -- to link more machines, repeat both steps with each host's name. Undo a machine with `expediter uninstall remote <name>`: it removes that host's tunnel block and prints the matching cleanup command to paste on the box (`install-remote.sh --uninstall`), which removes the hook entries and `~/.expediter/` there.
 
 **Steady state: `ssh <host>`, run `claude`. That's it** -- no wrapper commands, no flags, no per-session setup. The hook on the remote notices it's in an ssh session, sends its events through the tunnel, and the daemon matches the connection back to the exact local pane holding your `ssh` -- so multiple sessions to the same host each get their own ticket.
 
