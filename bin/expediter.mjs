@@ -242,6 +242,23 @@ if (process.argv[2] === 'remote') {
 	process.exit(0);
 }
 
+// Any other bare word in the subcommand slot is a mistake. Error loudly
+// instead of falling through to the daemon-start path — silently launching
+// the daemon (and its QR) on a typo'd subcommand buries the user's actual
+// error. Flags (-*) pass through untouched; `update` and `remote` were
+// dispatched above.
+if (process.argv[2] && !process.argv[2].startsWith('-')) {
+	const word = process.argv[2];
+	console.error(`expediter: unknown command "${word}"`);
+	if ((word === 'install' || word === 'uninstall') && process.argv[3] === 'remote') {
+		const rest = process.argv.slice(4).join(' ');
+		console.error(`Did you mean: expediter remote ${word} ${rest || '<name>'}`);
+	} else {
+		console.error('Run `expediter --help` for usage.');
+	}
+	process.exit(1);
+}
+
 if (SHOW_HELP) {
 	console.log(
 		'Usage: expediter [--http|--https] [--tailscale] [--print-url] [--title default|haiku] [--steps "..."] [--help]'
