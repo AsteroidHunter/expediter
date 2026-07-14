@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { agentForPath } from './agent';
+import { agentForPath, type Agent } from './agent';
 
 type TextBlock = { type: 'text'; text: string };
 type ContentBlock = TextBlock | { type: 'thinking' } | { type: 'tool_use' } | { type: string };
@@ -235,6 +235,21 @@ async function openThreadsReader(dbPath: string): Promise<SqliteRowReader> {
 	};
 	const db = new DatabaseSync(dbPath, { readOnly: true });
 	return { get: (id) => db.prepare(sql).get(id), close: () => db.close() };
+}
+
+// Per-agent local chat-title router (plan 3.1): claude reads the transcript's
+// latest custom-title line; codex reads threads.title from the state db —
+// never a summarizer spawn, so a codex ticket has no claude dependency. Local
+// sessions only: remote titles arrive via payload passthrough and are never
+// re-derived on this machine.
+export async function localChatTitle(
+	agent: Agent,
+	sessionId: string,
+	transcriptPath: string,
+	codexDbPath?: string
+): Promise<string | null> {
+	if (agent === 'codex') return codexThreadTitle(sessionId, codexDbPath);
+	return latestCustomTitle(transcriptPath);
 }
 
 export async function codexThreadTitle(

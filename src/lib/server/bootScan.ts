@@ -7,7 +7,7 @@ import os from 'node:os';
 import { upsert, setCachedTitle, setAttached, list, remove, findByPane } from '$lib/ticketStore';
 import { whimsicalName } from '$lib/whimsicalName';
 import { getTitleSource } from '$lib/config';
-import { latestCustomTitle } from '$lib/transcript';
+import { localChatTitle } from '$lib/transcript';
 import { agentForCommand, agentForPath, type Agent } from '$lib/agent';
 import {
 	loadSessions,
@@ -224,6 +224,10 @@ function bootScanInitialTitle(session_id: string): string {
 }
 
 function upsertIdle(entry: SessionEntry, initialTitle: string): void {
+	// Re-derived from the stored transcript_path on every reseed (segment
+	// match — classifies far-side remote paths too); entries never persist
+	// an agent field of their own.
+	const agent = agentForPath(entry.transcript_path) ?? 'claude';
 	upsert({
 		session_id: entry.session_id,
 		tmux_pane: entry.tmux_pane,
@@ -232,18 +236,16 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 		event_type: 'Idle',
 		created_at: Date.now(),
 		remote: entry.remote ?? false,
-		// Re-derived from the stored transcript_path on every reseed (segment
-		// match — classifies far-side remote paths too); entries never persist
-		// an agent field of their own.
-		agent: agentForPath(entry.transcript_path) ?? 'claude'
+		agent
 	});
 	// A remote entry's transcript_path points at the far box — unreadable here
 	// (decision 9). The persisted title passed in initialTitle is the only
 	// title source; the next remote event refreshes it via payload passthrough.
 	if (entry.remote) return;
-	// Async title upgrade. A real custom-title from the jsonl supersedes the
-	// whimsical fallback via setCachedTitle's live-patch in the ticket store.
-	void latestCustomTitle(entry.transcript_path)
+	// Async title upgrade. A real title from the agent's own source (claude:
+	// the jsonl's custom-title line; codex: threads.title in the state db)
+	// supersedes the whimsical fallback via setCachedTitle's live-patch.
+	void localChatTitle(agent, entry.session_id, entry.transcript_path)
 		.then((t) => {
 			if (t) setCachedTitle(entry.session_id, t);
 		})

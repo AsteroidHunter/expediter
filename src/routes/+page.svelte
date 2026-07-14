@@ -27,6 +27,11 @@
 		// /voice mock waveform (the phone has no local audio on that backend). May be
 		// absent on an old frame — treated as false.
 		recording?: boolean;
+		// Which coding agent drives the session (claude | codex). Renders as the
+		// small label bottom-right on the card body so a mixed dock reads at a
+		// glance. May be absent on an old frame — treated as claude (the
+		// pre-feature default).
+		agent?: 'claude' | 'codex';
 	};
 
 	let tickets = $state<Ticket[]>([]);
@@ -1186,6 +1191,7 @@
 									{#if ticket.title}
 										<div class="title">{ticket.title}</div>
 									{/if}
+									<span class="agent-label">{ticket.agent === 'codex' ? 'codex' : 'claude'}</span>
 								</div>
 							</button>
 
@@ -1901,6 +1907,23 @@
 		line-height: 1.4;
 		color: var(--title);
 		word-break: break-word;
+		/* Keep the last title line clear of the bottom-right agent label. */
+		padding-right: 52px;
+	}
+
+	/* Agent identity (claude | codex), bottom-right on the card body — a mixed
+	   dock needs at-a-glance agent attribution (codex-compatibility plan). Echoes
+	   the .stub .age treatment: small, muted, quiet. */
+	.agent-label {
+		position: absolute;
+		right: 12px;
+		bottom: 6px;
+		font-size: 9px;
+		letter-spacing: 0.14em;
+		font-weight: 600;
+		color: var(--muted);
+		text-transform: lowercase;
+		pointer-events: none;
 	}
 
 	/* Bottom pager: a fixed bar that switches the Attached / Detached pages.

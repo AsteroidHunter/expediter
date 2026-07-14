@@ -16,14 +16,14 @@ import {
 	type EventType
 } from '$lib/ticketStore';
 import { summarize } from '$lib/summarize';
-import { recentTranscriptText, latestCustomTitle } from '$lib/transcript';
+import { recentTranscriptText, localChatTitle } from '$lib/transcript';
 import { getRefreshInterval, getTitleSource } from '$lib/config';
 import { watchForDecline } from '$lib/declineWatcher';
 import { whimsicalName } from '$lib/whimsicalName';
 import { recordSession, forgetSession, updateSessionTitle } from '$lib/server/sessionsStore';
 import { resolveRemotePane } from '$lib/server/sshCorrelation';
 import { resolveAgentPid } from '$lib/server/bootScan';
-import { agentForPath } from '$lib/agent';
+import { agentForPath, type Agent } from '$lib/agent';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -70,14 +70,20 @@ type HookPayload = {
 // Fire-and-forget topic refresh. Caller never awaits. The try/finally pair
 // guarantees `refreshInFlight` is cleared even if summarize or transcript-read
 // throws, so a hang or error doesn't leave the session permanently un-refreshable.
-// Branches on getTitleSource(): chat-title mode reads the JSONL for the latest
-// custom-title line and skips the LLM call entirely; haiku mode runs the
+// Codex sessions always take the chat-title read (threads.title via
+// localChatTitle) regardless of title_source — a codex ticket must never
+// depend on a `claude -p` spawn. Claude keeps the configured behavior:
+// chat-title reads the JSONL's latest custom-title line; haiku runs the
 // original summarize path.
-async function maybeRefreshTopic(session_id: string, transcript_path: string): Promise<void> {
+async function maybeRefreshTopic(
+	session_id: string,
+	transcript_path: string,
+	agent: Agent
+): Promise<void> {
 	markRefreshStart(session_id);
 	try {
-		if (getTitleSource() === 'chat-title') {
-			const title = await latestCustomTitle(transcript_path).catch(() => null);
+		if (agent === 'codex' || getTitleSource() === 'chat-title') {
+			const title = await localChatTitle(agent, session_id, transcript_path).catch(() => null);
 			if (title) setCachedTitle(session_id, title);
 			return;
 		}
@@ -215,13 +221,14 @@ export const POST: RequestHandler = async ({ request }) => {
 		});
 		// Fire-and-forget title pre-fill. In chat-title mode resolveDisplayTitle
 		// already returned a whimsical fallback; this upgrades it as soon as the
-		// jsonl has a real custom-title line. setCachedTitle live-patches any
+		// agent's title source has one (claude: the jsonl's custom-title line;
+		// codex: threads.title in the state db). setCachedTitle live-patches any
 		// currently-displayed ticket for this session (see ticketStore.ts).
 		// Skipped for remote sessions: transcript_path is a far-side path the
 		// containment guard would reject anyway — the payload title (cached
 		// above) is a remote ticket's only title source (decision 9).
 		if (!remote) {
-			void latestCustomTitle(transcript_path)
+			void localChatTitle(agent ?? 'claude', session_id, transcript_path)
 				.then((t) => {
 					if (t) setCachedTitle(session_id, t);
 				})
@@ -245,7 +252,7 @@ export const POST: RequestHandler = async ({ request }) => {
 			// the far box, so both the chat-title read and the summarize read
 			// would fail the containment guard (decision 9).
 			if (transcript_path && !remote && shouldRefresh(session_id, getRefreshInterval())) {
-				void maybeRefreshTopic(session_id, transcript_path);
+				void maybeRefreshTopic(session_id, transcript_path, agent ?? 'claude');
 			}
 		}
 		// SessionEnd is the only terminal clear: the Claude session is genuinely

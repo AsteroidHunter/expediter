@@ -3,7 +3,12 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { Database } from 'bun:sqlite';
-import { latestCustomTitle, recentTranscriptText, codexThreadTitle } from './transcript';
+import {
+	latestCustomTitle,
+	recentTranscriptText,
+	codexThreadTitle,
+	localChatTitle
+} from './transcript';
 
 // Tests must write under ~/.claude/ to pass transcript.ts's TRANSCRIPT_ROOT
 // containment check (same constraint the production gate enforces).
@@ -333,4 +338,29 @@ test('codexThreadTitle trims whitespace and rejects empty/null titles', async ()
 	expect(await codexThreadTitle('blank', fixture.dbPath)).toBeNull();
 	expect(await codexThreadTitle('nullish', fixture.dbPath)).toBeNull();
 	fixture.done();
+});
+
+// ─── localChatTitle (per-agent title routing, plan 3.1) ──────────────────────
+
+test('localChatTitle routes codex to the state db and ignores the transcript', async () => {
+	const fixture = makeStateDb([{ id: 'route-codex', title: 'Ship the adapter' }]);
+	// transcriptPath deliberately bogus: the codex branch must never read it.
+	const title = await localChatTitle(
+		'codex',
+		'route-codex',
+		'/nonexistent/rollout.jsonl',
+		fixture.dbPath
+	);
+	expect(title).toBe('Ship the adapter');
+	fixture.done();
+});
+
+test('localChatTitle routes claude to the transcript custom-title scan', async () => {
+	writeFileSync(
+		transcriptFile,
+		JSON.stringify({ type: 'custom-title', customTitle: 'routed claude title' })
+	);
+	expect(await localChatTitle('claude', 'ignored-id', transcriptFile)).toBe(
+		'routed claude title'
+	);
 });
