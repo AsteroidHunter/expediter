@@ -114,7 +114,7 @@ If you switch networks (say, coffee shop to home), your Mac gets a new IP and th
 
 ## Remote sessions (ssh)
 
-Claude running on another machine -- a dev server, a shared GPU box -- can get tickets too. The topology: tmux stays on your Mac, a local pane runs `ssh <host>`, and claude runs there in the plain ssh session (no tmux needed on the remote). Tickets behave exactly like local ones: they show on your phone, tap-to-focus raises the local ssh pane, `/rename` titles carry over, and tickets survive daemon restarts.
+Claude or codex running on another machine -- a dev server, a shared GPU box -- can get tickets too. The topology: tmux stays on your Mac, a local pane runs `ssh <host>`, and the agent runs there in the plain ssh session (no tmux needed on the remote). Tickets behave exactly like local ones: they show on your phone, tap-to-focus raises the local ssh pane, chat titles carry over (each agent's own source on the far box -- claude's `/rename`-aware transcript title, codex's thread title), and tickets survive daemon restarts.
 
 **One-time setup, two halves** (forgot the flow later? `expediter install remote how` reprints it):
 
@@ -132,13 +132,13 @@ Claude running on another machine -- a dev server, a shared GPU box -- can get t
    curl -fsSL https://raw.githubusercontent.com/AsteroidHunter/expediter/main/install-remote.sh | bash
    ```
 
-   It needs only `python3` and `curl`, touches nothing outside your home directory on that box (fine for shared machines, no root), and merges the same hook entries into the remote's `~/.claude/settings.json`.
+   It needs only `python3` and `curl`, touches nothing outside your home directory on that box (fine for shared machines, no root), and wires every agent it finds there: the same hook entries into the remote's `~/.claude/settings.json`, and for codex the hook registration plus its trust entries into the remote's `~/.codex/`. Installed a new agent on the box later? Paste the same one-liner again.
 
 Each machine gets its own entry -- to link more machines, repeat both steps with each host's name. Undo a machine with `expediter uninstall remote <name>`: it removes that host's tunnel block and prints the matching cleanup command to paste on the box (`install-remote.sh --uninstall`), which removes the hook entries and `~/.expediter/` there.
 
-**Steady state: `ssh <host>`, run `claude`. That's it** -- no wrapper commands, no flags, no per-session setup. The hook on the remote notices it's in an ssh session, sends its events through the tunnel, and the daemon matches the connection back to the exact local pane holding your `ssh` -- so multiple sessions to the same host each get their own ticket.
+**Steady state: `ssh <host>`, run `claude` (or `codex`). That's it** -- no wrapper commands, no flags, no per-session setup. The hook on the remote notices it's in an ssh session, sends its events through the tunnel, and the daemon matches the connection back to the exact local pane holding your `ssh` -- so multiple sessions to the same host each get their own ticket.
 
-**When it won't work (and fails loudly):** the daemon matches remote events to panes by the ssh connection's client port, so anything that obscures that port breaks the match -- source-NAT between Mac and remote, `ProxyJump`/`mosh`, or ssh connection multiplexing (`ControlMaster`). In those cases events are rejected with a logged reason and no ticket appears; you'll never get a ticket that can't focus. Two honest limits: the Mac can't see whether the far-end claude itself is alive (a ticket lives as long as its local ssh pane does), and if someone else on a shared box already holds port 5179, the tunnel silently stays closed -- no tickets until the port frees up.
+**When it won't work (and fails loudly):** the daemon matches remote events to panes by the ssh connection's client port, so anything that obscures that port breaks the match -- source-NAT between Mac and remote, `ProxyJump`/`mosh`, or ssh connection multiplexing (`ControlMaster`). In those cases events are rejected with a logged reason and no ticket appears; you'll never get a ticket that can't focus. Two honest limits: the Mac can't see whether the far-end agent itself is alive (a ticket lives as long as its local ssh pane does), and if someone else on a shared box already holds port 5179, the tunnel silently stays closed -- no tickets until the port frees up.
 
 ## Security & access control
 

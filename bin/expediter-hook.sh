@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
-# expediter-hook.sh — bridges a Claude Code hook event into the Expediter daemon.
+# expediter-hook.sh — bridges a Claude Code / Codex hook event into the
+# Expediter daemon.
 #
-# Usage (from ~/.claude/settings.json):
+# Usage (from ~/.claude/settings.json or $CODEX_HOME/hooks.json):
 #   /path/to/expediter-hook.sh <EVENT_NAME>
 #
-# Reads the Claude Code hook JSON payload on stdin, POSTs to the daemon, and
-# ALWAYS exits 0 so a daemon outage never surfaces as "hook error" in the
-# terminal and Stop never accidentally returns exit 2 (which tells Claude
-# "don't stop, keep going" and would loop the agent back in).
+# Reads the agent's hook JSON payload on stdin (Claude Code and Codex deliver
+# the same stdin-JSON contract), POSTs to the daemon, and ALWAYS exits 0 so a
+# daemon outage never surfaces as "hook error" in the terminal and Stop never
+# accidentally returns exit 2 (which tells the agent "don't stop, keep going"
+# and would loop it back in).
 #
-# One script, two modes:
-#   local  — $TMUX_PANE set (claude runs in a local tmux pane): inject the
+# One script, two modes, both agents:
+#   local  — $TMUX_PANE set (the agent runs in a local tmux pane): inject the
 #            pane id, POST to the local daemon. Unchanged original behavior.
-#   remote — $TMUX_PANE unset but $SSH_CONNECTION set (claude runs on a
+#   remote — $TMUX_PANE unset but $SSH_CONNECTION set (the agent runs on a
 #            remote box, reached from a local tmux pane via ssh): inject
 #            remote:true, the verbatim $SSH_CONNECTION (the Mac daemon
 #            resolves the local pane from its client port — see
-#            src/lib/server/sshCorrelation.ts), and the latest custom-title
-#            from this box's own transcript, which the Mac cannot read. The
-#            POST goes to localhost:5179 exactly as in local mode; the
-#            installer-written RemoteForward tunnel carries it to the Mac.
+#            src/lib/server/sshCorrelation.ts), and this box's own chat title,
+#            which the Mac cannot read. The title source is per-agent — the
+#            one agent-specific fork in this script: a Claude transcript is
+#            scanned backward for its latest custom-title line; a Codex
+#            session's title is a one-row read of threads.title from this
+#            box's own state db (stdlib sqlite3, read-only). The POST goes to
+#            localhost:5179 exactly as in local mode; the installer-written
+#            RemoteForward tunnel carries it to the Mac.
 
 set -u
 
@@ -47,15 +53,19 @@ else
 	exit 0
 fi
 
-# Re-emit Claude Code's JSON payload with the mode's identity fields added and
+# Re-emit the agent's JSON payload with the mode's identity fields added and
 # (defensively) hook_event_name set from $1. Uses python3 -c (not
 # python3 - <<HEREDOC, which would attach the heredoc as python's stdin and
-# steal Claude Code's JSON) so the original piped stdin reaches
-# sys.stdin.read(). In remote mode the same python process also backward-scans
-# this box's transcript (the path Claude passed in the stdin JSON) for the
-# latest custom-title line — mirroring the daemon's latestCustomTitle
-# (src/lib/transcript.ts) — because the Mac cannot read a remote transcript;
-# the field is omitted when no title exists yet.
+# steal the agent's JSON) so the original piped stdin reaches
+# sys.stdin.read(). In remote mode the same python process also ships this
+# box's chat title — the Mac cannot read far-side sources — branched by the
+# transcript_path segment: /.codex/ reads threads.title from the box's own
+# state db (${CODEX_SQLITE_HOME:-${CODEX_HOME:-~/.codex}}/state_5.sqlite,
+# read-only, stdlib sqlite3 — the env chain resolves correctly because the
+# hook inherits the codex process's environment); anything else keeps the
+# Claude backward scan for the latest custom-title line, mirroring the
+# daemon's latestCustomTitle (src/lib/transcript.ts). The field is omitted
+# when no title exists yet (absent row/db, or a brand-new session).
 PAYLOAD=$(python3 -c '
 import json, os, sys
 try:
@@ -70,7 +80,29 @@ if mode == "remote":
     data["remote"] = True
     data["ssh_connection"] = os.environ.get("SSH_CONNECTION", "")
     tp = data.get("transcript_path")
-    if isinstance(tp, str) and tp:
+    if isinstance(tp, str) and "/.codex/" in tp:
+        sid = data.get("session_id")
+        if isinstance(sid, str) and sid:
+            try:
+                import sqlite3
+                home = (
+                    os.environ.get("CODEX_SQLITE_HOME")
+                    or os.environ.get("CODEX_HOME")
+                    or os.path.expanduser("~/.codex")
+                )
+                db = os.path.join(home, "state_5.sqlite")
+                con = sqlite3.connect("file:" + db + "?mode=ro", uri=True)
+                try:
+                    row = con.execute(
+                        "SELECT title FROM threads WHERE id = ?", (sid,)
+                    ).fetchone()
+                finally:
+                    con.close()
+                if row and isinstance(row[0], str) and row[0].strip():
+                    data["title"] = row[0].strip()
+            except Exception:
+                pass
+    elif isinstance(tp, str) and tp:
         try:
             with open(tp, "rb") as f:
                 lines = f.read().decode("utf-8", "replace").splitlines()
