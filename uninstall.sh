@@ -20,10 +20,11 @@
 #      ~/.tmux.conf, plus the "# Added/Created by Expediter installer" comment
 #      that install.sh wrote above it. Deletes the file if nothing else is in
 #      it. Backs up before touching.
-#   8. Splices the marker-delimited remote-sessions block (Host +
-#      RemoteForward) out of ~/.ssh/config. Backs up first. Never deletes the
-#      file itself, even if it ends up empty — an empty ssh config is
-#      equivalent to a missing one, and nothing in ~/.ssh gets deleted.
+#   8. Splices every marker-delimited remote-sessions block (one per host,
+#      written by `expediter remote install <name>`) out of ~/.ssh/config.
+#      Backs up first. Never deletes the file itself, even if it ends up
+#      empty — an empty ssh config is equivalent to a missing one, and
+#      nothing in ~/.ssh gets deleted.
 #   9. Removes ~/.expediter-install.log.
 #
 # What it does NOT do:
@@ -454,32 +455,36 @@ section "6. Remote tunnel"
 printf 'Removing the expediter remote-sessions block from ~/.ssh/config.\n'
 printf 'A timestamped backup is saved first.\n\n'
 
-if [ -f "$SSH_CONFIG" ] && grep -Fq "# >>> expediter remote-sessions >>>" "$SSH_CONFIG"; then
+if [ -f "$SSH_CONFIG" ] && grep -Fq "# >>> expediter remote-sessions" "$SSH_CONFIG"; then
 	BACKUP="$SSH_CONFIG.expediter-uninstall-bak.$TIMESTAMP"
 	cp "$SSH_CONFIG" "$BACKUP"
 	printf '%s✓%s Backed up ~/.ssh/config → %s\n' "$GREEN" "$RESET" "$BACKUP"
 
 	# Splice every marker-delimited block (a corrupt/unterminated block is
 	# swallowed to EOF), plus the single blank line the installer left above
-	# it. Unlike the tmux.conf splice, the file is never deleted even when it
-	# ends up empty: an empty ssh config behaves exactly like a missing one,
-	# and we don't delete anything under ~/.ssh on principle.
+	# it. Markers are matched by prefix: `expediter remote install <name>`
+	# writes one block per host with the host name in the marker
+	# (`# >>> expediter remote-sessions: <name> >>>`), and the pre-release
+	# host-less form is caught by the same prefix. Unlike the tmux.conf
+	# splice, the file is never deleted even when it ends up empty: an empty
+	# ssh config behaves exactly like a missing one, and we don't delete
+	# anything under ~/.ssh on principle.
 	count=$(python3 - "$SSH_CONFIG" <<'PY'
 import sys
 from pathlib import Path
 
 config_path = Path(sys.argv[1])
-BEGIN = "# >>> expediter remote-sessions >>>"
-END = "# <<< expediter remote-sessions <<<"
+BEGIN_PREFIX = "# >>> expediter remote-sessions"
+END_PREFIX = "# <<< expediter remote-sessions"
 
 lines = config_path.read_text().splitlines()
 out = []
 i = 0
 removed = 0
 while i < len(lines):
-    if lines[i].strip() == BEGIN:
+    if lines[i].strip().startswith(BEGIN_PREFIX):
         j = i + 1
-        while j < len(lines) and lines[j].strip() != END:
+        while j < len(lines) and not lines[j].strip().startswith(END_PREFIX):
             j += 1
         removed += 1
         i = j + 1

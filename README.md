@@ -53,7 +53,8 @@ cd expediter
    - `claudex` -- opens a fresh tmux session with `claude` and `expediter` in side-by-side panes, so you can start a session with one command.
 6. Offer to merge Expediter's hook entries into `~/.claude/settings.json` (with a timestamped backup).
 7. Offer to apply Expediter's tmux styling via `source-file` in `~/.tmux.conf` (with a backup if you already have one).
-8. Ask which ssh hosts (if any) should get remote-session tickets, and write a scoped `RemoteForward` block to `~/.ssh/config` for them (skippable; see [Remote sessions](#remote-sessions-ssh)).
+
+Machines you ssh into are linked afterwards with one command -- see [Remote sessions](#remote-sessions-ssh).
 
 </details>
 
@@ -115,17 +116,25 @@ If you switch networks (say, coffee shop to home), your Mac gets a new IP and th
 
 Claude running on another machine -- a dev server, a shared GPU box -- can get tickets too. The topology: tmux stays on your Mac, a local pane runs `ssh <host>`, and claude runs there in the plain ssh session (no tmux needed on the remote). Tickets behave exactly like local ones: they show on your phone, tap-to-focus raises the local ssh pane, `/rename` titles carry over, and tickets survive daemon restarts.
 
-**One-time setup, two halves:**
+**One-time setup, two halves** (forgot the flow later? `expediter remote install how` reprints it):
 
-1. **Mac side** -- the installer's "Remote sessions" prompt writes a reverse-tunnel block for your chosen host(s) into `~/.ssh/config` (`RemoteForward 5179 localhost:5179`, scoped to those hosts only, marker-delimited so re-runs rewrite it cleanly). Skipped it during install? Just re-run `./install.sh` -- it's idempotent.
-2. **Remote side** -- copy the mini-client over and run it:
+1. **Mac side** -- run:
 
    ```bash
-   scp install-remote.sh bin/expediter-hook.sh <host>:
-   ssh <host> bash install-remote.sh
+   expediter remote install <name>
+   ```
+
+   `<name>` is whatever you type after `ssh` (e.g. `devbox`). This writes a reverse-tunnel block for that host into `~/.ssh/config` (`RemoteForward 5179 localhost:5179`, scoped to that host only, marker-delimited; re-runs rewrite it cleanly), then prints the command for step 2. It never opens an ssh connection itself.
+
+2. **Remote side** -- ssh into the machine as usual and paste the printed command:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/AsteroidHunter/expediter/main/install-remote.sh | bash
    ```
 
    It needs only `python3` and `curl`, touches nothing outside your home directory on that box (fine for shared machines, no root), and merges the same hook entries into the remote's `~/.claude/settings.json`.
+
+Each machine gets its own entry -- to link more machines, repeat both steps with each host's name. Undo a machine with `expediter remote uninstall <name>`: it removes that host's tunnel block and prints the matching cleanup command to paste on the box (`install-remote.sh --uninstall`), which removes the hook entries and `~/.expediter/` there.
 
 **Steady state: `ssh <host>`, run `claude`. That's it** -- no wrapper commands, no flags, no per-session setup. The hook on the remote notices it's in an ssh session, sends its events through the tunnel, and the daemon matches the connection back to the exact local pane holding your `ssh` -- so multiple sessions to the same host each get their own ticket.
 
