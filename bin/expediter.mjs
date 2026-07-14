@@ -113,9 +113,21 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 		console.error('Run `expediter install remote how` for the full steps.');
 		process.exit(1);
 	}
-	if (!/^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(name)) {
+	// ssh `Host` patterns match the machine name only — a pattern containing
+	// `user@` matches nothing, ever, and the tunnel silently never opens. So a
+	// user@host name is rejected with the corrected command, not written.
+	if (name.includes('@')) {
+		const host = name.split('@').pop();
 		console.error(
-			`expediter: "${name}" does not look like an ssh host alias (letters, digits, . _ @ - only).`
+			`expediter: use just the machine name — ssh config can't match the "${name.split('@')[0]}@" part, so the tunnel would never open.`
+		);
+		console.error(`Run: expediter ${action} remote ${host}`);
+		console.error('(Typing user@ when you ssh in is still fine — it only can\'t be in this name.)');
+		process.exit(1);
+	}
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+		console.error(
+			`expediter: "${name}" does not look like an ssh host alias (letters, digits, . _ - only).`
 		);
 		process.exit(1);
 	}
