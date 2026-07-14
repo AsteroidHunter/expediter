@@ -20,7 +20,8 @@ import { recentTranscriptText, latestCustomTitle } from '$lib/transcript';
 import { getRefreshInterval, getTitleSource } from '$lib/config';
 import { watchForDecline } from '$lib/declineWatcher';
 import { whimsicalName } from '$lib/whimsicalName';
-import { recordSession, forgetSession } from '$lib/server/sessionsStore';
+import { recordSession, forgetSession, updateSessionTitle } from '$lib/server/sessionsStore';
+import { resolveRemotePane } from '$lib/server/sshCorrelation';
 
 const SUMMARIZE_EVENTS: Record<string, EventType> = {
 	Stop: 'Stop',
@@ -55,6 +56,13 @@ type HookPayload = {
 	transcript_path?: string;
 	cwd?: string;
 	tmux_pane?: string;
+	// Remote mode (hook running on another box, reaching us through the
+	// reverse ssh tunnel): `remote: true` plus the far side's verbatim
+	// $SSH_CONNECTION in place of tmux_pane, and optionally the latest
+	// custom-title read from the far side's own transcript.
+	remote?: boolean;
+	ssh_connection?: string;
+	title?: string;
 };
 
 // Fire-and-forget topic refresh. Caller never awaits. The try/finally pair
@@ -104,9 +112,48 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ ok: false, error: 'invalid json' }, { status: 400 });
 	}
 
-	const { hook_event_name, session_id, transcript_path, cwd, tmux_pane } = payload;
+	const { hook_event_name, session_id, transcript_path, cwd } = payload;
 	if (!hook_event_name || !session_id) {
 		return json({ ok: false, error: 'missing hook_event_name or session_id' }, { status: 400 });
+	}
+
+	// Remote events carry no tmux_pane — the far side can't know it. Resolve
+	// the local ssh pane from the payload's $SSH_CONNECTION before branching,
+	// so every branch below sees a pane exactly as it would for a local event.
+	// Correlation failure is a loud 422 and no ticket: an unfocusable ticket
+	// violates the product's core promise (decision 10 — no fallbacks). Events
+	// with neither identifier still hit the existing `missing tmux_pane` 400s.
+	const remote = payload.remote === true;
+	let tmux_pane = payload.tmux_pane;
+	if (remote && !tmux_pane && payload.ssh_connection) {
+		const resolution = await resolveRemotePane(session_id, payload.ssh_connection);
+		if (!resolution.ok) {
+			console.warn(
+				`[remote] ssh correlation failed at step=${resolution.step} session=${session_id.slice(0, 8)}: ${resolution.detail}`
+			);
+			return json(
+				{ ok: false, error: `ssh correlation failed: ${resolution.step}` },
+				{ status: 422 }
+			);
+		}
+		tmux_pane = resolution.paneId;
+	}
+
+	// Remote title passthrough (decision 7): the Mac can't read a remote
+	// transcript, so the hook ships the far side's latest custom-title in the
+	// payload. Cache it before any branch — resolveDisplayTitle prefers the
+	// cache, and setCachedTitle live-patches a currently-displayed ticket.
+	// Persist it too (decision 13) so a daemon restart reseeds the ticket with
+	// its title; SessionStart skips the extra write because recordSession
+	// below stores the title with the full entry.
+	const payloadTitle = remote && typeof payload.title === 'string' ? payload.title.trim() : '';
+	if (payloadTitle) {
+		setCachedTitle(session_id, payloadTitle);
+		if (hook_event_name !== 'SessionStart') {
+			void updateSessionTitle(session_id, payloadTitle).catch((e) =>
+				console.warn('[remote] updateSessionTitle failed', e)
+			);
+		}
 	}
 
 	// Any subsequent event for this session supersedes a still-running decline
@@ -135,7 +182,9 @@ export const POST: RequestHandler = async ({ request }) => {
 			session_id,
 			tmux_pane,
 			cwd: cwd ?? '',
-			transcript_path
+			transcript_path,
+			...(remote ? { remote: true } : {}),
+			...(payloadTitle ? { title: payloadTitle } : {})
 		}).catch((e) => console.warn('[sessionStart] recordSession failed', e));
 		upsert({
 			session_id,
@@ -143,17 +192,23 @@ export const POST: RequestHandler = async ({ request }) => {
 			cwd: cwd ?? '',
 			title: resolveDisplayTitle(session_id),
 			event_type: 'Idle',
-			created_at: Date.now()
+			created_at: Date.now(),
+			remote
 		});
 		// Fire-and-forget title pre-fill. In chat-title mode resolveDisplayTitle
 		// already returned a whimsical fallback; this upgrades it as soon as the
 		// jsonl has a real custom-title line. setCachedTitle live-patches any
 		// currently-displayed ticket for this session (see ticketStore.ts).
-		void latestCustomTitle(transcript_path)
-			.then((t) => {
-				if (t) setCachedTitle(session_id, t);
-			})
-			.catch(() => {});
+		// Skipped for remote sessions: transcript_path is a far-side path the
+		// containment guard would reject anyway — the payload title (cached
+		// above) is a remote ticket's only title source (decision 9).
+		if (!remote) {
+			void latestCustomTitle(transcript_path)
+				.then((t) => {
+					if (t) setCachedTitle(session_id, t);
+				})
+				.catch(() => {});
+		}
 		return json({ ok: true, action: 'session_started' });
 	}
 
@@ -168,7 +223,10 @@ export const POST: RequestHandler = async ({ request }) => {
 			// the user's prompt + prior context is sufficient — assistant text is not
 			// required.
 			incrementCounter(session_id);
-			if (transcript_path && shouldRefresh(session_id, getRefreshInterval())) {
+			// Remote sessions skip the topic refresh: transcript_path points at
+			// the far box, so both the chat-title read and the summarize read
+			// would fail the containment guard (decision 9).
+			if (transcript_path && !remote && shouldRefresh(session_id, getRefreshInterval())) {
 				void maybeRefreshTopic(session_id, transcript_path);
 			}
 		}
@@ -225,7 +283,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		cwd: cwd ?? '',
 		title: resolveDisplayTitle(session_id),
 		event_type: eventType,
-		created_at
+		created_at,
+		remote
 	});
 
 	// Claude Code emits no hook event when the user manually declines or
@@ -237,7 +296,10 @@ export const POST: RequestHandler = async ({ request }) => {
 	// replaced by a newer event for the same session_id. The cancel handle is
 	// stored so an approved (not declined) PR doesn't leak the watcher — the
 	// next event for this session cancels via cancelActiveDeclineWatcher above.
-	if (eventType === 'PermissionRequest' && transcript_path) {
+	// Remote tickets get no watcher: the transcript to tail is on the far box
+	// (decision 9), so a manually-declined remote PR clears on the session's
+	// next event instead — the same far-end blindness accepted in decision 5.
+	if (eventType === 'PermissionRequest' && transcript_path && !remote) {
 		const cancel = watchForDecline({
 			transcriptPath: transcript_path,
 			sessionId: session_id,

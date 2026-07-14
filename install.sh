@@ -16,6 +16,9 @@
 #   7. Offers to merge Expediter's hook entries into ~/.claude/settings.json,
 #      with a timestamped backup.
 #   8. Offers to source expediter.tmux.conf from ~/.tmux.conf, with backup.
+#
+# Remote machines are NOT configured here: `expediter remote install <host>`
+# (after this install) is the one path that writes ssh-config tunnel blocks.
 
 set -euo pipefail
 
@@ -550,6 +553,10 @@ esac
 
 # --- done ------------------------------------------------------------------
 
+# Closing message — copy locked verbatim against the wiki plan's checklist 6.4
+# (remote-session-tickets). Remote machines are set up after install via
+# `expediter remote install <name>`, never by a prompt here.
+
 printf '\n%s✦%s Expediter is ready!\n\n' "$GREEN" "$RESET"
 printf '%sNext steps:%s\n\n' "$BOLD" "$RESET"
 printf '  %s1.%s Open a new terminal tab.\n\n' "$BOLD" "$RESET"
@@ -557,8 +564,11 @@ printf '  %s2.%s Run one of these commands:\n\n' "$BOLD" "$RESET"
 printf '       %sexpediter%s     start the daemon and print the QR for linking your phone\n' "$BOLD" "$RESET"
 printf '       %sclaudex%s       open tmux with claude + expediter side-by-side\n' "$BOLD" "$RESET"
 printf '       %sclaudex uno%s   new to tmux or Claude Code? start here\n\n' "$BOLD" "$RESET"
-printf '  %s3.%s The connection uses %sHTTPS%s by default (needed for the microphone / voice\n' "$BOLD" "$RESET" "$BOLD" "$RESET"
-printf '     feature and to install Expediter to your home screen). The first time a phone\n'
-printf '     connects, the page walks you through a one-time certificate trust step in\n'
-printf '     Safari -- no files to move. Prefer plain HTTP with no certificate? Run\n'
-printf '     %sexpediter --http%s.\n\n' "$BOLD" "$RESET"
+printf '  %s3.%s The connection uses %sHTTPS%s by default -- it'\''s more secure, and installing\n' "$BOLD" "$RESET" "$BOLD" "$RESET"
+printf '     Expediter to your home screen requires it. The first time a phone connects,\n'
+printf '     the page walks you through a one-time certificate trust step in Safari --\n'
+printf '     no files to move. Prefer plain HTTP with no certificate? Run %sexpediter --http%s.\n\n' "$BOLD" "$RESET"
+printf '  %s4.%s After running the expediter and scanning the QR code, %sall claude or codex\n' "$BOLD" "$RESET" "$BOLD"
+printf '     sessions that run within tmux%s will show up as tickets on the phone!\n\n' "$RESET"
+printf '(If you run claude or codex on a remote machine and wish to link it with the\n'
+printf 'expediter, run the following: expediter remote install how)\n\n'

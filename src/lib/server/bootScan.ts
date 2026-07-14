@@ -166,8 +166,13 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 		cwd: entry.cwd,
 		title: initialTitle,
 		event_type: 'Idle',
-		created_at: Date.now()
+		created_at: Date.now(),
+		remote: entry.remote ?? false
 	});
+	// A remote entry's transcript_path points at the far box — unreadable here
+	// (decision 9). The persisted title passed in initialTitle is the only
+	// title source; the next remote event refreshes it via payload passthrough.
+	if (entry.remote) return;
 	// Async title upgrade. A real custom-title from the jsonl supersedes the
 	// whimsical fallback via setCachedTitle's live-patch in the ticket store.
 	void latestCustomTitle(entry.transcript_path)
@@ -228,13 +233,22 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 	// still alive (its claude process is running), so pruneStaleSessions must
 	// not drop its persisted record just because no client is attached.
 	const livePaneIds = new Set(claudePanes.map((p) => p.pane_id));
+	// Remote tickets are judged against ALL panes, not claude panes: their
+	// local pane runs `ssh`, and pane existence is the strongest liveness
+	// signal this machine has for a far-end claude (decision 5 — an exited
+	// remote claude behind a live ssh pane is accepted blindness).
+	const allPaneIds = new Set(panes.map((p) => p.pane_id));
 
 	const persisted = await loadSessions();
-	await pruneStaleSessions(livePaneIds);
+	await pruneStaleSessions(livePaneIds, allPaneIds);
 
 	const byPane = new Map<string, SessionEntry>();
 	for (const entry of Object.values(persisted)) {
-		if (livePaneIds.has(entry.tmux_pane)) byPane.set(entry.tmux_pane, entry);
+		// Remote entries are excluded: they reseed through their own loop below,
+		// and a remote entry whose pane now runs a *local* claude is stale by
+		// definition (the topology changed under it) — the placeholder path plus
+		// the first real hook event rekey the pane correctly.
+		if (!entry.remote && livePaneIds.has(entry.tmux_pane)) byPane.set(entry.tmux_pane, entry);
 	}
 
 	// shell_pid → SessionMeta. Built from ~/.claude/sessions/*.json by walking
@@ -300,11 +314,43 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 		setAttached(`pending:${pane.pane_id}`, pane.session_attached);
 	}
 
-	// GC: drop tickets whose pane is no longer a live claude pane (claude exited,
-	// or the pane died without a SessionEnd). The created_at guard spares tickets
+	const rowByPane = new Map<string, PaneRow>();
+	for (const p of panes) rowByPane.set(p.pane_id, p);
+
+	// Attach sweep for remote tickets: their pane runs `ssh`, so the
+	// claude-pane loop above never sees them. Same flag-flip-only contract —
+	// event_type / working / title stay owned by the hook pipeline.
+	for (const ticket of list()) {
+		if (!ticket.remote) continue;
+		const row = rowByPane.get(ticket.tmux_pane);
+		if (row) setAttached(ticket.session_id, row.session_attached);
+	}
+
+	// Boot reseed for remote sessions: a persisted remote entry whose local
+	// ssh pane is still alive comes back as an Idle ticket carrying the
+	// persisted title (the far-side transcript is unreadable here, so the
+	// title cannot be re-derived — decision 13). Panes without a persisted
+	// remote entry get nothing: `pending:` placeholders are for claude panes
+	// only, and a non-claude pane with no remote history is just a shell.
+	for (const entry of Object.values(persisted)) {
+		if (!entry.remote) continue;
+		const row = rowByPane.get(entry.tmux_pane);
+		if (!row) continue;
+		if (findByPane(entry.tmux_pane)) continue;
+		upsertIdle(entry, entry.title || bootScanInitialTitle(entry.session_id));
+		setAttached(entry.session_id, row.session_attached);
+	}
+
+	// GC: drop tickets whose pane is gone. A local ticket needs its pane to
+	// still be a live *claude* pane (claude exited without SessionEnd → reap);
+	// a remote ticket's pane legitimately runs `ssh`, so it lives as long as
+	// the pane itself does (decision 5). The created_at guard spares tickets
 	// the hook pipeline created during the await above (younger than `start`).
 	for (const ticket of list()) {
-		if (!livePaneIds.has(ticket.tmux_pane) && ticket.created_at < start) {
+		const paneAlive = ticket.remote
+			? allPaneIds.has(ticket.tmux_pane)
+			: livePaneIds.has(ticket.tmux_pane);
+		if (!paneAlive && ticket.created_at < start) {
 			remove(ticket.session_id);
 		}
 	}
@@ -322,9 +368,13 @@ async function lightSync(deps: BootScanDeps): Promise<void> {
 		console.warn('[reconcile:light] tmux list-panes failed:', err);
 		return;
 	}
+	// ALL panes, not just claude panes: a remote ticket's pane runs `ssh`, and
+	// its detach/attach flips must land instantly too (settled 2026-07-12). A
+	// local ticket whose pane no longer runs claude is moribund either way —
+	// flipping its flag until the next full reconcile GCs it is harmless.
 	const attachedByPane = new Map<string, boolean>();
 	for (const p of panes) {
-		if (isClaudePane(p)) attachedByPane.set(p.pane_id, p.session_attached);
+		attachedByPane.set(p.pane_id, p.session_attached);
 	}
 	// Flag-flip only. A pane missing from the snapshot is left untouched for the
 	// next full reconcile (boot/poll) to seed or GC.

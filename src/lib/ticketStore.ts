@@ -29,6 +29,13 @@ export type Ticket = {
 	// local audio on that backend). Transient — upsert preserves it across
 	// re-upserts, defaulting false for a brand-new ticket.
 	recording: boolean;
+	// True when the claude behind this ticket runs on another machine, reached
+	// through an ssh client in the (local) tmux_pane above. Selects the remote
+	// lifecycle rules: reconcile judges liveness by pane existence instead of
+	// pane-runs-claude, and all local transcript reads are skipped — the
+	// transcript lives on the far box. Set from the hook payload; local events
+	// never carry it.
+	remote: boolean;
 };
 
 type SessionTopic = {
@@ -77,7 +84,9 @@ const EVENT_PRIORITY: Record<EventType, number> = {
 	Idle: -1
 };
 
-export function upsert(ticket: Omit<Ticket, 'working' | 'attached' | 'recording'>): void {
+export function upsert(
+	ticket: Omit<Ticket, 'working' | 'attached' | 'recording' | 'remote'> & { remote?: boolean }
+): void {
 	const existing = store.get(ticket.session_id);
 	// EVENT_PRIORITY guards against same-cycle Notification clobbering a
 	// PermissionRequest. Once a ticket is working the prior cycle is over, so
@@ -95,6 +104,7 @@ export function upsert(ticket: Omit<Ticket, 'working' | 'attached' | 'recording'
 	// real values via setAttached / setRecording.
 	store.set(ticket.session_id, {
 		...ticket,
+		remote: ticket.remote ?? false,
 		working: false,
 		attached: existing?.attached ?? true,
 		recording: existing?.recording ?? false

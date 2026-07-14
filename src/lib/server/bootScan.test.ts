@@ -416,6 +416,194 @@ test('reconcile light mode flips flags without seeding or GC', async () => {
 	expect(list().find((t) => t.tmux_pane === '%92')).toBeUndefined(); // NOT seeded
 });
 
+// ─── remote tickets (lifecycle rules differ from local) ─────────────────────
+
+// A remote ticket's local pane runs `ssh`, never claude.
+function sshPane(pane_id: string, pane_pid: number, attached = true): PaneRow {
+	return {
+		pane_id,
+		pane_pid,
+		pane_current_command: 'ssh',
+		pane_current_path: '/Users/x',
+		session_attached: attached
+	};
+}
+
+// The rule that kills the reap-flicker: a remote ticket survives the GC while
+// its ssh pane exists, even though that pane never runs claude — while a
+// LOCAL ticket on the same kind of pane is reaped by the claude-pane rule.
+test('reconcile spares a remote ticket on a live ssh pane and reaps a local one', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('remote-sess');
+		remove('local-stale');
+	});
+
+	upsert({
+		session_id: 'remote-sess',
+		tmux_pane: '%70',
+		cwd: '/remote/proj',
+		title: 'gpu box',
+		event_type: 'Stop',
+		created_at: Date.now() - 10_000,
+		remote: true
+	});
+	upsert({
+		session_id: 'local-stale',
+		tmux_pane: '%71',
+		cwd: '/local/proj',
+		title: 'dead local',
+		event_type: 'Stop',
+		created_at: Date.now() - 10_000
+	});
+
+	await runBootScan({
+		listPanes: async () => [sshPane('%70', 7000), sshPane('%71', 7100)],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	expect(list().find((t) => t.session_id === 'remote-sess')).toBeDefined();
+	expect(list().find((t) => t.session_id === 'local-stale')).toBeUndefined();
+});
+
+test('reconcile reaps a remote ticket once its ssh pane is gone', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('remote-gone'));
+
+	upsert({
+		session_id: 'remote-gone',
+		tmux_pane: '%75',
+		cwd: '/remote/proj',
+		title: 'gone box',
+		event_type: 'Stop',
+		created_at: Date.now() - 10_000,
+		remote: true
+	});
+
+	await runBootScan({
+		listPanes: async () => [],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	expect(list().find((t) => t.session_id === 'remote-gone')).toBeUndefined();
+});
+
+// Boot reseed (decisions 6+13): a persisted remote entry whose ssh pane
+// survived the daemon restart comes back as an Idle ticket with the persisted
+// title and the pane row's attach state. A non-claude pane with NO remote
+// history gets nothing — pending: placeholders are for claude panes only.
+test('runBootScan reseeds a persisted remote session with its title; no placeholder for bare panes', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('remote-reseed');
+		remove('pending:%81');
+	});
+
+	await recordSession({
+		session_id: 'remote-reseed',
+		tmux_pane: '%80',
+		cwd: '/remote/proj',
+		transcript_path: '/remote/home/u/.claude/projects/x/t.jsonl',
+		remote: true,
+		title: 'gpu box refactor'
+	});
+
+	await runBootScan({
+		listPanes: async () => [sshPane('%80', 8000, false), sshPane('%81', 8100)],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	const t = list().find((x) => x.session_id === 'remote-reseed');
+	expect(t).toBeDefined();
+	expect(t?.event_type).toBe('Idle');
+	expect(t?.remote).toBe(true);
+	expect(t?.title).toBe('gpu box refactor');
+	expect(t?.attached).toBe(false); // pane row said detached
+	expect(list().find((x) => x.tmux_pane === '%81')).toBeUndefined(); // no placeholder
+});
+
+test('a reseeded remote entry without a persisted title falls back to a whimsical name', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('remote-untitled'));
+
+	await recordSession({
+		session_id: 'remote-untitled',
+		tmux_pane: '%82',
+		cwd: '/remote/proj',
+		transcript_path: '/remote/t.jsonl',
+		remote: true
+	});
+
+	await runBootScan({
+		listPanes: async () => [sshPane('%82', 8200)],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	const t = list().find((x) => x.session_id === 'remote-untitled');
+	expect(t?.remote).toBe(true);
+	expect(t?.title).not.toBe(''); // never blank
+});
+
+// Detached-state sweep for remote panes (settled 2026-07-12): the full
+// reconcile flips an existing remote ticket's attach flag from the pane row
+// without re-seeding it.
+test('reconcile flips a remote ticket detached when its ssh pane detaches', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('remote-flip'));
+
+	upsert({
+		session_id: 'remote-flip',
+		tmux_pane: '%83',
+		cwd: '/remote/proj',
+		title: 'flip box',
+		event_type: 'PermissionRequest',
+		created_at: Date.now(),
+		remote: true
+	});
+
+	await runBootScan({
+		listPanes: async () => [sshPane('%83', 8300, false)],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	const t = list().find((x) => x.session_id === 'remote-flip');
+	expect(t?.attached).toBe(false);
+	expect(t?.event_type).toBe('PermissionRequest'); // untouched by the sweep
+});
+
+// The instant (tmux-hook light) path covers ssh panes too — the attach map is
+// built from ALL panes, not just claude panes.
+test('light reconcile flips a remote ticket without a full scan', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('remote-light'));
+
+	upsert({
+		session_id: 'remote-light',
+		tmux_pane: '%84',
+		cwd: '/remote/proj',
+		title: 'light box',
+		event_type: 'Stop',
+		created_at: Date.now(),
+		remote: true
+	});
+
+	await reconcile(
+		{
+			listPanes: async () => [sshPane('%84', 8400, false)],
+			readSessionMetas: async () => [],
+			parentPid: async () => null
+		},
+		'light'
+	);
+
+	expect(list().find((t) => t.session_id === 'remote-light')?.attached).toBe(false);
+});
+
 // ─── slow poll ───────────────────────────────────────────────────────────────
 
 // Polls a predicate until true or timeout, so the interval-driven poll test

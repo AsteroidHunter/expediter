@@ -69,15 +69,194 @@ if (process.argv[2] === 'update') {
 	process.exit(res.status ?? 1);
 }
 
+// `expediter remote install <name>` / `expediter remote uninstall <name>` —
+// remote-session setup (one marker-delimited ~/.ssh/config block per host, so
+// machines are added and removed independently). Handled before anything else
+// so it never starts the daemon, and it never opens an ssh connection itself:
+// the Mac half writes local config and prints the command the user pastes on
+// the box. `expediter remote install how` prints the plain-language steps.
+if (process.argv[2] === 'remote') {
+	const action = process.argv[3];
+	const name = process.argv[4];
+
+	const HOW_TEXT = [
+		'To link a remote machine:',
+		'',
+		'  1. On this Mac, run: expediter remote install <name>',
+		'     <name> is what you type after `ssh` (e.g. devbox). This sets up the',
+		'     connection path and prints the install command for step 2.',
+		'',
+		'  2. ssh into the remote machine as usual and paste that printed command.',
+		'     It installs the mini-client in your home directory there.',
+		'',
+		'  3. That\'s it. From then on: ssh in, run claude -- tickets appear on your phone.',
+		'',
+		'To undo, run: expediter remote uninstall <name>',
+		'The installation is per-machine -- to link more machines, repeat the steps',
+		'above with each machine\'s host name.'
+	].join('\n');
+
+	if (action !== 'install' && action !== 'uninstall') {
+		console.error('Usage: expediter remote install <name>     set up tickets for an ssh host');
+		console.error('       expediter remote uninstall <name>   undo it for that host');
+		console.error('       expediter remote install how        print the setup steps');
+		process.exit(1);
+	}
+	if (action === 'install' && name === 'how') {
+		console.log(HOW_TEXT);
+		process.exit(0);
+	}
+	if (!name) {
+		console.error(
+			`expediter: remote ${action} needs the host name you normally type after \`ssh\`.`
+		);
+		console.error('Run `expediter remote install how` for the full steps.');
+		process.exit(1);
+	}
+	if (!/^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(name)) {
+		console.error(
+			`expediter: "${name}" does not look like an ssh host alias (letters, digits, . _ @ - only).`
+		);
+		process.exit(1);
+	}
+
+	// The pasted one-liner fetches install-remote.sh from the raw GitHub URL of
+	// the branch this install runs — main for normal installs, the feature
+	// branch during development — so the fetched installer (and the hook it
+	// fetches in turn) match the daemon. `main` only when detection is
+	// impossible (detached HEAD / not a git checkout).
+	function detectBranch() {
+		if (!HOME) return 'main';
+		const r = spawnSync('git', ['-C', HOME, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+			encoding: 'utf8'
+		});
+		const b = r.status === 0 ? r.stdout.trim() : '';
+		return b && b !== 'HEAD' ? b : 'main';
+	}
+	function pasteCommand({ uninstall = false } = {}) {
+		const branch = detectBranch();
+		const url = `https://raw.githubusercontent.com/AsteroidHunter/expediter/${branch}/install-remote.sh`;
+		const args = [];
+		if (uninstall) args.push('--uninstall');
+		if (!uninstall && branch !== 'main') args.push('--branch', branch);
+		return `curl -fsSL ${url} | bash${args.length ? ` -s -- ${args.join(' ')}` : ''}`;
+	}
+
+	const SSH_DIR = path.join(os.homedir(), '.ssh');
+	const SSH_CONFIG_PATH = path.join(SSH_DIR, 'config');
+	const BEGIN = `# >>> expediter remote-sessions: ${name} >>>`;
+	const END = `# <<< expediter remote-sessions: ${name} <<<`;
+	const stamp = () => {
+		const d = new Date();
+		const p = (n) => String(n).padStart(2, '0');
+		return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+	};
+
+	async function readConfigLines() {
+		try {
+			return (await fs.readFile(SSH_CONFIG_PATH, 'utf8')).split('\n');
+		} catch {
+			return null; // no config file yet
+		}
+	}
+	async function backupConfig() {
+		try {
+			const raw = await fs.readFile(SSH_CONFIG_PATH, 'utf8');
+			if (raw.trim()) {
+				await fs.copyFile(SSH_CONFIG_PATH, `${SSH_CONFIG_PATH}.expediter-bak.${stamp()}`);
+			}
+		} catch {
+			// nothing to back up
+		}
+	}
+	// Drop trailing blank lines so appends stay tidy regardless of how the
+	// file previously ended.
+	function trimTail(lines) {
+		while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+		return lines;
+	}
+	// Remove every block belonging to THIS host (stray duplicates collapse,
+	// like install.sh's old rewrite did), plus the blank separator above each.
+	// Other hosts' blocks — and everything else in the file — pass through.
+	function spliceHostBlocks(lines) {
+		const out = [];
+		let removed = 0;
+		let i = 0;
+		while (i < lines.length) {
+			if (lines[i].trim() === BEGIN) {
+				let j = i + 1;
+				while (j < lines.length && lines[j].trim() !== END) j++;
+				removed++;
+				i = j + 1;
+				if (out.length && !out[out.length - 1].trim()) out.pop();
+				continue;
+			}
+			out.push(lines[i]);
+			i++;
+		}
+		return { out, removed };
+	}
+
+	if (action === 'install') {
+		await fs.mkdir(SSH_DIR, { recursive: true, mode: 0o700 });
+		await backupConfig();
+		const existing = (await readConfigLines()) ?? [];
+		const { out } = spliceHostBlocks(existing);
+		trimTail(out);
+		if (out.length) out.push('');
+		out.push(BEGIN, `Host ${name}`, '  RemoteForward 5179 localhost:5179', END);
+		await fs.writeFile(SSH_CONFIG_PATH, out.join('\n') + '\n', { mode: 0o600 });
+
+		console.log('');
+		console.log(`✓ Tunnel block written to ~/.ssh/config for "${name}".`);
+		console.log('');
+		console.log(`Next: ssh into ${name} as usual and paste this there, once:`);
+		console.log('');
+		console.log(`  ${pasteCommand()}`);
+		console.log('');
+		console.log(`After that: \`ssh ${name}\`, run claude, tickets appear on your phone.`);
+		process.exit(0);
+	}
+
+	// action === 'uninstall'
+	const lines = await readConfigLines();
+	const { out, removed } = lines ? spliceHostBlocks(lines) : { out: null, removed: 0 };
+	if (removed > 0) {
+		await backupConfig();
+		trimTail(out);
+		// Never delete ~/.ssh/config itself, even when empty — nothing under
+		// ~/.ssh gets deleted (same invariant as uninstall.sh).
+		await fs.writeFile(SSH_CONFIG_PATH, out.length ? out.join('\n') + '\n' : '', {
+			mode: 0o600
+		});
+		console.log('');
+		console.log(`✓ Removed the "${name}" tunnel block from ~/.ssh/config.`);
+	} else {
+		console.log('');
+		console.log(`⊘ No expediter block for "${name}" in ~/.ssh/config.`);
+	}
+	console.log('');
+	console.log('To remove the mini-client from the box itself, run this there:');
+	console.log('');
+	console.log(`  ${pasteCommand({ uninstall: true })}`);
+	process.exit(0);
+}
+
 if (SHOW_HELP) {
 	console.log(
 		'Usage: expediter [--http|--https] [--tailscale] [--print-url] [--title default|haiku] [--steps "..."] [--help]'
 	);
 	console.log('   or: expediter update [--dev]');
+	console.log('   or: expediter remote install <name> | uninstall <name> | install how');
 	console.log('');
 	console.log('  update                 Pull the latest and rebuild in place.');
 	console.log('                         Add --dev (or --no-pull) to skip the pull and rebuild the');
 	console.log('                         current checkout, e.g. when updating from a feature branch.');
+	console.log('  remote install <name>  Set up tickets for claude sessions on an ssh host: writes');
+	console.log('                         that host\'s tunnel block into ~/.ssh/config and prints the');
+	console.log('                         command to paste on the box. `expediter remote install how`');
+	console.log('                         prints the plain-language steps; `remote uninstall <name>`');
+	console.log('                         undoes that host.');
 	console.log('  --print-url            Also print the tethered URL as text (default: QR only).');
 	console.log('                         Use this only if your phone cannot scan the QR — the URL');
 	console.log('                         contains the session token and will stay in scrollback.');
