@@ -14,6 +14,9 @@ type TranscriptLine = {
 	// Present on `type: 'custom-title'` lines — written by Claude's auto-titler
 	// and by /rename. The last such line in the JSONL is the current title.
 	customTitle?: string;
+	// True on injected-context user lines (skill preambles, local-command
+	// caveats) that never drive a model turn.
+	isMeta?: boolean;
 };
 
 function isTextBlock(b: ContentBlock): b is TextBlock {
@@ -186,6 +189,130 @@ export async function latestCustomTitle(transcriptPath: string): Promise<string 
 		const trimmed = title.trim();
 		if (!trimmed) continue;
 		return trimmed;
+	}
+	return null;
+}
+
+// ─── Turn-state inference (boot working recovery) ────────────────────────────
+
+export type TurnState = 'in-flight' | 'rest';
+
+// The pinned literal Claude Code writes into the denial tool_result when the
+// user rejects a permission prompt. Verified verbatim against captured
+// transcripts for both "Deny" and Esc/interrupt on Claude Code v2.1.139; also
+// imported by declineWatcher.ts (single source of truth). If Claude Code ever
+// changes the wording, both the decline watcher and the boot-time turn-state
+// scan silently degrade until the prefix is updated.
+export const DENIAL_PREFIX = "The user doesn't want to proceed with this tool use";
+
+// An Esc interrupt ends the turn and appends a user line whose text (or
+// tool_result content) starts with this marker — "[Request interrupted by
+// user]" / "[Request interrupted by user for tool use]".
+const INTERRUPT_PREFIX = '[Request interrupted';
+
+// Narrow view of a user line's content blocks for the turn-state scan:
+// tool_result contents arrive either as a plain string or as text-block lists.
+type TurnScanInner = { type?: string; text?: unknown };
+type TurnScanBlock = {
+	type?: string;
+	text?: unknown;
+	is_error?: boolean;
+	content?: string | TurnScanInner[];
+};
+
+// Claude: the newest non-meta user/assistant line decides. Returns null for
+// every other line type (metadata, custom-title, isMeta context) so the
+// backward scan keeps looking.
+function claudeTurnState(parsed: TranscriptLine): TurnState | null {
+	if (parsed.type !== 'user' && parsed.type !== 'assistant') return null;
+	if (parsed.isMeta === true) return null;
+	const content = parsed.message?.content;
+	if (parsed.type === 'assistant') {
+		// A completed response ending in tool_use means a tool is executing (or
+		// its permission dialog is up — accepted ambiguity, same blindness class
+		// as remote decision 5). Anything else — text, or a thinking-terminal
+		// partial left by an interrupt — is a turn at rest.
+		if (!Array.isArray(content) || content.length === 0) return 'rest';
+		return content[content.length - 1]?.type === 'tool_use' ? 'in-flight' : 'rest';
+	}
+	// User line: a prompt or tool_result means the model owes a response —
+	// unless it carries a human-cancel marker, which ended the turn instead.
+	if (typeof content === 'string') {
+		return content.startsWith(INTERRUPT_PREFIX) ? 'rest' : 'in-flight';
+	}
+	if (!Array.isArray(content)) return 'rest';
+	for (const block of content as TurnScanBlock[]) {
+		if (
+			block?.type === 'text' &&
+			typeof block.text === 'string' &&
+			block.text.startsWith(INTERRUPT_PREFIX)
+		) {
+			return 'rest';
+		}
+		if (block?.type !== 'tool_result') continue;
+		const inner = block.content;
+		const texts: string[] =
+			typeof inner === 'string'
+				? [inner]
+				: Array.isArray(inner)
+					? inner.map((c) => (typeof c?.text === 'string' ? c.text : ''))
+					: [];
+		for (const t of texts) {
+			if (t.startsWith(INTERRUPT_PREFIX)) return 'rest';
+			if (block.is_error === true && t.startsWith(DENIAL_PREFIX)) return 'rest';
+		}
+	}
+	return 'in-flight';
+}
+
+// Codex rollouts carry explicit lifecycle events (shapes pinned live on
+// 0.144.1): the newest of task_started / task_complete / turn_aborted decides.
+function codexTurnState(parsed: CodexLine): TurnState | null {
+	if (parsed.type !== 'event_msg') return null;
+	const t = parsed.payload?.type;
+	if (t === 'task_started') return 'in-flight';
+	if (t === 'task_complete' || t === 'turn_aborted') return 'rest';
+	return null;
+}
+
+// Classifies whether a local session's last persisted turn is still awaiting
+// the agent ('in-flight') or finished ('rest'), by scanning the transcript
+// backward for the newest decisive line. Used by the boot scan to seed a
+// recovered ticket in the working state when the agent was mid-turn across a
+// daemon restart — hook events that fired while the daemon was down are gone,
+// so the transcript tail is the only record of which side owes the next move.
+// Returns null when the file is missing/unreadable, outside the containment
+// roots, or holds no decisive line (brand-new session) — callers leave the
+// ticket Idle. Verified against live transcripts: an in-flight claude session
+// ends with a user line or an assistant line ending in tool_use; an at-rest
+// one ends with a text-only assistant line.
+export async function latestTurnState(
+	agent: Agent,
+	transcriptPath: string
+): Promise<TurnState | null> {
+	const resolved = path.resolve(transcriptPath);
+	if (!isWithinTranscriptRoots(resolved)) {
+		console.warn(`[transcript] rejected path outside root: ${resolved}`);
+		return null;
+	}
+	let raw: string;
+	try {
+		raw = await readFile(resolved, 'utf8');
+	} catch {
+		return null;
+	}
+	const lines = raw.split('\n');
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i];
+		if (!line) continue;
+		let parsed: TranscriptLine & CodexLine;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		const state = agent === 'codex' ? codexTurnState(parsed) : claudeTurnState(parsed);
+		if (state) return state;
 	}
 	return null;
 }

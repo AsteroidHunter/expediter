@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {
@@ -873,4 +873,81 @@ test('light reconcile keeps a multi-client session attached until the last clien
 
 	await lightWith(false); // last client gone (count 0 → false): detached
 	expect(list().find((t) => t.session_id === 'multi-sess')?.attached).toBe(false);
+});
+
+// ─── boot working recovery (transcript-tail probe) ───────────────────────────
+
+// A session mid-turn across a daemon restart must boot into the working state,
+// not Idle: hook events that fired while the daemon was down are gone, so
+// upsertIdle probes the transcript tail (latestTurnState) and lifts the seeded
+// ticket via the created_at-guarded markWorkingIfMatch. Fixtures live under
+// ~/.claude/ to pass the transcript containment guard.
+function useClaudeTranscriptFixture(lines: string[]): string {
+	const dir = mkdtempSync(path.join(os.homedir(), '.claude', '.expediter-bootscan-test-'));
+	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+	const file = path.join(dir, 'transcript.jsonl');
+	writeFileSync(file, lines.join('\n'));
+	return file;
+}
+
+test('runBootScan seeds a mid-turn session as working (trailing user line)', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('midturn-session'));
+	const transcript = useClaudeTranscriptFixture([
+		JSON.stringify({ type: 'user', message: { content: 'run the long build' } })
+	]);
+
+	await recordSession({
+		session_id: 'midturn-session',
+		tmux_pane: '%60',
+		cwd: '/p',
+		transcript_path: transcript,
+		agent_pid: 6001
+	});
+
+	await runBootScan({
+		listPanes: async () => [pane('%60', 6000, '/p')],
+		readSessionMetas: async () => [],
+		parentPid: async (pid) => (pid === 6001 ? 6000 : null)
+	});
+
+	await waitFor(() => list().find((t) => t.session_id === 'midturn-session')?.working === true);
+	const ticket = list().find((t) => t.session_id === 'midturn-session');
+	expect(ticket?.working).toBe(true);
+	// The Idle→Stop lift: a working ticket must not render the desaturated
+	// IDLE palette (see markWorking in ticketStore.ts).
+	expect(ticket?.event_type).toBe('Stop');
+});
+
+test('runBootScan leaves an at-rest session Idle (trailing assistant text)', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => remove('atrest-session'));
+	const transcript = useClaudeTranscriptFixture([
+		JSON.stringify({ type: 'user', message: { content: 'quick question' } }),
+		JSON.stringify({
+			type: 'assistant',
+			message: { content: [{ type: 'text', text: 'answered' }] }
+		})
+	]);
+
+	await recordSession({
+		session_id: 'atrest-session',
+		tmux_pane: '%61',
+		cwd: '/p',
+		transcript_path: transcript,
+		agent_pid: 6101
+	});
+
+	await runBootScan({
+		listPanes: async () => [pane('%61', 6100, '/p')],
+		readSessionMetas: async () => [],
+		parentPid: async (pid) => (pid === 6101 ? 6100 : null)
+	});
+
+	// The probe is fire-and-forget: give it a settle window, then require the
+	// ticket to still be the untouched Idle seed.
+	await new Promise((r) => setTimeout(r, 100));
+	const ticket = list().find((t) => t.session_id === 'atrest-session');
+	expect(ticket?.working).toBe(false);
+	expect(ticket?.event_type).toBe('Idle');
 });

@@ -7,7 +7,9 @@ import {
 	latestCustomTitle,
 	recentTranscriptText,
 	codexThreadTitle,
-	localChatTitle
+	localChatTitle,
+	latestTurnState,
+	DENIAL_PREFIX
 } from './transcript';
 
 // Tests must write under ~/.claude/ to pass transcript.ts's TRANSCRIPT_ROOT
@@ -363,4 +365,166 @@ test('localChatTitle routes claude to the transcript custom-title scan', async (
 	expect(await localChatTitle('claude', 'ignored-id', transcriptFile)).toBe(
 		'routed claude title'
 	);
+});
+
+// ─── latestTurnState (boot working recovery) ─────────────────────────────────
+
+// Line shapes pinned from live transcripts: an in-flight claude session ends
+// with a user line (prompt or tool_result) or an assistant line ending in
+// tool_use; an at-rest one ends with a text-only assistant line.
+
+const userPrompt = JSON.stringify({ type: 'user', message: { content: 'fix the bug' } });
+const assistantText = JSON.stringify({
+	type: 'assistant',
+	message: { content: [{ type: 'text', text: 'done, here is the summary' }] }
+});
+const assistantToolUse = JSON.stringify({
+	type: 'assistant',
+	message: {
+		content: [
+			{ type: 'text', text: 'running it now' },
+			{ type: 'tool_use', name: 'Bash' }
+		]
+	}
+});
+const toolResultOk = JSON.stringify({
+	type: 'user',
+	message: { content: [{ type: 'tool_result', content: 'exit 0' }] }
+});
+
+test('latestTurnState: trailing user prompt is in-flight (claude)', async () => {
+	writeFileSync(transcriptFile, [assistantText, userPrompt].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('in-flight');
+});
+
+test('latestTurnState: trailing tool_result is in-flight (claude)', async () => {
+	writeFileSync(transcriptFile, [userPrompt, assistantToolUse, toolResultOk].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('in-flight');
+});
+
+test('latestTurnState: trailing assistant ending in tool_use is in-flight (claude)', async () => {
+	writeFileSync(transcriptFile, [userPrompt, assistantToolUse].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('in-flight');
+});
+
+test('latestTurnState: trailing text-only assistant is rest (claude)', async () => {
+	writeFileSync(transcriptFile, [userPrompt, assistantToolUse, toolResultOk, assistantText].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('rest');
+});
+
+test('latestTurnState: Esc-interrupt marker on a user line is rest (claude)', async () => {
+	const interrupted = JSON.stringify({
+		type: 'user',
+		message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] }
+	});
+	writeFileSync(transcriptFile, [userPrompt, interrupted].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('rest');
+
+	const interruptedString = JSON.stringify({
+		type: 'user',
+		message: { content: '[Request interrupted by user for tool use]' }
+	});
+	writeFileSync(transcriptFile, [userPrompt, interruptedString].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('rest');
+});
+
+test('latestTurnState: permission-denial tool_result is rest (claude)', async () => {
+	const denial = JSON.stringify({
+		type: 'user',
+		message: {
+			content: [
+				{
+					type: 'tool_result',
+					is_error: true,
+					content: `${DENIAL_PREFIX}. The tool use was rejected.`
+				}
+			]
+		}
+	});
+	writeFileSync(transcriptFile, [userPrompt, assistantToolUse, denial].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('rest');
+});
+
+test('latestTurnState: a failed (is_error) tool_result without the denial prefix is in-flight', async () => {
+	const failedTool = JSON.stringify({
+		type: 'user',
+		message: {
+			content: [{ type: 'tool_result', is_error: true, content: 'command exited 1' }]
+		}
+	});
+	writeFileSync(transcriptFile, [userPrompt, assistantToolUse, failedTool].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('in-flight');
+});
+
+test('latestTurnState: skips isMeta and metadata lines and decides on the line before them', async () => {
+	const metaLine = JSON.stringify({
+		type: 'user',
+		isMeta: true,
+		message: { content: [{ type: 'text', text: 'Base directory for this skill: /x' }] }
+	});
+	const titleLine = JSON.stringify({ type: 'custom-title', customTitle: 'whatever' });
+	writeFileSync(transcriptFile, [userPrompt, assistantText, metaLine, titleLine].join('\n'));
+	expect(await latestTurnState('claude', transcriptFile)).toBe('rest');
+});
+
+test('latestTurnState: null for a missing, empty, or message-free file', async () => {
+	expect(await latestTurnState('claude', path.join(tempDir, 'missing.jsonl'))).toBeNull();
+	writeFileSync(transcriptFile, '');
+	expect(await latestTurnState('claude', transcriptFile)).toBeNull();
+	writeFileSync(transcriptFile, JSON.stringify({ type: 'custom-title', customTitle: 'x' }));
+	expect(await latestTurnState('claude', transcriptFile)).toBeNull();
+});
+
+test('latestTurnState: rejects paths outside the containment roots', async () => {
+	const outside = mkdtempSync(path.join(os.tmpdir(), 'expediter-outside-turnstate-'));
+	const outsideFile = path.join(outside, 'transcript.jsonl');
+	writeFileSync(outsideFile, userPrompt);
+	expect(await latestTurnState('claude', outsideFile)).toBeNull();
+	rmSync(outside, { recursive: true, force: true });
+});
+
+// Codex: the newest task lifecycle event decides (shapes pinned on 0.144.1).
+
+const codexTaskStarted = JSON.stringify({
+	type: 'event_msg',
+	payload: { type: 'task_started', model_context_window: 258400 }
+});
+const codexTaskComplete = JSON.stringify({
+	type: 'event_msg',
+	payload: { type: 'task_complete', last_agent_message: 'done' }
+});
+const codexTurnAborted = JSON.stringify({
+	type: 'event_msg',
+	payload: { type: 'turn_aborted', reason: 'interrupted' }
+});
+
+test('latestTurnState: codex task_started with no later end marker is in-flight', async () => {
+	const t = withCodexTempFile();
+	writeFileSync(
+		t.file,
+		[codexTaskStarted, codexUserLine, JSON.stringify({ type: 'event_msg', payload: { type: 'token_count' } })].join('\n')
+	);
+	expect(await latestTurnState('codex', t.file)).toBe('in-flight');
+	t.done();
+});
+
+test('latestTurnState: codex task_complete after task_started is rest', async () => {
+	const t = withCodexTempFile();
+	writeFileSync(t.file, [codexTaskStarted, codexAssistantLine, codexTaskComplete].join('\n'));
+	expect(await latestTurnState('codex', t.file)).toBe('rest');
+	t.done();
+});
+
+test('latestTurnState: codex turn_aborted is rest', async () => {
+	const t = withCodexTempFile();
+	writeFileSync(t.file, [codexTaskStarted, codexTurnAborted].join('\n'));
+	expect(await latestTurnState('codex', t.file)).toBe('rest');
+	t.done();
+});
+
+test('latestTurnState: codex rollout with no lifecycle events is null', async () => {
+	const t = withCodexTempFile();
+	writeFileSync(t.file, [codexUserLine, codexAssistantLine].join('\n'));
+	expect(await latestTurnState('codex', t.file)).toBeNull();
+	t.done();
 });

@@ -4,10 +4,18 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import os from 'node:os';
 
-import { upsert, setCachedTitle, setAttached, list, remove, findByPane } from '$lib/ticketStore';
+import {
+	upsert,
+	setCachedTitle,
+	setAttached,
+	list,
+	remove,
+	findByPane,
+	markWorkingIfMatch
+} from '$lib/ticketStore';
 import { whimsicalName } from '$lib/whimsicalName';
 import { getTitleSource } from '$lib/config';
-import { localChatTitle } from '$lib/transcript';
+import { localChatTitle, latestTurnState } from '$lib/transcript';
 import { agentForCommand, agentForPath, type Agent } from '$lib/agent';
 import {
 	loadSessions,
@@ -228,19 +236,22 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 	// match — classifies far-side remote paths too); entries never persist
 	// an agent field of their own.
 	const agent = agentForPath(entry.transcript_path) ?? 'claude';
+	const created_at = Date.now();
 	upsert({
 		session_id: entry.session_id,
 		tmux_pane: entry.tmux_pane,
 		cwd: entry.cwd,
 		title: initialTitle,
 		event_type: 'Idle',
-		created_at: Date.now(),
+		created_at,
 		remote: entry.remote ?? false,
 		agent
 	});
 	// A remote entry's transcript_path points at the far box — unreadable here
 	// (decision 9). The persisted title passed in initialTitle is the only
 	// title source; the next remote event refreshes it via payload passthrough.
+	// Remote tickets also skip the working probe below and boot Idle — the
+	// next remote event heals the state (same blindness class as decision 5).
 	if (entry.remote) return;
 	// Async title upgrade. A real title from the agent's own source (claude:
 	// the jsonl's custom-title line; codex: threads.title in the state db)
@@ -248,6 +259,16 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 	void localChatTitle(agent, entry.session_id, entry.transcript_path)
 		.then((t) => {
 			if (t) setCachedTitle(entry.session_id, t);
+		})
+		.catch(() => {});
+	// Async working recovery. Hook events that fired while the daemon was down
+	// are gone, so a session mid-turn at boot would sit Idle until its next
+	// PostToolUse/Stop — minutes, during a long tool call. The transcript tail
+	// records which side owes the next move; created_at-guarded so a real hook
+	// event that lands before this read resolves wins and the probe no-ops.
+	void latestTurnState(agent, entry.transcript_path)
+		.then((state) => {
+			if (state === 'in-flight') markWorkingIfMatch(entry.session_id, created_at);
 		})
 		.catch(() => {});
 }

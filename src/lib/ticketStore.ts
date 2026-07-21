@@ -162,13 +162,16 @@ export function markWorking(session_id: string): boolean {
 }
 
 // Conditional markWorking: mirror of removeIfMatch for the perpetual model.
-// Currently unused — retained as the symmetric partner of markWorking in case a
-// future async observer needs a created_at-guarded transition. Safe to drop if
-// it never gains a caller.
+// Used by the boot scan's transcript-tail probe — an async observer that must
+// not clobber a ticket a real hook event has already touched (created_at
+// changed ⇒ no-op). Applies the same Idle→Stop lift as markWorking so a
+// recovered mid-turn ticket renders the working palette instead of the
+// desaturated IDLE one.
 export function markWorkingIfMatch(session_id: string, created_at: number): boolean {
 	const existing = store.get(session_id);
 	if (!existing || existing.created_at !== created_at) return false;
-	store.set(session_id, { ...existing, working: true, created_at: Date.now() });
+	const event_type = existing.event_type === 'Idle' ? 'Stop' : existing.event_type;
+	store.set(session_id, { ...existing, event_type, working: true, created_at: Date.now() });
 	notify();
 	return true;
 }

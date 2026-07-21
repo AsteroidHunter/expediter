@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { agentForPath } from './agent';
+import { DENIAL_PREFIX } from './transcript';
 
 // Watcher for a single PermissionRequest ticket. Tails the transcript the
 // hook payload's `transcript_path` points at — Claude Code's JSONL or Codex's
@@ -16,11 +17,10 @@ const TRANSCRIPT_ROOT = path.resolve(path.join(os.homedir(), '.claude'));
 const CODEX_TRANSCRIPT_ROOT = path.resolve(path.join(os.homedir(), '.codex'));
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEBOUNCE_MS = 50;
-// Verified verbatim against a captured transcript JSONL for both "Deny" and
-// Esc/interrupt on Claude Code v2.1.139. If Claude Code ever changes the
+// DENIAL_PREFIX (imported from transcript.ts, the single source of truth) is
+// verified verbatim on Claude Code v2.1.139. If Claude Code ever changes the
 // wording, this watcher silently stops firing and the symptom (stale red
 // ticket) returns until the prefix is updated.
-const DENIAL_PREFIX = "The user doesn't want to proceed with this tool use";
 
 // Defense-in-depth against a forged hook payload pointing the watcher at an
 // arbitrary file. Duplicated from src/lib/transcript.ts to keep that module

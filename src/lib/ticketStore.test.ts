@@ -324,6 +324,24 @@ test('markWorkingIfMatch flips the ticket when created_at matches', () => {
 	remove(id);
 });
 
+test('markWorkingIfMatch lifts an Idle ticket to Stop, like markWorking', () => {
+	const id = nextId();
+	const created_at = Date.now();
+	upsert({
+		session_id: id,
+		tmux_pane: '%1',
+		cwd: '/tmp/proj',
+		title: '',
+		event_type: 'Idle',
+		created_at
+	});
+	expect(markWorkingIfMatch(id, created_at)).toBe(true);
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.working).toBe(true);
+	expect(ticket?.event_type).toBe('Stop');
+	remove(id);
+});
+
 test('markWorkingIfMatch returns false and leaves the ticket idle on mismatch', () => {
 	const id = nextId();
 	const created_at = Date.now();
