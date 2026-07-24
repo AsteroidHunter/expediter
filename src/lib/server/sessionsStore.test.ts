@@ -118,6 +118,56 @@ test('pruneStaleSessions keeps remote entries on live non-claude panes and drops
 	expect(map['local-on-ssh-pane']).toBeUndefined();
 });
 
+// Remote-tmux siblings: several remote entries legitimately share one local
+// ssh pane, differing in remote_pane. Prune judges each entry independently
+// against the pane, so a live shared pane keeps every sibling and a dead one
+// drops them all — no cross-entry interference either way (D8).
+test('pruneStaleSessions keeps all siblings on one live pane and drops all on a dead one', async () => {
+	await recordSession({ ...makeEntry('sib-a', '%20'), remote: true, remote_pane: '%3' });
+	await recordSession({ ...makeEntry('sib-b', '%20'), remote: true, remote_pane: '%7' });
+	await recordSession({ ...makeEntry('sib-c', '%21'), remote: true, remote_pane: '%2' });
+	await recordSession({ ...makeEntry('sib-d', '%21'), remote: true, remote_pane: '%5' });
+
+	// %20 is alive (an ssh pane), %21 is gone.
+	await pruneStaleSessions(new Set<string>(), new Set(['%20']));
+
+	const map = await loadSessions();
+	expect(map['sib-a']).toBeDefined();
+	expect(map['sib-b']).toBeDefined();
+	expect(map['sib-c']).toBeUndefined();
+	expect(map['sib-d']).toBeUndefined();
+});
+
+test('loadSessions round-trips remote_pane/ssh_connection and drops ill-typed values', async () => {
+	await recordSession({
+		...makeEntry('rt', '%1'),
+		remote: true,
+		remote_pane: '%3',
+		ssh_connection: '10.0.0.5 52814 10.0.0.9 22'
+	});
+	await recordSession(makeEntry('plain', '%2'));
+
+	let map = await loadSessions();
+	expect(map['rt']?.remote_pane).toBe('%3');
+	expect(map['rt']?.ssh_connection).toBe('10.0.0.5 52814 10.0.0.9 22');
+	expect(map['plain']?.remote_pane).toBeUndefined();
+	expect(map['plain']?.ssh_connection).toBeUndefined();
+
+	// Ill-typed values written by something else drop the field, not the entry.
+	const sessionsFile = process.env.EXPEDITER_SESSIONS_FILE!;
+	const { writeFileSync } = await import('node:fs');
+	writeFileSync(
+		sessionsFile,
+		JSON.stringify({
+			bad: { ...makeEntry('bad', '%9'), remote_pane: 42, ssh_connection: ['x'] }
+		})
+	);
+	map = await loadSessions();
+	expect(map['bad']).toBeDefined();
+	expect(map['bad']?.remote_pane).toBeUndefined();
+	expect(map['bad']?.ssh_connection).toBeUndefined();
+});
+
 test('loadSessions round-trips remote/title and leaves them absent for local entries', async () => {
 	await recordSession({ ...makeEntry('r1', '%1'), remote: true, title: 'gpu box' });
 	await recordSession(makeEntry('l1', '%2'));

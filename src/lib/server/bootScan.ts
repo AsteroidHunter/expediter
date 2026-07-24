@@ -236,6 +236,9 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 		event_type: 'Idle',
 		created_at: Date.now(),
 		remote: entry.remote ?? false,
+		// The far-side pane id rides back into the ticket so a reseeded
+		// remote-tmux sibling keeps its uniqueness cell and its tap target.
+		...(entry.remote_pane ? { remote_pane: entry.remote_pane } : {}),
 		agent
 	});
 	// A remote entry's transcript_path points at the far box — unreadable here
@@ -415,11 +418,15 @@ async function fullReconcile(deps: BootScanDeps): Promise<void> {
 	// title cannot be re-derived — decision 13). Panes without a persisted
 	// remote entry get nothing: `pending:` placeholders are for local agent
 	// panes only, and a non-agent pane with no remote history is just a shell.
+	// The already-seeded guard is scoped to the entry's uniqueness CELL, not
+	// the pane (D4/D8): several remote-tmux siblings legitimately persist
+	// against one ssh pane, and each must come back as its own ticket — a
+	// pane-wide guard would collapse them to whichever entry iterated first.
 	for (const entry of Object.values(persisted)) {
 		if (!entry.remote) continue;
 		const row = rowByPane.get(entry.tmux_pane);
 		if (!row) continue;
-		if (findByPane(entry.tmux_pane)) continue;
+		if (findByPane(entry.tmux_pane, entry.remote_pane ?? '')) continue;
 		upsertIdle(entry, entry.title || bootScanInitialTitle(entry.session_id));
 		setAttached(entry.session_id, row.session_attached);
 	}

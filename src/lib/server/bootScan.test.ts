@@ -752,6 +752,104 @@ test('a reseeded remote entry without a persisted title falls back to a whimsica
 	expect(t?.title).not.toBe(''); // never blank
 });
 
+// ─── remote-tmux siblings (uniqueness cell, D4/D8) ──────────────────────────
+
+// Boot reseed recreates one ticket PER SIBLING: two persisted remote-tmux
+// entries share the ssh pane %85 but differ in remote_pane, and both must
+// come back with their far pane and title intact — the pre-cell pane-wide
+// guard would have collapsed them to whichever entry iterated first.
+test('runBootScan reseeds every persisted sibling on one ssh pane, remote_pane intact', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('sib-reseed-a');
+		remove('sib-reseed-b');
+	});
+
+	await recordSession({
+		session_id: 'sib-reseed-a',
+		tmux_pane: '%85',
+		cwd: '/remote/proj',
+		transcript_path: '/remote/home/u/.claude/projects/x/a.jsonl',
+		remote: true,
+		remote_pane: '%3',
+		title: 'sibling A'
+	});
+	await recordSession({
+		session_id: 'sib-reseed-b',
+		tmux_pane: '%85',
+		cwd: '/remote/proj',
+		transcript_path: '/remote/home/u/.codex/sessions/2026/07/23/rollout-b.jsonl',
+		remote: true,
+		remote_pane: '%7',
+		title: 'sibling B'
+	});
+
+	await runBootScan({
+		listPanes: async () => [sshPane('%85', 8500)],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	const a = list().find((x) => x.session_id === 'sib-reseed-a');
+	const b = list().find((x) => x.session_id === 'sib-reseed-b');
+	expect(a).toBeDefined();
+	expect(b).toBeDefined();
+	expect(a?.remote_pane).toBe('%3');
+	expect(b?.remote_pane).toBe('%7');
+	expect(a?.title).toBe('sibling A');
+	expect(b?.title).toBe('sibling B');
+	// The far-side agent classification survives the round trip too.
+	expect(a?.agent).toBe('claude');
+	expect(b?.agent).toBe('codex');
+});
+
+// The reap sweep judges each sibling by its own (shared) local pane and
+// removes by session_id: when the pane dies, ALL siblings go; while it
+// lives, none do — and reaping an unrelated dead-pane ticket in the same
+// sweep never touches them (D8).
+test('reconcile reaps siblings together with their pane and never one at a time', async () => {
+	useTempSessionsFile();
+	cleanups.push(() => {
+		remove('sib-live-a');
+		remove('sib-live-b');
+		remove('other-dead');
+	});
+
+	const seed = (session_id: string, tmux_pane: string, remote_pane?: string) =>
+		upsert({
+			session_id,
+			tmux_pane,
+			cwd: '/remote/proj',
+			title: session_id,
+			event_type: 'Stop',
+			created_at: Date.now() - 10_000,
+			remote: true,
+			...(remote_pane ? { remote_pane } : {})
+		});
+	seed('sib-live-a', '%86', '%3');
+	seed('sib-live-b', '%86', '%7');
+	seed('other-dead', '%87', '%2');
+
+	await runBootScan({
+		listPanes: async () => [sshPane('%86', 8600)],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+
+	expect(list().find((x) => x.session_id === 'sib-live-a')).toBeDefined();
+	expect(list().find((x) => x.session_id === 'sib-live-b')).toBeDefined();
+	expect(list().find((x) => x.session_id === 'other-dead')).toBeUndefined();
+
+	// Second pass with the pane gone: both siblings reap together.
+	await runBootScan({
+		listPanes: async () => [],
+		readSessionMetas: async () => [],
+		parentPid: async () => null
+	});
+	expect(list().find((x) => x.session_id === 'sib-live-a')).toBeUndefined();
+	expect(list().find((x) => x.session_id === 'sib-live-b')).toBeUndefined();
+});
+
 // Detached-state sweep for remote panes (settled 2026-07-12): the full
 // reconcile flips an existing remote ticket's attach flag from the pane row
 // without re-seeding it.

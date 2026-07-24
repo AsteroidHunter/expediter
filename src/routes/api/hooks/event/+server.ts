@@ -246,9 +246,22 @@ export const POST: RequestHandler = async ({ request }) => {
 		// OQ5 (answered drop): a remote-tmux sibling starting behind this pane
 		// also clears any plain-ssh ticket sitting on it — tmux now owns the
 		// ssh session's foreground, so a plain-ssh agent can no longer be
-		// running there.
+		// running there. The dropped sessions' PERSISTED entries go too:
+		// remote liveness is pane-existence, and the shared pane stays alive
+		// as long as the siblings do, so a surviving entry would resurrect
+		// the dead plain-ssh ticket at every daemon restart.
+		// Awaited (not fire-and-forget): forgetSession and the recordSession
+		// below both load-modify-write sessions.json, and an interleaved pair
+		// inside one handler call could drop the new sibling's own entry.
+		// droppedPlain is almost always empty, so this costs nothing.
 		if (remote && payload.remote_pane) {
-			cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id, ''));
+			const droppedPlain = dropPaneTicketsExcept(tmux_pane, session_id, '');
+			cancelWatchers(droppedPlain);
+			for (const dropped of droppedPlain) {
+				await forgetSession(dropped).catch((e) =>
+					console.warn('[sessionStart] forgetSession (OQ5 drop) failed', e)
+				);
+			}
 		}
 		// Pid guard for boot recovery (local sessions only): record the agent
 		// process's pid so a later boot scan accepts this entry only while that
