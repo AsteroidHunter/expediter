@@ -285,41 +285,94 @@ test('latestCustomTitle returns null quietly for a codex rollout (no custom-titl
 	t.done();
 });
 
-// ─── codexThreadTitle (threads.title in the state db) ────────────────────────
+// ─── codexThreadTitle (explicit name, never prompt-backed title) ─────────────
 
-function makeStateDb(rows: Array<{ id: string; title: string | null }>): {
+function makeStateDb(
+	rows: Array<{ id: string; title: string | null; name?: string | null }>,
+	indexEntries: Array<{ id: string; thread_name: string }> = [],
+	withNameColumn = true
+): {
 	dbPath: string;
 	done: () => void;
 } {
 	const dir = mkdtempSync(path.join(os.tmpdir(), 'expediter-codex-db-'));
 	const dbPath = path.join(dir, 'state_5.sqlite');
 	const db = new Database(dbPath, { create: true });
-	db.run('CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, updated_at INTEGER)');
+	db.run(
+		withNameColumn
+			? 'CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, name TEXT, cwd TEXT, updated_at INTEGER)'
+			: 'CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, updated_at INTEGER)'
+	);
 	for (const row of rows) {
-		db.prepare('INSERT INTO threads (id, title, cwd, updated_at) VALUES (?, ?, ?, ?)').run(
-			row.id,
-			row.title,
-			'/tmp/x',
-			123
-		);
+		if (withNameColumn) {
+			db.prepare(
+				'INSERT INTO threads (id, title, name, cwd, updated_at) VALUES (?, ?, ?, ?, ?)'
+			).run(row.id, row.title, row.name ?? null, '/tmp/x', 123);
+		} else {
+			db.prepare('INSERT INTO threads (id, title, cwd, updated_at) VALUES (?, ?, ?, ?)').run(
+				row.id,
+				row.title,
+				'/tmp/x',
+				123
+			);
+		}
 	}
 	db.close();
+	if (indexEntries.length > 0) {
+		writeFileSync(
+			path.join(dir, 'session_index.jsonl'),
+			indexEntries.map((entry) => JSON.stringify(entry)).join('\n')
+		);
+	}
 	return { dbPath, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test('codexThreadTitle returns the thread title by session id', async () => {
+test('codexThreadTitle returns threads.name and ignores raw prompt-backed title', async () => {
 	const fixture = makeStateDb([
-		{ id: '019f6206-08ca-72f3-a5b6-0a427bb9848c', title: 'Fix the flaky boot test' },
-		{ id: 'other-thread', title: 'Something else' }
+		{
+			id: '019f6206-08ca-72f3-a5b6-0a427bb9848c',
+			title: 'Please read this very long prompt and change many things...',
+			name: 'Fix flaky boot test'
+		},
+		{ id: 'other-thread', title: 'Another raw prompt', name: 'Something else' }
 	]);
 	expect(await codexThreadTitle('019f6206-08ca-72f3-a5b6-0a427bb9848c', fixture.dbPath)).toBe(
-		'Fix the flaky boot test'
+		'Fix flaky boot test'
 	);
 	fixture.done();
 });
 
+test('codexThreadTitle uses the latest matching session-index name', async () => {
+	const fixture = makeStateDb(
+		[{ id: 'renamed', title: 'Raw first prompt', name: 'Stale db name' }],
+		[
+			{ id: 'renamed', thread_name: 'Old name' },
+			{ id: 'other', thread_name: 'Ignore me' },
+			{ id: 'renamed', thread_name: 'Current name' }
+		]
+	);
+	expect(await codexThreadTitle('renamed', fixture.dbPath)).toBe('Current name');
+	fixture.done();
+});
+
+test('codexThreadTitle supports pre-name-column databases through session_index', async () => {
+	const fixture = makeStateDb(
+		[{ id: 'legacy', title: 'Raw first prompt' }],
+		[{ id: 'legacy', thread_name: 'Legacy rename' }],
+		false
+	);
+	expect(await codexThreadTitle('legacy', fixture.dbPath)).toBe('Legacy rename');
+	fixture.done();
+});
+
+test('codexThreadTitle never falls back to raw threads.title', async () => {
+	const fixture = makeStateDb([{ id: 'unnamed', title: 'The complete user prompt', name: null }]);
+	expect(await codexThreadTitle('unnamed', fixture.dbPath)).toBeNull();
+	fixture.done();
+});
+
 test('codexThreadTitle returns null for a missing row', async () => {
-	const fixture = makeStateDb([{ id: 'some-thread', title: 'A title' }]);
+	const fixture = makeStateDb([{ id: 'some-thread', title: 'A prompt', name: 'A name' }]);
 	expect(await codexThreadTitle('not-present', fixture.dbPath)).toBeNull();
 	fixture.done();
 });
@@ -328,13 +381,13 @@ test('codexThreadTitle returns null when the db file is missing', async () => {
 	expect(await codexThreadTitle('any-id', '/nonexistent/dir/state_5.sqlite')).toBeNull();
 });
 
-test('codexThreadTitle trims whitespace and rejects empty/null titles', async () => {
+test('codexThreadTitle trims whitespace and rejects empty/null names', async () => {
 	const fixture = makeStateDb([
-		{ id: 'spaced', title: '  padded title  ' },
-		{ id: 'blank', title: '   ' },
-		{ id: 'nullish', title: null }
+		{ id: 'spaced', title: 'raw prompt', name: '  padded name  ' },
+		{ id: 'blank', title: 'raw prompt', name: '   ' },
+		{ id: 'nullish', title: 'raw prompt', name: null }
 	]);
-	expect(await codexThreadTitle('spaced', fixture.dbPath)).toBe('padded title');
+	expect(await codexThreadTitle('spaced', fixture.dbPath)).toBe('padded name');
 	expect(await codexThreadTitle('blank', fixture.dbPath)).toBeNull();
 	expect(await codexThreadTitle('nullish', fixture.dbPath)).toBeNull();
 	fixture.done();
@@ -342,8 +395,10 @@ test('codexThreadTitle trims whitespace and rejects empty/null titles', async ()
 
 // ─── localChatTitle (per-agent title routing, plan 3.1) ──────────────────────
 
-test('localChatTitle routes codex to the state db and ignores the transcript', async () => {
-	const fixture = makeStateDb([{ id: 'route-codex', title: 'Ship the adapter' }]);
+test('localChatTitle routes codex to its explicit name and ignores the transcript', async () => {
+	const fixture = makeStateDb([
+		{ id: 'route-codex', title: 'Raw prompt that must not render', name: 'Ship the adapter' }
+	]);
 	// transcriptPath deliberately bogus: the codex branch must never read it.
 	const title = await localChatTitle(
 		'codex',

@@ -22,8 +22,8 @@
 #            which the Mac cannot read. The title source is per-agent — the
 #            one agent-specific fork in this script: a Claude transcript is
 #            scanned backward for its latest custom-title line; a Codex
-#            session's title is a one-row read of threads.title from this
-#            box's own state db (stdlib sqlite3, read-only). The POST goes to
+#            session uses its explicit thread name from session_index.jsonl or
+#            threads.name (stdlib sqlite3, read-only). The POST goes to
 #            localhost:5179 exactly as in local mode; the installer-written
 #            RemoteForward tunnel carries it to the Mac.
 
@@ -59,10 +59,11 @@ fi
 # steal the agent's JSON) so the original piped stdin reaches
 # sys.stdin.read(). In remote mode the same python process also ships this
 # box's chat title — the Mac cannot read far-side sources — branched by the
-# transcript_path segment: /.codex/ reads threads.title from the box's own
-# state db (${CODEX_SQLITE_HOME:-${CODEX_HOME:-~/.codex}}/state_5.sqlite,
-# read-only, stdlib sqlite3 — the env chain resolves correctly because the
-# hook inherits the codex process's environment); anything else keeps the
+# transcript_path segment: /.codex/ reads the latest explicit thread_name from
+# session_index.jsonl, falling back to threads.name in the box's state db
+# (${CODEX_SQLITE_HOME:-${CODEX_HOME:-~/.codex}}/state_5.sqlite, read-only,
+# stdlib sqlite3 — the env chain resolves correctly because the hook inherits
+# the codex process's environment); anything else keeps the
 # Claude backward scan for the latest custom-title line, mirroring the
 # daemon's latestCustomTitle (src/lib/transcript.ts). The field is omitted
 # when no title exists yet (absent row/db, or a brand-new session).
@@ -83,25 +84,46 @@ if mode == "remote":
     if isinstance(tp, str) and "/.codex/" in tp:
         sid = data.get("session_id")
         if isinstance(sid, str) and sid:
+            title = None
             try:
-                import sqlite3
                 home = (
                     os.environ.get("CODEX_SQLITE_HOME")
                     or os.environ.get("CODEX_HOME")
                     or os.path.expanduser("~/.codex")
                 )
-                db = os.path.join(home, "state_5.sqlite")
-                con = sqlite3.connect("file:" + db + "?mode=ro", uri=True)
-                try:
-                    row = con.execute(
-                        "SELECT title FROM threads WHERE id = ?", (sid,)
-                    ).fetchone()
-                finally:
-                    con.close()
-                if row and isinstance(row[0], str) and row[0].strip():
-                    data["title"] = row[0].strip()
+                index_path = os.path.join(home, "session_index.jsonl")
+                with open(index_path, "rb") as f:
+                    lines = f.read().decode("utf-8", "replace").splitlines()
+                for line in reversed(lines):
+                    try:
+                        parsed = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(parsed, dict) or parsed.get("id") != sid:
+                        continue
+                    name = parsed.get("thread_name")
+                    if isinstance(name, str) and name.strip():
+                        title = name.strip()
+                        break
             except Exception:
                 pass
+            if title is None:
+                try:
+                    import sqlite3
+                    db = os.path.join(home, "state_5.sqlite")
+                    con = sqlite3.connect("file:" + db + "?mode=ro", uri=True)
+                    try:
+                        row = con.execute(
+                            "SELECT name FROM threads WHERE id = ?", (sid,)
+                        ).fetchone()
+                    finally:
+                        con.close()
+                    if row and isinstance(row[0], str) and row[0].strip():
+                        title = row[0].strip()
+                except Exception:
+                    pass
+            if title is not None:
+                data["title"] = title
     elif isinstance(tp, str) and tp:
         try:
             with open(tp, "rb") as f:

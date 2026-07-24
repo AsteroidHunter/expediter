@@ -243,7 +243,7 @@ function upsertIdle(entry: SessionEntry, initialTitle: string): void {
 	// title source; the next remote event refreshes it via payload passthrough.
 	if (entry.remote) return;
 	// Async title upgrade. A real title from the agent's own source (claude:
-	// the jsonl's custom-title line; codex: threads.title in the state db)
+	// the jsonl's custom-title line; codex: its explicit thread name)
 	// supersedes the whimsical fallback via setCachedTitle's live-patch.
 	void localChatTitle(agent, entry.session_id, entry.transcript_path)
 		.then((t) => {

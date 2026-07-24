@@ -70,8 +70,8 @@ type HookPayload = {
 // Fire-and-forget topic refresh. Caller never awaits. The try/finally pair
 // guarantees `refreshInFlight` is cleared even if summarize or transcript-read
 // throws, so a hang or error doesn't leave the session permanently un-refreshable.
-// Codex sessions always take the chat-title read (threads.title via
-// localChatTitle) regardless of title_source — a codex ticket must never
+// Codex sessions always take the explicit thread-name read (session_index.jsonl
+// / threads.name via localChatTitle) regardless of title_source — a codex ticket must never
 // depend on a `claude -p` spawn. Claude keeps the configured behavior:
 // chat-title reads the JSONL's latest custom-title line; haiku runs the
 // original summarize path.
@@ -222,7 +222,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		// Fire-and-forget title pre-fill. In chat-title mode resolveDisplayTitle
 		// already returned a whimsical fallback; this upgrades it as soon as the
 		// agent's title source has one (claude: the jsonl's custom-title line;
-		// codex: threads.title in the state db). setCachedTitle live-patches any
+		// codex: its explicit thread name). setCachedTitle live-patches any
 		// currently-displayed ticket for this session (see ticketStore.ts).
 		// Skipped for remote sessions: transcript_path is a far-side path the
 		// containment guard would reject anyway — the payload title (cached

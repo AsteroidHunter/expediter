@@ -190,17 +190,19 @@ export async function latestCustomTitle(transcriptPath: string): Promise<string 
 	return null;
 }
 
-// ─── Codex chat titles (threads.title in the state db) ──────────────────────
+// ─── Codex thread names ─────────────────────────────────────────────────────
 
-// Codex persists a human-readable title for every thread in the `threads`
-// table of ~/.codex/state_5.sqlite — auto-filled from the first user message,
-// updated on rename. This read-only one-row SELECT is the Codex counterpart of
-// latestCustomTitle: always present, rename-aware, no process spawn. The db
-// runs in WAL mode, so reading alongside a live Codex is safe by design.
+// Codex's `threads.title` is prompt/preview text, not the user-facing name.
+// Explicit names are appended to session_index.jsonl as `thread_name` and,
+// in newer Codex versions, mirrored to `threads.name`. Prefer the append-only
+// index (the last matching entry wins), then fall back to the newer db column.
+// Never fall back to `threads.title`: doing so can put an entire user prompt on
+// a ticket. The db runs in WAL mode, so reading alongside Codex is safe.
 // Assumes the default db location (plan assumption 6): a Mac-side
 // CODEX_SQLITE_HOME / sqlite_home override degrades local Codex titles to the
 // whimsical fallback with a logged miss, never a crash.
 const CODEX_STATE_DB = path.join(os.homedir(), '.codex', 'state_5.sqlite');
+const CODEX_SESSION_INDEX = path.join(os.homedir(), '.codex', 'session_index.jsonl');
 
 // The daemon runs under Bun in production (bun:sqlite; Bun 1.3 has no
 // node:sqlite) but under Node in vite dev (node:sqlite; no bun:sqlite). Both
@@ -214,7 +216,7 @@ type SqliteRowReader = {
 };
 
 async function openThreadsReader(dbPath: string): Promise<SqliteRowReader> {
-	const sql = 'SELECT title FROM threads WHERE id = ?';
+	const sql = 'SELECT name FROM threads WHERE id = ?';
 	if (process.versions.bun) {
 		const specifier = 'bun:sqlite';
 		const { Database } = (await import(/* @vite-ignore */ specifier)) as {
@@ -237,11 +239,42 @@ async function openThreadsReader(dbPath: string): Promise<SqliteRowReader> {
 	return { get: (id) => db.prepare(sql).get(id), close: () => db.close() };
 }
 
+type CodexIndexLine = {
+	id?: unknown;
+	thread_name?: unknown;
+};
+
+async function latestCodexIndexName(
+	sessionId: string,
+	indexPath: string
+): Promise<string | null> {
+	let raw: string;
+	try {
+		raw = await readFile(indexPath, 'utf8');
+	} catch {
+		return null;
+	}
+	const lines = raw.split('\n');
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i];
+		if (!line) continue;
+		let parsed: CodexIndexLine;
+		try {
+			parsed = JSON.parse(line) as CodexIndexLine;
+		} catch {
+			continue;
+		}
+		if (parsed.id !== sessionId || typeof parsed.thread_name !== 'string') continue;
+		const name = parsed.thread_name.trim();
+		if (name) return name;
+	}
+	return null;
+}
+
 // Per-agent local chat-title router (plan 3.1): claude reads the transcript's
-// latest custom-title line; codex reads threads.title from the state db —
-// never a summarizer spawn, so a codex ticket has no claude dependency. Local
-// sessions only: remote titles arrive via payload passthrough and are never
-// re-derived on this machine.
+// latest custom-title line; codex reads its explicit thread name — never raw
+// prompt text and never a summarizer spawn. Local sessions only: remote names
+// arrive via payload passthrough and are never re-derived on this machine.
 export async function localChatTitle(
 	agent: Agent,
 	sessionId: string,
@@ -254,8 +287,14 @@ export async function localChatTitle(
 
 export async function codexThreadTitle(
 	sessionId: string,
-	dbPath: string = CODEX_STATE_DB
+	dbPath: string = CODEX_STATE_DB,
+	indexPath: string = dbPath === CODEX_STATE_DB
+		? CODEX_SESSION_INDEX
+		: path.join(path.dirname(dbPath), 'session_index.jsonl')
 ): Promise<string | null> {
+	const indexedName = await latestCodexIndexName(sessionId, indexPath);
+	if (indexedName) return indexedName;
+
 	let reader: SqliteRowReader;
 	try {
 		reader = await openThreadsReader(dbPath);
@@ -266,11 +305,13 @@ export async function codexThreadTitle(
 		return null;
 	}
 	try {
-		const row = reader.get(sessionId) as { title?: unknown } | undefined | null;
-		const title = row && typeof row.title === 'string' ? row.title.trim() : '';
-		return title || null;
+		const row = reader.get(sessionId) as { name?: unknown } | undefined | null;
+		const name = row && typeof row.name === 'string' ? row.name.trim() : '';
+		return name || null;
 	} catch (err) {
-		console.warn(`[codexTitle] threads read failed: ${err}`);
+		// Older Codex databases do not have threads.name. That is expected: the
+		// session-index read above is their rename-compatible source.
+		console.warn(`[codexTitle] threads.name read failed: ${err}`);
 		return null;
 	} finally {
 		try {
