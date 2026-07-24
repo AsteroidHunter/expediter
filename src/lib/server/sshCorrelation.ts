@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 
 import { listPanes, parentPid, type PaneRow } from './bootScan';
-import { loadSessions, type SessionsMap } from './sessionsStore';
+import { loadSessions, updateSessionConnection, type SessionsMap } from './sessionsStore';
 
 const execFileAsync = promisify(execFile);
 
@@ -46,15 +46,21 @@ export function parseSshConnection(raw: string): SshConnectionInfo | null {
 	return { clientIp, clientPort, serverIp, serverPort };
 }
 
-// The five side-effecting inputs of the resolution walk, injectable so tests
-// can feed synthetic lsof/ps/tmux/sessions combinations — the same pattern as
-// bootScan's BootScanDeps.
+// The side-effecting inputs of the resolution walk, injectable so tests can
+// feed synthetic lsof/ps/tmux/sessions combinations — the same pattern as
+// bootScan's BootScanDeps. updateSessionConnection is the walk's one output
+// seam: it persists what a successful full walk found (D11).
 export type CorrelationDeps = {
 	loadSessions: () => Promise<SessionsMap>;
 	listPanes: () => Promise<PaneRow[]>;
 	lsofEstablishedPids: (port: number) => Promise<number[]>;
 	processCommand: (pid: number) => Promise<string | null>;
 	parentPid: (pid: number) => Promise<number | null>;
+	updateSessionConnection: (
+		sessionId: string,
+		paneId: string,
+		sshConnection: string
+	) => Promise<void>;
 };
 
 // `lsof -t` prints one pid per line; a pid holding several fds on the same
@@ -92,7 +98,8 @@ const defaultDeps: CorrelationDeps = {
 	listPanes,
 	lsofEstablishedPids,
 	processCommand,
-	parentPid
+	parentPid,
+	updateSessionConnection
 };
 
 // Test seam for callers that can't thread a deps argument (the hook-event
@@ -141,8 +148,20 @@ export async function resolveRemotePane(
 		return { ok: false, step: 'tmux', detail: `tmux list-panes failed: ${err}` };
 	}
 
+	// Fast-path validity is pane liveness AND connection equality (D11). A
+	// remote-tmux session outlives its ssh connection by design: after a
+	// re-ssh from a different local window the old pane usually survives as a
+	// bare shell prompt, so the pane check alone would pin every event — and
+	// every tap — to the stale pane forever. A stored connection that differs
+	// from the incoming (fresh, session-env) value forces a full re-walk.
+	// Entries without a stored connection predate this field and keep the
+	// pane-liveness-only semantics they were written under.
 	const cached = (await deps.loadSessions())[sessionId];
-	if (cached && panes.some((p) => p.pane_id === cached.tmux_pane)) {
+	if (
+		cached &&
+		panes.some((p) => p.pane_id === cached.tmux_pane) &&
+		(!cached.ssh_connection || cached.ssh_connection === sshConnection)
+	) {
 		return { ok: true, paneId: cached.tmux_pane };
 	}
 
@@ -185,7 +204,17 @@ export async function resolveRemotePane(
 		let pid: number | null = sshPid;
 		for (let hop = 0; hop < MAX_PPID_HOPS && pid !== null && pid > 1; hop++) {
 			const paneId = paneByPid.get(pid);
-			if (paneId !== undefined) return { ok: true, paneId };
+			if (paneId !== undefined) {
+				// Persist what the walk found so the next event takes the fast
+				// path against the CURRENT pane and connection (D11). Bookkeeping
+				// only: a failed write must not fail a correlation that succeeded.
+				try {
+					await deps.updateSessionConnection(sessionId, paneId, sshConnection);
+				} catch (err) {
+					console.warn('[remote] updateSessionConnection failed', err);
+				}
+				return { ok: true, paneId };
+			}
 			pid = await deps.parentPid(pid);
 		}
 	}

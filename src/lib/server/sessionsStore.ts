@@ -25,6 +25,21 @@ export type SessionEntry = {
 	// entries: there is no local agent process to check, and far-end liveness
 	// is accepted blindness (remote decisions 5/6).
 	agent_pid?: number;
+	// The agent's pane id in the REMOTE tmux server, set only for remote-tmux
+	// sessions (tmux running on the ssh-ed box, the agent in one of its
+	// panes). Pane ids are namespaced per tmux server — never comparable to
+	// tmux_pane, which always names a local pane. Forms the uniqueness cell
+	// (tmux_pane, remote_pane) that lets several agents share one local ssh
+	// pane, and reseed/focus read it back after a daemon restart.
+	remote_pane?: string;
+	// The verbatim $SSH_CONNECTION the correlation walk last resolved for this
+	// session. The fast path requires the incoming value to equal this one in
+	// addition to pane liveness (D11): a remote-tmux session outlives its ssh
+	// connection by design, and after a re-ssh from a different window the old
+	// local pane commonly survives as a bare shell prompt — pane death alone
+	// no longer detects the move. Absent on entries written by older builds,
+	// which keep pane-liveness-only semantics.
+	ssh_connection?: string;
 };
 
 export type SessionsMap = Record<string, SessionEntry>;
@@ -87,6 +102,10 @@ export async function loadSessions(): Promise<SessionsMap> {
 		if (typeof v.agent_pid === 'number' && Number.isFinite(v.agent_pid) && v.agent_pid > 0) {
 			entry.agent_pid = v.agent_pid;
 		}
+		if (typeof v.remote_pane === 'string' && v.remote_pane) entry.remote_pane = v.remote_pane;
+		if (typeof v.ssh_connection === 'string' && v.ssh_connection) {
+			entry.ssh_connection = v.ssh_connection;
+		}
 		map[key] = entry;
 	}
 	return map;
@@ -127,6 +146,28 @@ export async function updateSessionTitle(session_id: string, title: string): Pro
 	const entry = map[session_id];
 	if (!entry || entry.title === title) return;
 	entry.title = title;
+	await writeSessions(map);
+}
+
+// Re-records the pane and connection a full correlation walk just resolved
+// (D11). After a detach → disconnect → re-ssh → re-attach cycle the entry
+// still names the old pane and the dead connection; without this write every
+// subsequent event would repeat the lsof walk, and boot reseed would recreate
+// the ticket on the stale pane. No-ops when the entry is missing (a
+// SessionStart in flight — recordSession stores both fields with the full
+// entry) or when nothing changed, so the steady state stays write-free.
+export async function updateSessionConnection(
+	session_id: string,
+	tmux_pane: string,
+	ssh_connection: string
+): Promise<void> {
+	const map = await loadSessions();
+	const entry = map[session_id];
+	if (!entry || (entry.tmux_pane === tmux_pane && entry.ssh_connection === ssh_connection)) {
+		return;
+	}
+	entry.tmux_pane = tmux_pane;
+	entry.ssh_connection = ssh_connection;
 	await writeSessions(map);
 }
 

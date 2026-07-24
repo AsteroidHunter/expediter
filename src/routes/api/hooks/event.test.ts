@@ -617,6 +617,7 @@ function stubCorrelation(overrides: Partial<CorrelationDeps> = {}): void {
 		lsofEstablishedPids: async () => [450],
 		processCommand: async () => 'ssh',
 		parentPid: async (pid) => (pid === 450 ? 900 : null),
+		updateSessionConnection: async () => {},
 		...overrides
 	});
 }
@@ -870,7 +871,9 @@ test('a follow-up remote event resolves via the sessions.json fast path (no lsof
 	// loadSessions dep must be the REAL one so the fast path sees what the
 	// handler recorded; only count lsof to prove the slow path stayed cold
 	// after the first event.
-	const { loadSessions: realLoad } = await import('$lib/server/sessionsStore');
+	const { loadSessions: realLoad, updateSessionConnection: realUpdate } = await import(
+		'$lib/server/sessionsStore'
+	);
 	setCorrelationDepsForTest({
 		loadSessions: realLoad,
 		listPanes: async () => [remotePane('%9', 900)],
@@ -879,7 +882,8 @@ test('a follow-up remote event resolves via the sessions.json fast path (no lsof
 			return [450];
 		},
 		processCommand: async () => 'ssh',
-		parentPid: async (pid) => (pid === 450 ? 900 : null)
+		parentPid: async (pid) => (pid === 450 ? 900 : null),
+		updateSessionConnection: realUpdate
 	});
 
 	const id = nextId();

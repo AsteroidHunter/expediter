@@ -73,6 +73,7 @@ function makeDeps(overrides: Partial<CorrelationDeps> = {}): CorrelationDeps {
 		lsofEstablishedPids: async () => [],
 		processCommand: async () => null,
 		parentPid: async () => null,
+		updateSessionConnection: async () => {},
 		...overrides
 	};
 }

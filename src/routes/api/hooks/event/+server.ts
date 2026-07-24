@@ -21,7 +21,7 @@ import { getRefreshInterval, getTitleSource } from '$lib/config';
 import { watchForDecline } from '$lib/declineWatcher';
 import { whimsicalName } from '$lib/whimsicalName';
 import { recordSession, forgetSession, updateSessionTitle } from '$lib/server/sessionsStore';
-import { resolveRemotePane } from '$lib/server/sshCorrelation';
+import { resolveRemotePane, parseSshConnection } from '$lib/server/sshCorrelation';
 import { resolveAgentPid } from '$lib/server/bootScan';
 import { agentForPath, type Agent } from '$lib/agent';
 
@@ -65,7 +65,31 @@ type HookPayload = {
 	remote?: boolean;
 	ssh_connection?: string;
 	title?: string;
+	// Remote-tmux mode only (tmux running on the ssh-ed box itself): the
+	// agent's pane id in the FAR tmux server. Never a local pane id — the two
+	// namespaces must not mix, which is why this field exists instead of
+	// reusing tmux_pane (D3).
+	remote_pane?: string;
+	// The sending hook script's version (HOOK_VERSION in
+	// bin/expediter-hook.sh). Absent on pre-versioning hooks — treated as 0.
+	hook_version?: number;
 };
+
+// Mirror of HOOK_VERSION in bin/expediter-hook.sh — bump the two together.
+// Local installs run the repo's hook in place, so they update with the
+// daemon; the copy install-remote.sh ships to a far box can lag behind, and
+// an outdated remote hook silently keeps whatever defects this daemon has
+// since fixed. The daemon warns (once per session) and nothing auto-updates
+// (D13).
+const CURRENT_HOOK_VERSION = 1;
+const versionWarnedSessions = new Set<string>();
+
+// remote_pane later reaches a `tmux select-window` exec on the devbox (the
+// tap helper), and the tunnel that delivers it is reachable by any user of a
+// shared box — so only the strict %N pane-id shape gets through the door
+// (D14). Characters that pass cannot do anything in a shell. The helper
+// re-checks immediately before exec.
+const REMOTE_PANE_PATTERN = /^%[0-9]+$/;
 
 // Fire-and-forget topic refresh. Caller never awaits. The try/finally pair
 // guarantees `refreshInFlight` is cleared even if summarize or transcript-read
@@ -123,6 +147,31 @@ export const POST: RequestHandler = async ({ request }) => {
 	const { hook_event_name, session_id, transcript_path, cwd } = payload;
 	if (!hook_event_name || !session_id) {
 		return json({ ok: false, error: 'missing hook_event_name or session_id' }, { status: 400 });
+	}
+
+	// D14: reject a malformed remote_pane at the door rather than carrying it
+	// toward the tap path. Format-only — whether the pane exists is the far
+	// tmux server's business.
+	if (
+		payload.remote_pane !== undefined &&
+		(typeof payload.remote_pane !== 'string' || !REMOTE_PANE_PATTERN.test(payload.remote_pane))
+	) {
+		return json({ ok: false, error: 'malformed remote_pane' }, { status: 422 });
+	}
+
+	// D13 skew warning. An old hook still works — its payloads keep their old
+	// semantics — but it silently lacks whatever this daemon has since fixed,
+	// so say so once per session and keep going.
+	const hookVersion = typeof payload.hook_version === 'number' ? payload.hook_version : 0;
+	if (hookVersion < CURRENT_HOOK_VERSION && !versionWarnedSessions.has(session_id)) {
+		versionWarnedSessions.add(session_id);
+		const origin =
+			payload.remote === true
+				? `remote hook on ${parseSshConnection(payload.ssh_connection ?? '')?.serverIp ?? 'unknown host'}`
+				: 'local hook';
+		console.warn(
+			`[hook] ${origin} is v${hookVersion}, current v${CURRENT_HOOK_VERSION} — re-run the installer there (session ${session_id.slice(0, 8)})`
+		);
 	}
 
 	// Which agent fired this event, derived from transcript_path's segment
@@ -206,6 +255,10 @@ export const POST: RequestHandler = async ({ request }) => {
 			cwd: cwd ?? '',
 			transcript_path,
 			...(remote ? { remote: true } : {}),
+			// Arm the fast path's connection-equality check (D11) from birth:
+			// the correlated connection is persisted with the entry, so a later
+			// event arriving over a different connection forces a re-walk.
+			...(remote && payload.ssh_connection ? { ssh_connection: payload.ssh_connection } : {}),
 			...(payloadTitle ? { title: payloadTitle } : {}),
 			...(agent_pid ? { agent_pid } : {})
 		}).catch((e) => console.warn('[sessionStart] recordSession failed', e));
