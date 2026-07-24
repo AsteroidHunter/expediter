@@ -72,9 +72,12 @@ if (process.argv[2] === 'update') {
 // `expediter install remote <name>` / `expediter uninstall remote <name>` —
 // remote-session setup (one marker-delimited ~/.ssh/config block per host, so
 // machines are added and removed independently). Handled before anything else
-// so it never starts the daemon, and it never opens an ssh connection itself:
-// the Mac half writes local config and prints the command the user pastes on
-// the box. `expediter install remote how` prints the plain-language steps.
+// so it never starts the daemon. Install makes ONE interactive ssh connection
+// — the user's own login, password+2FA as always — to read the box's runtime
+// dir (the tunnel's devbox end is a unix socket there, D17, and sshd expands
+// no ~ in forward paths) and to record its host key for the Match exec
+// matcher (D18). The DAEMON still never sshs anywhere (D16).
+// `expediter install remote how` prints the plain-language steps.
 if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 	const action = process.argv[2];
 	const name = process.argv[4];
@@ -209,24 +212,104 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 		return { out, removed };
 	}
 
+	const HOSTS_DIR = path.join(os.homedir(), '.expediter', 'remote-hosts');
+	const KEYS_FILE = path.join(HOSTS_DIR, `${name}.keys`);
+
 	if (action === 'install') {
+		if (!HOME) {
+			console.error('expediter: EXPEDITER_HOME is not set. Re-run install.sh from the cloned repo.');
+			process.exit(1);
+		}
+		// One interactive probe over the user's normal login. Two reasons it
+		// must exist: the RemoteForward's devbox end is a unix socket in the
+		// box's per-login runtime dir (D17) and sshd expands no ~ in forward
+		// paths, so the absolute path has to be known NOW; and the Match exec
+		// matcher (D18) recognizes the box by host key, which this connection
+		// TOFU-records if it was never connected to before.
+		// ClearAllForwardings keeps a pre-existing block (reinstall case) from
+		// binding — and then stranding — a socket file during the probe.
+		console.log('');
+		console.log(`Connecting to ${name} once to read its runtime dir and record its host key`);
+		console.log('(your usual ssh login; nothing is installed on the box yet):');
+		console.log('');
+		const probeCmd =
+			"sh -c 'd=\"${XDG_RUNTIME_DIR:-}\"; if [ -z \"$d\" ]; then d=\"$HOME/.expediter/run\"; mkdir -p \"$d\" && chmod 700 \"$d\"; fi; printf \"EXPEDITER_RUNDIR=%s\\n\" \"$d\"'";
+		const probe = spawnSync('ssh', ['-o', 'ClearAllForwardings=yes', name, probeCmd], {
+			stdio: ['inherit', 'pipe', 'inherit'],
+			encoding: 'utf8'
+		});
+		const rundirLine = (probe.stdout || '')
+			.split('\n')
+			.find((l) => l.startsWith('EXPEDITER_RUNDIR='));
+		const rundir = rundirLine ? rundirLine.slice('EXPEDITER_RUNDIR='.length).trim() : '';
+		if (probe.status !== 0 || !rundir.startsWith('/')) {
+			console.error('');
+			console.error(
+				`expediter: could not read ${name}'s runtime dir over ssh — nothing was written.`
+			);
+			console.error(`Check that \`ssh ${name}\` works, then re-run this command.`);
+			process.exit(1);
+		}
+		const socketPath = `${rundir}/expediter-tunnel.sock`;
+
+		// The box's host key(s), as recorded on THIS Mac. ssh-keygen -F reads
+		// hashed and plain entries alike; the probe above guarantees an entry
+		// exists unless known_hosts lives somewhere custom.
+		const kh = spawnSync('ssh-keygen', ['-F', name], { encoding: 'utf8' });
+		const blobs = [];
+		for (const line of (kh.stdout || '').split('\n')) {
+			const t = line.trim();
+			if (!t || t.startsWith('#')) continue;
+			const parts = t.split(/\s+/);
+			if (parts.length >= 3 && parts[1].includes('-')) blobs.push(`${parts[1]} ${parts[2]}`);
+		}
+		if (blobs.length === 0) {
+			console.error('');
+			console.error(
+				`expediter: ssh reached ${name} but ~/.ssh/known_hosts has no entry for it`
+			);
+			console.error(
+				'(a custom UserKnownHostsFile or StrictHostKeyChecking=no would do this).'
+			);
+			console.error('The tunnel matcher needs that key — nothing was written.');
+			process.exit(1);
+		}
+		await fs.mkdir(HOSTS_DIR, { recursive: true, mode: 0o700 });
+		await fs.writeFile(KEYS_FILE, blobs.join('\n') + '\n', { mode: 0o600 });
+
+		// The tunnel block: matched by host identity, not by one spelling
+		// (D18) — the matcher exits 0 for ANY destination whose known_hosts
+		// key equals one recorded above, so devbox / its FQDN / its IP all
+		// carry the tunnel. The devbox end is the runtime-dir socket (D17):
+		// sshd creates it 0600 (StreamLocalBindMask default), so the kernel
+		// refuses every other user of a shared box — that file permission IS
+		// the auth for hook events and helper polls.
+		const matcher = path.join(HOME, 'bin', 'expediter-match-remote.sh');
 		await fs.mkdir(SSH_DIR, { recursive: true, mode: 0o700 });
 		await backupConfig();
 		const existing = (await readConfigLines()) ?? [];
 		const { out } = spliceHostBlocks(existing);
 		trimTail(out);
 		if (out.length) out.push('');
-		out.push(BEGIN, `Host ${name}`, '  RemoteForward 5179 localhost:5179', END);
+		out.push(
+			BEGIN,
+			`Match exec "'${matcher}' '${KEYS_FILE}' '%n' '%h' '%p'"`,
+			`  RemoteForward ${socketPath} localhost:5179`,
+			END
+		);
 		await fs.writeFile(SSH_CONFIG_PATH, out.join('\n') + '\n', { mode: 0o600 });
 
 		console.log('');
-		console.log(`✓ Tunnel block written to ~/.ssh/config for "${name}".`);
+		console.log(`✓ Tunnel block written to ~/.ssh/config for "${name}" (matched by host key,`);
+		console.log(`  so any spelling of it gets the tunnel; socket ${socketPath}).`);
 		console.log('');
 		console.log(`Next: ssh into ${name} as usual and paste this there, once:`);
 		console.log('');
 		console.log(`  ${pasteCommand()}`);
 		console.log('');
 		console.log(`After that: \`ssh ${name}\`, run claude, tickets appear on your phone.`);
+		console.log('(Already had the mini-client there? Paste it again anyway — it upgrades');
+		console.log(' the box to the socket tunnel and the tap helper.)');
 		process.exit(0);
 	}
 
@@ -247,6 +330,9 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 		console.log('');
 		console.log(`⊘ No expediter block for "${name}" in ~/.ssh/config.`);
 	}
+	// The recorded host key the tunnel matcher compared against (harmless on
+	// pre-socket installs, where it never existed).
+	await fs.rm(KEYS_FILE, { force: true }).catch(() => {});
 	console.log('');
 	console.log('To remove the mini-client from the box itself, run this there:');
 	console.log('');

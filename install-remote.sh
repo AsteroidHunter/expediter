@@ -453,6 +453,52 @@ PY
 	else
 		printf '⊘ No expediter entries in codex hooks.json (or no hooks.json).\n'
 	fi
+	# Splice the helper login block out of every profile file it was added to
+	# (same markers section 3 writes). python3 keeps the edit surgical.
+	for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zprofile"; do
+		if [ -f "$f" ] && grep -qF "# >>> expediter remote-sessions helper >>>" "$f"; then
+			python3 - "$f" <<'PY'
+import sys
+
+path = sys.argv[1]
+BEGIN = "# >>> expediter remote-sessions helper >>>"
+END = "# <<< expediter remote-sessions helper <<<"
+with open(path) as fh:
+    lines = fh.read().split("\n")
+out = []
+skipping = False
+for line in lines:
+    if line.strip() == BEGIN:
+        skipping = True
+        if out and not out[-1].strip():
+            out.pop()
+        continue
+    if skipping:
+        if line.strip() == END:
+            skipping = False
+        continue
+    out.append(line)
+with open(path, "w") as fh:
+    fh.write("\n".join(out))
+PY
+			printf '✓ Helper login block removed from %s\n' "$f"
+		fi
+	done
+	# Kill a running helper and clear its runtime files; transient by design
+	# (the OS wipes the runtime dir anyway), but a live helper would otherwise
+	# poll a daemon that no longer knows this box.
+	if [ -f "$HOME/.expediter/socket-path" ]; then
+		SOCK_PATH="$(head -n 1 "$HOME/.expediter/socket-path" 2>/dev/null)"
+		if [ -n "$SOCK_PATH" ]; then
+			PID_FILE="$(dirname "$SOCK_PATH")/expediter-helper.pid"
+			if [ -f "$PID_FILE" ]; then
+				HPID="$(head -n 1 "$PID_FILE" 2>/dev/null)"
+				[ -n "$HPID" ] && kill "$HPID" 2>/dev/null || true
+				rm -f "$PID_FILE"
+			fi
+			rm -f "$SOCK_PATH"
+		fi
+	fi
 	if [ -d "$HOME/.expediter" ]; then
 		rm -rf "$HOME/.expediter"
 		printf '✓ Removed ~/.expediter/.\n'
@@ -465,40 +511,99 @@ fi
 
 # --- 3. hook script ----------------------------------------------------------
 
-# Locate expediter-hook.sh relative to this script: bin/ sibling when run from
-# a repo clone, same directory when the two files sit together. When neither
-# exists — the curl|bash path, where "this script" is bash's stdin — fetch the
-# hook from the repo's raw URL on the same branch this installer came from.
+# Locate a script relative to this installer: bin/ sibling when run from a
+# repo clone, same directory when the files sit together. When neither exists
+# — the curl|bash path, where "this script" is bash's stdin — fetch from the
+# repo's raw URL on the same branch this installer came from. A failed fetch
+# aborts loudly: no partial installs.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOOK_SOURCE=""
-for candidate in "$SCRIPT_DIR/bin/expediter-hook.sh" "$SCRIPT_DIR/expediter-hook.sh"; do
-	if [ -f "$candidate" ]; then
-		HOOK_SOURCE="$candidate"
-		break
-	fi
-done
-FETCHED=""
-if [ -z "$HOOK_SOURCE" ]; then
-	HOOK_URL="$RAW_BASE/$BRANCH/bin/expediter-hook.sh"
-	FETCHED="$(mktemp)"
-	if ! curl -fsSL "$HOOK_URL" -o "$FETCHED" || [ ! -s "$FETCHED" ]; then
-		rm -f "$FETCHED"
-		err "⚠ Could not fetch expediter-hook.sh from:"
-		err "  $HOOK_URL"
-		err "  Check that this machine can reach GitHub and re-run."
-		exit 1
-	fi
-	HOOK_SOURCE="$FETCHED"
-	printf '✓ Fetched expediter-hook.sh (branch %s)\n' "$BRANCH"
-fi
-
 HOOK_DIR="$HOME/.expediter/bin"
-HOOK_SCRIPT="$HOOK_DIR/expediter-hook.sh"
 mkdir -p "$HOOK_DIR"
-cp "$HOOK_SOURCE" "$HOOK_SCRIPT"
-chmod +x "$HOOK_SCRIPT"
-[ -n "$FETCHED" ] && rm -f "$FETCHED"
+
+install_repo_script() { # $1 = script filename, $2 = destination path
+	local src="" fetched=""
+	for candidate in "$SCRIPT_DIR/bin/$1" "$SCRIPT_DIR/$1"; do
+		if [ -f "$candidate" ]; then
+			src="$candidate"
+			break
+		fi
+	done
+	if [ -z "$src" ]; then
+		local url="$RAW_BASE/$BRANCH/bin/$1"
+		fetched="$(mktemp)"
+		if ! curl -fsSL "$url" -o "$fetched" || [ ! -s "$fetched" ]; then
+			rm -f "$fetched"
+			err "⚠ Could not fetch $1 from:"
+			err "  $url"
+			err "  Check that this machine can reach GitHub and re-run."
+			exit 1
+		fi
+		src="$fetched"
+		printf '✓ Fetched %s (branch %s)\n' "$1" "$BRANCH"
+	fi
+	cp "$src" "$2"
+	chmod +x "$2"
+	[ -n "$fetched" ] && rm -f "$fetched"
+}
+
+HOOK_SCRIPT="$HOOK_DIR/expediter-hook.sh"
+install_repo_script "expediter-hook.sh" "$HOOK_SCRIPT"
 printf '✓ Hook script installed at %s\n' "$HOOK_SCRIPT"
+
+# The tap helper (outer-tmux-remote-session D16): flips this box's tmux to a
+# tapped window by long-polling the Mac daemon through the tunnel socket.
+HELPER_SCRIPT="$HOOK_DIR/expediter-remote-helper.sh"
+install_repo_script "expediter-remote-helper.sh" "$HELPER_SCRIPT"
+printf '✓ Tap helper installed at %s\n' "$HELPER_SCRIPT"
+
+# The tunnel's near end is a user-private unix socket (D17) in the per-login
+# runtime dir — the same path `expediter install remote <name>` probed and
+# wrote into the Mac's ssh config; both sides compute it with this exact
+# formula. The hook and the helper read it from ~/.expediter/socket-path.
+# On boxes without XDG_RUNTIME_DIR (no systemd) the fallback dir persists
+# under $HOME and is created 0700 here and by the Mac-side probe.
+RUNDIR="${XDG_RUNTIME_DIR:-}"
+if [ -z "$RUNDIR" ]; then
+	RUNDIR="$HOME/.expediter/run"
+	mkdir -p "$RUNDIR"
+	chmod 700 "$RUNDIR"
+fi
+SOCKET_PATH="$RUNDIR/expediter-tunnel.sock"
+printf '%s\n' "$SOCKET_PATH" > "$HOME/.expediter/socket-path"
+printf '✓ Tunnel socket path recorded: %s\n' "$SOCKET_PATH"
+
+# Start the helper at every ssh login (guarded to a silent no-op when one is
+# already running or no tunnel socket exists; it prints exactly one loud line
+# when it clears a stale socket — see the helper's header). Marker-delimited
+# and spliced idempotently. ~/.profile covers plain sh/bash logins, but an
+# existing ~/.bash_profile makes bash skip ~/.profile, and zsh reads
+# ~/.zprofile — so the block lands in each file that is (or would be) read.
+LOGIN_BEGIN="# >>> expediter remote-sessions helper >>>"
+LOGIN_END="# <<< expediter remote-sessions helper <<<"
+LOGIN_LINE="[ -x \"\$HOME/.expediter/bin/expediter-remote-helper.sh\" ] && \"\$HOME/.expediter/bin/expediter-remote-helper.sh\" login-start || true"
+
+login_files() {
+	printf '%s\n' "$HOME/.profile"
+	[ -f "$HOME/.bash_profile" ] && printf '%s\n' "$HOME/.bash_profile"
+	case "${SHELL:-}" in
+		*zsh) printf '%s\n' "$HOME/.zprofile" ;;
+		*) [ -f "$HOME/.zprofile" ] && printf '%s\n' "$HOME/.zprofile" ;;
+	esac
+	return 0
+}
+
+while IFS= read -r f; do
+	if [ -f "$f" ] && grep -qF "$LOGIN_BEGIN" "$f"; then
+		continue
+	fi
+	{
+		[ -s "$f" ] && printf '\n'
+		printf '%s\n%s\n%s\n' "$LOGIN_BEGIN" "$LOGIN_LINE" "$LOGIN_END"
+	} >> "$f"
+	printf '✓ Helper login block added to %s\n' "$f"
+done <<EOF_LOGIN
+$(login_files)
+EOF_LOGIN
 
 # --- 4. hook entries ---------------------------------------------------------
 

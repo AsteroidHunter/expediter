@@ -281,6 +281,9 @@
 	// terminal); a detached one hits /api/attach (open a fresh terminal running
 	// `tmux attach`). Same press feedback either way; the next reconcile migrates
 	// a re-attached card from the Detached page to the Attached page on its own.
+	// /api/focus is ticket-scoped and takes {session_id} — the daemon resolves
+	// the pane (and, for remote-tmux tickets, the far pane) from the ticket, so
+	// the phone holds opaque ids only; /api/attach still addresses the pane.
 	async function tapSession(ticket: Ticket, endpoint: string): Promise<void> {
 		if (!clientToken) {
 			// No token in sessionStorage — the empty-state branch should be visible
@@ -296,7 +299,11 @@
 					'Content-Type': 'application/json',
 					'x-expediter-token': clientToken
 				},
-				body: JSON.stringify({ pane: ticket.tmux_pane })
+				body: JSON.stringify(
+					endpoint === '/api/focus'
+						? { session_id: ticket.session_id }
+						: { pane: ticket.tmux_pane }
+				)
 			});
 		} catch {
 			/* failure is shown only as a missed tap — daemon-side log is the record */

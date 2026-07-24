@@ -46,6 +46,78 @@ export function parseSshConnection(raw: string): SshConnectionInfo | null {
 	return { clientIp, clientPort, serverIp, serverPort };
 }
 
+// ssh flags that consume the following argv token. Derived from ssh(1)'s
+// option string; anything here appearing bare means "skip the next token"
+// when hunting for the destination in a client's argv.
+const SSH_OPTION_TAKING_FLAGS = new Set([
+	'-B',
+	'-b',
+	'-c',
+	'-D',
+	'-E',
+	'-e',
+	'-F',
+	'-I',
+	'-i',
+	'-J',
+	'-L',
+	'-l',
+	'-m',
+	'-O',
+	'-o',
+	'-p',
+	'-Q',
+	'-R',
+	'-S',
+	'-W',
+	'-w'
+]);
+
+// Extracts the destination a live ssh client was launched at from its
+// `ps -o args=` line: first non-flag token after the binary, with
+// option-taking flags (and their values, separate or embedded like -p2222)
+// skipped, a user@ prefix stripped, and ssh:// URIs unwrapped. The port is
+// reported when it was explicit (-p or URI) so known_hosts lookups can try
+// the [host]:port form first. Null when no destination token exists. Pure
+// for unit-testing; used by remoteTap to identify a ticket's box by host
+// key, not to build any command line.
+export function parseSshDestination(argsLine: string): { host: string; port?: number } | null {
+	const tokens = argsLine.trim().split(/\s+/);
+	let port: number | undefined;
+	for (let i = 1; i < tokens.length; i++) {
+		const tok = tokens[i];
+		if (tok.startsWith('-') && tok.length > 1) {
+			const flag = tok.slice(0, 2);
+			if (SSH_OPTION_TAKING_FLAGS.has(flag)) {
+				const value = tok.length > 2 ? tok.slice(2) : tokens[++i];
+				if (flag === '-p' && value && PORT_PATTERN.test(value)) port = Number(value);
+			}
+			// Boolean flags (and clusters like -4A) carry no value: just skip.
+			continue;
+		}
+		// First non-flag token is the destination; everything after would be
+		// the remote command, which we never read.
+		let dest = tok;
+		if (dest.startsWith('ssh://')) {
+			dest = dest.slice('ssh://'.length);
+			const slash = dest.indexOf('/');
+			if (slash >= 0) dest = dest.slice(0, slash);
+			const at = dest.lastIndexOf('@');
+			if (at >= 0) dest = dest.slice(at + 1);
+			const colon = dest.lastIndexOf(':');
+			if (colon >= 0 && PORT_PATTERN.test(dest.slice(colon + 1))) {
+				port = Number(dest.slice(colon + 1));
+				dest = dest.slice(0, colon);
+			}
+			return dest ? { host: dest, ...(port ? { port } : {}) } : null;
+		}
+		const at = dest.lastIndexOf('@');
+		if (at >= 0) dest = dest.slice(at + 1);
+		return dest ? { host: dest, ...(port ? { port } : {}) } : null;
+	}
+	return null;
+}
+
 // The side-effecting inputs of the resolution walk, injectable so tests can
 // feed synthetic lsof/ps/tmux/sessions combinations — the same pattern as
 // bootScan's BootScanDeps. updateSessionConnection is the walk's one output
@@ -65,8 +137,9 @@ export type CorrelationDeps = {
 
 // `lsof -t` prints one pid per line; a pid holding several fds on the same
 // connection prints repeatedly, so dedupe. lsof exits non-zero when nothing
-// matches — the caller treats a throw as "no candidates".
-async function lsofEstablishedPids(port: number): Promise<number[]> {
+// matches — the caller treats a throw as "no candidates". Exported for
+// remoteTap's box-identity resolution, which walks the same ground.
+export async function lsofEstablishedPids(port: number): Promise<number[]> {
 	const { stdout } = await execFileAsync('lsof', [
 		'-nP',
 		`-iTCP:${port}`,
@@ -83,7 +156,8 @@ async function lsofEstablishedPids(port: number): Promise<number[]> {
 
 // `ps -o comm=` gives the executable name on Linux and the full executable
 // path on macOS; callers basename() before comparing. Null when the pid died.
-async function processCommand(pid: number): Promise<string | null> {
+// Exported for remoteTap alongside lsofEstablishedPids.
+export async function processCommand(pid: number): Promise<string | null> {
 	try {
 		const { stdout } = await execFileAsync('ps', ['-o', 'comm=', '-p', String(pid)]);
 		const comm = stdout.trim();

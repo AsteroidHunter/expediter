@@ -193,7 +193,23 @@ if [ -n "$PAYLOAD" ]; then
 	# verification is safe and avoids a curl CA dance.
 	INSECURE=""
 	if [ "$SCHEME" = "https" ]; then INSECURE="-k"; fi
+	# D17: on a devbox the tunnel's near end is a user-private unix socket
+	# (kernel-enforced 0600 — file permission is the auth, and no shared-box
+	# port to squat). install-remote.sh wrote its path to
+	# ~/.expediter/socket-path; when that socket is live, POST through it.
+	# Missing file or dead socket → the legacy TCP tunnel on localhost:5179,
+	# so pre-socket installs keep working unchanged. The ${arr[@]+...} form
+	# survives `set -u` with an empty array on old bash.
+	SOCKET_ARGS=()
+	SOCKET_FILE="${HOME}/.expediter/socket-path"
+	if [ -f "$SOCKET_FILE" ]; then
+		SOCKET_PATH=$(head -n 1 "$SOCKET_FILE" 2>/dev/null)
+		if [ -n "$SOCKET_PATH" ] && [ -S "$SOCKET_PATH" ]; then
+			SOCKET_ARGS=(--unix-socket "$SOCKET_PATH")
+		fi
+	fi
 	STATUS=$(curl -s -o /dev/null -m 2 -w '%{http_code}' $INSECURE \
+		${SOCKET_ARGS[@]+"${SOCKET_ARGS[@]}"} \
 		-X POST "${SCHEME}://localhost:${PORT}/api/hooks/event" \
 		-H 'Content-Type: application/json' \
 		-d "$PAYLOAD" 2>/dev/null)
