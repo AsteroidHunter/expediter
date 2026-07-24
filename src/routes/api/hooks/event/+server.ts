@@ -235,8 +235,21 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 		// Clear any ticket bound to this pane under a different key (boot-scan
 		// placeholder, or a prior/diverged session_id) before upserting the
-		// authoritative one, so the pane never shows two tickets.
-		cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id));
+		// authoritative one, so the pane's CELL never shows two tickets (D4).
+		// Local events sweep the whole pane — a pane that provably runs a local
+		// agent can hold no live remote ticket. Remote events sweep only their
+		// own cell, so a remote-tmux sibling's SessionStart no longer deletes
+		// its neighbors.
+		cancelWatchers(
+			dropPaneTicketsExcept(tmux_pane, session_id, remote ? (payload.remote_pane ?? '') : undefined)
+		);
+		// OQ5 (answered drop): a remote-tmux sibling starting behind this pane
+		// also clears any plain-ssh ticket sitting on it — tmux now owns the
+		// ssh session's foreground, so a plain-ssh agent can no longer be
+		// running there.
+		if (remote && payload.remote_pane) {
+			cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id, ''));
+		}
 		// Pid guard for boot recovery (local sessions only): record the agent
 		// process's pid so a later boot scan accepts this entry only while that
 		// pid is alive and still under this pane. Skipped for remote sessions —
@@ -259,6 +272,7 @@ export const POST: RequestHandler = async ({ request }) => {
 			// the correlated connection is persisted with the entry, so a later
 			// event arriving over a different connection forces a re-walk.
 			...(remote && payload.ssh_connection ? { ssh_connection: payload.ssh_connection } : {}),
+			...(remote && payload.remote_pane ? { remote_pane: payload.remote_pane } : {}),
 			...(payloadTitle ? { title: payloadTitle } : {}),
 			...(agent_pid ? { agent_pid } : {})
 		}).catch((e) => console.warn('[sessionStart] recordSession failed', e));
@@ -270,6 +284,7 @@ export const POST: RequestHandler = async ({ request }) => {
 			event_type: 'Idle',
 			created_at: Date.now(),
 			remote,
+			...(remote && payload.remote_pane ? { remote_pane: payload.remote_pane } : {}),
 			agent
 		});
 		// Fire-and-forget title pre-fill. In chat-title mode resolveDisplayTitle
@@ -328,8 +343,14 @@ export const POST: RequestHandler = async ({ request }) => {
 		// rewind changed the live session_id while the dock ticket kept the
 		// boot-scan/metadata one), markWorking would miss it and the ticket
 		// would stay idle until the next Stop re-created it. Rebind the pane's
-		// ticket to the live session_id first so markWorking lands.
-		if (tmux_pane) cancelWatchers(rebindPaneTicket(tmux_pane, session_id));
+		// ticket to the live session_id first so markWorking lands. Scoped to
+		// the event's uniqueness cell for remote events (D4) so a remote-tmux
+		// sibling's clear event never displaces a neighbor's ticket.
+		if (tmux_pane) {
+			cancelWatchers(
+				rebindPaneTicket(tmux_pane, session_id, remote ? (payload.remote_pane ?? '') : undefined)
+			);
+		}
 		markWorking(session_id);
 		return json({ ok: true, action: 'marked_working' });
 	}
@@ -346,8 +367,11 @@ export const POST: RequestHandler = async ({ request }) => {
 	// Clear any ticket bound to this pane under a different key before the real
 	// ticket lands — a boot-scan placeholder, or a stale/diverged session_id
 	// (e.g. after a rewind) that would otherwise leave a second ticket for the
-	// same pane.
-	cancelWatchers(dropPaneTicketsExcept(tmux_pane, session_id));
+	// same cell. Cell-scoped for remote events (D4): a remote-tmux sibling's
+	// Stop must not delete its neighbors' tickets.
+	cancelWatchers(
+		dropPaneTicketsExcept(tmux_pane, session_id, remote ? (payload.remote_pane ?? '') : undefined)
+	);
 
 	// Title generation happens on UserPromptSubmit (see CLEAR_EVENTS branch above);
 	// by the time we land here the cache is typically populated. In chat-title
@@ -363,6 +387,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		event_type: eventType,
 		created_at,
 		remote,
+		...(remote && payload.remote_pane ? { remote_pane: payload.remote_pane } : {}),
 		agent
 	});
 

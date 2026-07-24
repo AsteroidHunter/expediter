@@ -38,6 +38,15 @@ export type Ticket = {
 	// transcript lives on the far box. Set from the hook payload; local events
 	// never carry it.
 	remote: boolean;
+	// The agent's pane id in the REMOTE tmux server (remote-tmux mode: tmux
+	// runs on the ssh-ed box itself, the agent inside one of its panes). Pane
+	// ids are namespaced per tmux server, so this never holds — and must never
+	// be compared against — a local pane id. Several remote-tmux tickets
+	// ("siblings") legitimately share one local tmux_pane, differing only
+	// here; the pane-uniqueness helpers below therefore match on the cell
+	// (tmux_pane, remote_pane ?? '') rather than the pane alone (D4). Absent
+	// for local and plain-ssh tickets, whose cell degenerates to (tmux_pane, '').
+	remote_pane?: string;
 	// Which coding agent drives this session (claude | codex). Derived from the
 	// hook payload's transcript_path (segment match — works for far-side remote
 	// paths too) or, for boot-scan placeholders, the pane's foreground command.
@@ -222,31 +231,51 @@ export function list(): Ticket[] {
 	return snapshot();
 }
 
-// Linear scan to find any ticket bound to a given tmux_pane. Used by hook
-// handlers to reconcile a boot-scan placeholder (synthetic key
-// `pending:<pane_id>`) against the first authoritative event for that pane:
-// the handler removes the placeholder, then upserts the real ticket keyed by
-// session_id. Returns undefined when no ticket matches.
-export function findByPane(tmux_pane: string): Ticket | undefined {
+// The pane-scoped helpers below all take an optional remote_pane with the
+// same tri-state meaning (D4):
+//   undefined — match ANY ticket on the pane, regardless of cell. The
+//               pre-sibling semantics every legacy caller keeps: local
+//               events (a pane that provably runs a local agent can hold no
+//               live remote ticket) and reconcile's "is anything here?".
+//   ''        — the local/plain-ssh cell: tickets with no remote_pane.
+//   '%N'      — one remote-tmux sibling's cell.
+function inPaneCell(ticket: Ticket, tmux_pane: string, remote_pane?: string): boolean {
+	if (ticket.tmux_pane !== tmux_pane) return false;
+	return remote_pane === undefined || (ticket.remote_pane ?? '') === remote_pane;
+}
+
+// Linear scan to find a ticket bound to a given tmux_pane (optionally
+// narrowed to one uniqueness cell — see inPaneCell). Used by hook handlers
+// to reconcile a boot-scan placeholder (synthetic key `pending:<pane_id>`)
+// against the first authoritative event for that pane, and by reconcile /
+// voice to answer "does this pane hold a ticket at all". Returns undefined
+// when no ticket matches.
+export function findByPane(tmux_pane: string, remote_pane?: string): Ticket | undefined {
 	for (const ticket of store.values()) {
-		if (ticket.tmux_pane === tmux_pane) return ticket;
+		if (inPaneCell(ticket, tmux_pane, remote_pane)) return ticket;
 	}
 	return undefined;
 }
 
-// Remove every ticket bound to tmux_pane whose key is not keepSessionId, and
-// return the removed session_ids. One tmux pane runs one claude session, so a
-// pane should hold at most one ticket; a stale one (left by a session that
-// exited without SessionEnd, or whose live session_id diverged from the
-// boot-scan/metadata key after a rewind) must be cleared before the
-// authoritative event for that pane upserts the real ticket. Generalizes the
-// old placeholder-only reconciliation — a `pending:<pane>` ticket is just one
-// kind of mismatched key. Callers cancel any per-session side effects (decline
-// watchers) for the returned ids.
-export function dropPaneTicketsExcept(tmux_pane: string, keepSessionId: string): string[] {
+// Remove every ticket in the pane (or, with remote_pane, in one uniqueness
+// cell — see inPaneCell) whose key is not keepSessionId, and return the
+// removed session_ids. One CELL holds at most one ticket: a stale one (left
+// by a session that exited without SessionEnd, or whose live session_id
+// diverged from the boot-scan/metadata key after a rewind) must be cleared
+// before the authoritative event upserts the real ticket. Cell scoping is
+// what lets remote-tmux siblings share a pane — sibling B's SessionStart
+// clears only B's cell, never its neighbors. Generalizes the old
+// placeholder-only reconciliation — a `pending:<pane>` ticket is just one
+// kind of mismatched key. Callers cancel any per-session side effects
+// (decline watchers) for the returned ids.
+export function dropPaneTicketsExcept(
+	tmux_pane: string,
+	keepSessionId: string,
+	remote_pane?: string
+): string[] {
 	const removed: string[] = [];
 	for (const [key, ticket] of store) {
-		if (ticket.tmux_pane === tmux_pane && key !== keepSessionId) {
+		if (inPaneCell(ticket, tmux_pane, remote_pane) && key !== keepSessionId) {
 			store.delete(key);
 			removed.push(key);
 		}
@@ -262,12 +291,19 @@ export function dropPaneTicketsExcept(tmux_pane: string, keepSessionId: string):
 // the dock ticket still carries the pre-rewind one — then markWorking(sessionId)
 // would miss it and the ticket would never flip to working. Rebinding moves
 // the ticket under the live session_id so the subsequent lookup succeeds.
-// Drops any extra same-pane tickets. Returns the displaced session_ids
-// (the old key plus any strays) for side-effect cleanup.
-export function rebindPaneTicket(tmux_pane: string, sessionId: string): string[] {
+// Drops any extra tickets in the same scope. Scope is the pane, or one
+// uniqueness cell when remote_pane is given (see inPaneCell) — a remote-tmux
+// sibling's clear event rebinds within its own cell and never displaces a
+// neighbor. Returns the displaced session_ids (the old key plus any strays)
+// for side-effect cleanup.
+export function rebindPaneTicket(
+	tmux_pane: string,
+	sessionId: string,
+	remote_pane?: string
+): string[] {
 	const samePane: Array<[string, Ticket]> = [];
 	for (const [key, ticket] of store) {
-		if (ticket.tmux_pane === tmux_pane) samePane.push([key, ticket]);
+		if (inPaneCell(ticket, tmux_pane, remote_pane)) samePane.push([key, ticket]);
 	}
 	const displaced: string[] = [];
 	let changed = false;
