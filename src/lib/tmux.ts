@@ -377,6 +377,39 @@ end try`;
 	}
 }
 
+// Far-side session names the OQ4(a) attach injection will type into a live
+// shell. Deliberately strict: anything outside this charset is refused
+// loudly rather than quoted — the string crosses into a remote shell prompt.
+const REMOTE_SESSION_NAME = /^[A-Za-z0-9._-]+$/;
+
+// OQ4(a)/D15: the tapped remote-tmux session is detached on the devbox while
+// the user's ssh pane sits at a shell prompt. The daemon cannot attach it
+// (no tty on the box); instead it types `tmux attach -t <session>` into the
+// LOCAL ssh pane — the keystrokes travel down the ssh connection and attach
+// the far tmux in the user's own terminal, healing the session's stale
+// SSH_CONNECTION on the way (update-environment applies on attach). The
+// helper pre-positioned the session's current window before this runs, so
+// the attach lands showing the tapped pane. C-u first clears anything
+// half-typed at the far prompt. If the far foreground isn't a shell (the
+// user left vim running), the line lands there — accepted when (a) was
+// chosen. Throws FocusError on a bad pane, a refused session name, or a
+// tmux failure.
+export async function injectRemoteAttach(pane: string, session: string): Promise<void> {
+	if (!pane || !/^%[0-9]+$/.test(pane)) {
+		throw new FocusError(`invalid pane id '${pane}'`);
+	}
+	if (!session || !REMOTE_SESSION_NAME.test(session)) {
+		throw new FocusError(`refusing to type remote session name '${session}' (unsafe charset)`);
+	}
+	try {
+		await execFileAsync('tmux', sendKeysArgs(pane, ['C-u']));
+		await execFileAsync('tmux', sendTextArgs(pane, `tmux attach -t ${session}`));
+		await execFileAsync('tmux', sendKeysArgs(pane, ['Enter']));
+	} catch {
+		throw new FocusError(`tmux attach injection failed for pane '${pane}'`);
+	}
+}
+
 // Detach a session from the phone: resolve the pane to its session, then
 // `tmux detach-client -s <session>` (drops ALL clients of that session, matching
 // the whole-session model of attach). No Terminal/osascript — detach is pure

@@ -188,8 +188,16 @@ function constantTimeEqual(a: string, b: string): boolean {
 }
 
 // API paths trusted purely by loopback origin (no session token): the local
-// hook bridges POST here. Keep this list tight — every entry is a token bypass.
-const LOOPBACK_HOOK_PATHS = new Set(['/api/hooks/event', '/api/tmux-event']);
+// hook bridges POST here, and devbox helpers reach the remote-tap pair
+// through the reverse tunnel (whose devbox end is a user-private unix
+// socket — file permission is the auth there, D17). Keep this list tight —
+// every entry is a token bypass.
+const LOOPBACK_HOOK_PATHS = new Set([
+	'/api/hooks/event',
+	'/api/tmux-event',
+	'/api/remote-tap/poll',
+	'/api/remote-tap/result'
+]);
 
 export const handle: Handle = async ({ event, resolve }) => {
 	const host = event.request.headers.get('host');

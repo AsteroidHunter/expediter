@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test';
 import {
 	parseSshConnection,
+	parseSshDestination,
 	resolveRemotePane,
 	type CorrelationDeps,
 	type PaneResolution
@@ -73,6 +74,7 @@ function makeDeps(overrides: Partial<CorrelationDeps> = {}): CorrelationDeps {
 		lsofEstablishedPids: async () => [],
 		processCommand: async () => null,
 		parentPid: async () => null,
+		updateSessionConnection: async () => {},
 		...overrides
 	};
 }
@@ -228,4 +230,112 @@ test('among several candidate pids, the ssh one that descends from a pane wins',
 		parentPid: async (pid) => (pid === 4021 ? 7008 : null)
 	});
 	expect(await resolveRemotePane('sid', CONN, deps)).toEqual({ ok: true, paneId: '%8' });
+});
+
+// ─── D11: connection-equality on the fast path ──────────────────────────────
+
+const NEW_CONN = '10.0.0.5 60999 10.0.0.9 22';
+
+function cachedEntry(pane: string, ssh_connection?: string) {
+	return {
+		sid: {
+			session_id: 'sid',
+			tmux_pane: pane,
+			cwd: '/r',
+			transcript_path: '/r/t.jsonl',
+			remote: true as const,
+			...(ssh_connection ? { ssh_connection } : {})
+		}
+	};
+}
+
+test('fast path: stored connection equal to the incoming one is a hit (no lsof)', async () => {
+	let lsofCalls = 0;
+	const deps = makeDeps({
+		loadSessions: async () => cachedEntry('%7', CONN),
+		listPanes: async () => [paneRow('%7', 7001, 'ssh')],
+		lsofEstablishedPids: async () => {
+			lsofCalls++;
+			return [];
+		}
+	});
+	expect(await resolveRemotePane('sid', CONN, deps)).toEqual({ ok: true, paneId: '%7' });
+	expect(lsofCalls).toBe(0);
+});
+
+// A remote-tmux session outlives its connection: after a re-ssh from another
+// window the OLD pane survives as a bare prompt (still live), so only the
+// connection mismatch can force the re-walk that finds the NEW pane. The walk
+// must also persist what it found via the updateSessionConnection seam.
+test('fast path: stored connection differing from the incoming forces a re-walk that persists', async () => {
+	const persisted: Array<{ sessionId: string; paneId: string; conn: string }> = [];
+	const deps = makeDeps({
+		loadSessions: async () => cachedEntry('%7', CONN), // old pane still ALIVE
+		listPanes: async () => [paneRow('%7', 7001, 'ssh'), paneRow('%8', 7008, 'ssh')],
+		lsofEstablishedPids: async (port) => (port === 60999 ? [4021] : []),
+		processCommand: async () => 'ssh',
+		parentPid: async (pid) => (pid === 4021 ? 7008 : null),
+		updateSessionConnection: async (sessionId, paneId, conn) => {
+			persisted.push({ sessionId, paneId, conn });
+		}
+	});
+	expect(await resolveRemotePane('sid', NEW_CONN, deps)).toEqual({ ok: true, paneId: '%8' });
+	expect(persisted).toEqual([{ sessionId: 'sid', paneId: '%8', conn: NEW_CONN }]);
+});
+
+test('fast path: an entry with no stored connection keeps pane-liveness-only semantics', async () => {
+	let lsofCalls = 0;
+	const deps = makeDeps({
+		loadSessions: async () => cachedEntry('%7'), // pre-plan entry, no ssh_connection
+		listPanes: async () => [paneRow('%7', 7001, 'ssh')],
+		lsofEstablishedPids: async () => {
+			lsofCalls++;
+			return [];
+		}
+	});
+	// Any incoming connection value fast-paths while the pane lives.
+	expect(await resolveRemotePane('sid', NEW_CONN, deps)).toEqual({ ok: true, paneId: '%7' });
+	expect(lsofCalls).toBe(0);
+});
+
+test('a failing updateSessionConnection does not fail a successful walk', async () => {
+	const deps = makeDeps({
+		listPanes: async () => [paneRow('%5', 7001)],
+		lsofEstablishedPids: async () => [4021],
+		processCommand: async () => 'ssh',
+		parentPid: async (pid) => (pid === 4021 ? 7001 : null),
+		updateSessionConnection: async () => {
+			throw new Error('disk full');
+		}
+	});
+	expect(await resolveRemotePane('sid', CONN, deps)).toEqual({ ok: true, paneId: '%5' });
+});
+
+// ─── parseSshDestination (box identity for remote taps) ─────────────────────
+
+test('parseSshDestination finds the destination through flags, users, and URIs', () => {
+	expect(parseSshDestination('ssh devbox')).toEqual({ host: 'devbox' });
+	expect(parseSshDestination('/usr/bin/ssh devbox')).toEqual({ host: 'devbox' });
+	expect(parseSshDestination('ssh -p 2222 user@10.0.0.9')).toEqual({
+		host: '10.0.0.9',
+		port: 2222
+	});
+	expect(parseSshDestination('ssh -p2222 devbox.example.com')).toEqual({
+		host: 'devbox.example.com',
+		port: 2222
+	});
+	expect(
+		parseSshDestination('ssh -o StrictHostKeyChecking=yes -i /k/id -L 8080:localhost:80 devbox tail -f log')
+	).toEqual({ host: 'devbox' });
+	expect(parseSshDestination('ssh -4A devbox')).toEqual({ host: 'devbox' });
+	expect(parseSshDestination('ssh ssh://user@devbox:2200')).toEqual({
+		host: 'devbox',
+		port: 2200
+	});
+});
+
+test('parseSshDestination returns null when no destination token exists', () => {
+	expect(parseSshDestination('ssh -v')).toBeNull();
+	expect(parseSshDestination('ssh')).toBeNull();
+	expect(parseSshDestination('')).toBeNull();
 });
