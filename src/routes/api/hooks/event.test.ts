@@ -1106,3 +1106,132 @@ test('a remote SessionStart never records an agent_pid (far-side process)', asyn
 	remove(id);
 	deleteSessionTopic(id);
 });
+
+// ─── remote-tmux mode (siblings behind one ssh pane, D4/D14/OQ5) ────────────
+
+test('a malformed remote_pane is rejected at ingest with a 422 (D14)', async () => {
+	const id = nextId();
+	for (const bad of ['%3; rm -rf ~', 'abc', '%', '%3x', ' %3', 3 as unknown as string]) {
+		const result = await callHandler({
+			hook_event_name: 'Stop',
+			session_id: id,
+			remote: true,
+			ssh_connection: REMOTE_CONN,
+			remote_pane: bad
+		});
+		expect(result.status).toBe(422);
+		expect((result.body as { error?: string }).error).toBe('malformed remote_pane');
+	}
+	// Nothing was created on the way out.
+	expect(list().find((t) => t.session_id === id)).toBeUndefined();
+});
+
+test('a remote-tmux SessionStart persists remote_pane + ssh_connection and tickets carry the cell', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const id = nextId();
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: id,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		remote_pane: '%3',
+		cwd: '/remote/proj',
+		transcript_path: '/remote/home/u/.claude/projects/x/t.jsonl'
+	});
+
+	const ticket = list().find((t) => t.session_id === id);
+	expect(ticket?.remote).toBe(true);
+	expect(ticket?.remote_pane).toBe('%3');
+	expect(ticket?.tmux_pane).toBe('%9'); // the correlated LOCAL pane
+
+	const persisted = await loadSessions();
+	expect(persisted[id]?.remote_pane).toBe('%3');
+	expect(persisted[id]?.ssh_connection).toBe(REMOTE_CONN);
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	remove(id);
+	deleteSessionTopic(id);
+});
+
+// The D4 crux, end to end through the handler: sibling B's SessionStart and
+// Stop land on the same LOCAL pane as sibling A and must leave A's ticket
+// alone — pre-cell, dropPaneTicketsExcept would have deleted it.
+test('sibling B SessionStart and Stop leave sibling A untouched (uniqueness cell)', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const idA = nextId();
+	const idB = nextId();
+	const base = {
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		transcript_path: '/remote/home/u/.claude/projects/x/t.jsonl'
+	};
+	await callHandler({ hook_event_name: 'SessionStart', session_id: idA, remote_pane: '%3', ...base });
+	await callHandler({ hook_event_name: 'SessionStart', session_id: idB, remote_pane: '%7', ...base });
+	expect(list().find((t) => t.session_id === idA)).toBeDefined();
+	expect(list().find((t) => t.session_id === idB)).toBeDefined();
+
+	await callHandler({ hook_event_name: 'Stop', session_id: idB, remote_pane: '%7', ...base });
+	const a = list().find((t) => t.session_id === idA);
+	const b = list().find((t) => t.session_id === idB);
+	expect(a).toBeDefined();
+	expect(b?.event_type).toBe('Stop');
+	expect(a?.remote_pane).toBe('%3');
+	expect(b?.remote_pane).toBe('%7');
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	remove(idA);
+	remove(idB);
+	deleteSessionTopic(idA);
+	deleteSessionTopic(idB);
+});
+
+// OQ5 (answered drop): a remote-tmux sibling's SessionStart clears a
+// plain-ssh ticket on the same pane AND forgets its persisted entry — the
+// shared pane stays alive as long as the siblings do, so a surviving entry
+// would resurrect the dead plain ticket at every daemon restart.
+test('a remote-tmux SessionStart clears a plain-ssh ticket on the pane and forgets its entry', async () => {
+	const temp = useTempSessionsFileForRemote();
+	stubCorrelation();
+
+	const plainId = nextId();
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: plainId,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		cwd: '/remote/proj',
+		transcript_path: '/remote/home/u/.claude/projects/x/plain.jsonl'
+	});
+	expect(list().find((t) => t.session_id === plainId)).toBeDefined();
+	expect((await loadSessions())[plainId]).toBeDefined();
+
+	const sibId = nextId();
+	await callHandler({
+		hook_event_name: 'SessionStart',
+		session_id: sibId,
+		remote: true,
+		ssh_connection: REMOTE_CONN,
+		remote_pane: '%3',
+		cwd: '/remote/proj',
+		transcript_path: '/remote/home/u/.claude/projects/x/sib.jsonl'
+	});
+
+	expect(list().find((t) => t.session_id === plainId)).toBeUndefined();
+	expect(list().find((t) => t.session_id === sibId)).toBeDefined();
+	const persisted = await loadSessions();
+	expect(persisted[plainId]).toBeUndefined();
+	expect(persisted[sibId]).toBeDefined();
+
+	setCorrelationDepsForTest(null);
+	temp.done();
+	remove(sibId);
+	deleteSessionTopic(plainId);
+	deleteSessionTopic(sibId);
+});
