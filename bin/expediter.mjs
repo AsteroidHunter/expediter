@@ -72,11 +72,15 @@ if (process.argv[2] === 'update') {
 // `expediter install remote <name>` / `expediter uninstall remote <name>` —
 // remote-session setup (one marker-delimited ~/.ssh/config block per host, so
 // machines are added and removed independently). Handled before anything else
-// so it never starts the daemon. Install makes ONE interactive ssh connection
-// — the user's own login, password+2FA as always — to read the box's runtime
-// dir (the tunnel's devbox end is a unix socket there, D17, and sshd expands
-// no ~ in forward paths) and to record its host key for the Match exec
-// matcher (D18). The DAEMON still never sshs anywhere (D16).
+// so it never starts the daemon. Nothing here sshs anywhere, ever (the daemon
+// never does per D16, and install doesn't either — the user rejected an
+// install-time probe login). The tunnel's devbox end is a unix socket in the
+// box's runtime dir (D17), and sshd expands no ~ in forward paths, so the
+// absolute path must be known when the block is written; it travels by hand:
+// install-remote.sh on the box ends by printing a finish command carrying the
+// path, which the user pastes back here as --socket-path. The Match exec
+// matcher (D18) reads the box's host key from ~/.ssh/known_hosts, where the
+// user's own logins record it.
 // `expediter install remote how` prints the plain-language steps.
 if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 	const action = process.argv[2];
@@ -86,13 +90,17 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 		'To link a remote machine:',
 		'',
 		'  1. On this Mac, run: expediter install remote <name>',
-		'     <name> is what you type after `ssh` (e.g. devbox). This sets up the',
-		'     connection path and prints the install command for step 2.',
+		'     <name> is what you type after `ssh` (e.g. devbox). This just prints',
+		'     the install command for step 2 -- nothing is written yet.',
 		'',
 		'  2. ssh into the remote machine as usual and paste that printed command.',
-		'     It installs the mini-client in your home directory there.',
+		'     It installs the mini-client in your home directory there and ends by',
+		'     printing one final command for this Mac.',
 		'',
-		'  3. That\'s it. From then on: ssh in, run claude -- tickets appear on your phone.',
+		'  3. Paste that final command back here on the Mac. It writes the tunnel',
+		'     block into ~/.ssh/config.',
+		'',
+		'  4. That\'s it. From then on: ssh in, run claude -- tickets appear on your phone.',
 		'',
 		'To undo, run: expediter uninstall remote <name>',
 		'The installation is per-machine -- to link more machines, repeat the steps',
@@ -148,12 +156,16 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 		const b = r.status === 0 ? r.stdout.trim() : '';
 		return b && b !== 'HEAD' ? b : 'main';
 	}
+	// The install paste carries --name so the box installer can print the exact
+	// finish command (`expediter install remote <name> --socket-path <path>`)
+	// instead of a placeholder the user has to fill in.
 	function pasteCommand({ uninstall = false } = {}) {
 		const branch = detectBranch();
 		const url = `https://raw.githubusercontent.com/AsteroidHunter/expediter/${branch}/install-remote.sh`;
 		const args = [];
 		if (uninstall) args.push('--uninstall');
 		if (!uninstall && branch !== 'main') args.push('--branch', branch);
+		if (!uninstall) args.push('--name', name);
 		return `curl -fsSL ${url} | bash${args.length ? ` -s -- ${args.join(' ')}` : ''}`;
 	}
 
@@ -220,41 +232,47 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 			console.error('expediter: EXPEDITER_HOME is not set. Re-run install.sh from the cloned repo.');
 			process.exit(1);
 		}
-		// One interactive probe over the user's normal login. Two reasons it
-		// must exist: the RemoteForward's devbox end is a unix socket in the
-		// box's per-login runtime dir (D17) and sshd expands no ~ in forward
-		// paths, so the absolute path has to be known NOW; and the Match exec
-		// matcher (D18) recognizes the box by host key, which this connection
-		// TOFU-records if it was never connected to before.
-		// ClearAllForwardings keeps a pre-existing block (reinstall case) from
-		// binding — and then stranding — a socket file during the probe.
-		console.log('');
-		console.log(`Connecting to ${name} once to read its runtime dir and record its host key`);
-		console.log('(your usual ssh login; nothing is installed on the box yet):');
-		console.log('');
-		const probeCmd =
-			"sh -c 'd=\"${XDG_RUNTIME_DIR:-}\"; if [ -z \"$d\" ]; then d=\"$HOME/.expediter/run\"; mkdir -p \"$d\" && chmod 700 \"$d\"; fi; printf \"EXPEDITER_RUNDIR=%s\\n\" \"$d\"'";
-		const probe = spawnSync('ssh', ['-o', 'ClearAllForwardings=yes', name, probeCmd], {
-			stdio: ['inherit', 'pipe', 'inherit'],
-			encoding: 'utf8'
-		});
-		const rundirLine = (probe.stdout || '')
-			.split('\n')
-			.find((l) => l.startsWith('EXPEDITER_RUNDIR='));
-		const rundir = rundirLine ? rundirLine.slice('EXPEDITER_RUNDIR='.length).trim() : '';
-		if (probe.status !== 0 || !rundir.startsWith('/')) {
-			console.error('');
-			console.error(
-				`expediter: could not read ${name}'s runtime dir over ssh — nothing was written.`
-			);
-			console.error(`Check that \`ssh ${name}\` works, then re-run this command.`);
+		// The only flag: --socket-path <abs path>, pasted from the finish
+		// command install-remote.sh prints on the box. Its presence selects the
+		// step: without it, print the box command and write nothing; with it,
+		// write the ssh config block.
+		let socketPath = '';
+		const extra = process.argv.slice(5);
+		for (let i = 0; i < extra.length; i++) {
+			if (extra[i] === '--socket-path') {
+				socketPath = (extra[i + 1] || '').trim();
+				i++;
+				continue;
+			}
+			console.error(`expediter: unknown flag for install remote: ${extra[i]}`);
+			console.error('Run `expediter install remote how` for the full steps.');
 			process.exit(1);
 		}
-		const socketPath = `${rundir}/expediter-tunnel.sock`;
 
-		// The box's host key(s), as recorded on THIS Mac. ssh-keygen -F reads
-		// hashed and plain entries alike; the probe above guarantees an entry
-		// exists unless known_hosts lives somewhere custom.
+		if (!socketPath) {
+			console.log('');
+			console.log(`Nothing written yet. ssh into ${name} as usual and paste this there, once:`);
+			console.log('');
+			console.log(`  ${pasteCommand()}`);
+			console.log('');
+			console.log('It installs the mini-client in your home directory on the box and ends by');
+			console.log('printing one final command to paste back here on the Mac — that command');
+			console.log('carries the box-side socket path this Mac needs for the tunnel.');
+			console.log('(Already had the mini-client there? Paste it again anyway — it upgrades');
+			console.log(' the box and reprints the finish command.)');
+			process.exit(0);
+		}
+		if (!socketPath.startsWith('/')) {
+			console.error(
+				`expediter: --socket-path must be the absolute path printed on the box, got "${socketPath}".`
+			);
+			process.exit(1);
+		}
+
+		// The box's host key(s), as recorded on THIS Mac by the user's own past
+		// logins — ssh-keygen -F reads hashed and plain entries alike. The user
+		// just ssh-ed in to paste the box installer, so an entry exists unless
+		// known_hosts lives somewhere custom.
 		const kh = spawnSync('ssh-keygen', ['-F', name], { encoding: 'utf8' });
 		const blobs = [];
 		for (const line of (kh.stdout || '').split('\n')) {
@@ -265,13 +283,12 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 		}
 		if (blobs.length === 0) {
 			console.error('');
+			console.error(`expediter: ~/.ssh/known_hosts has no entry for ${name}`);
 			console.error(
-				`expediter: ssh reached ${name} but ~/.ssh/known_hosts has no entry for it`
+				'(never ssh-ed to it from this Mac, or a custom UserKnownHostsFile /'
 			);
-			console.error(
-				'(a custom UserKnownHostsFile or StrictHostKeyChecking=no would do this).'
-			);
-			console.error('The tunnel matcher needs that key — nothing was written.');
+			console.error('StrictHostKeyChecking=no). The tunnel matcher needs that key.');
+			console.error(`Run \`ssh ${name}\` once, then re-run this exact command — nothing was written.`);
 			process.exit(1);
 		}
 		await fs.mkdir(HOSTS_DIR, { recursive: true, mode: 0o700 });
@@ -303,13 +320,7 @@ if (process.argv[2] === 'install' || process.argv[2] === 'uninstall') {
 		console.log(`✓ Tunnel block written to ~/.ssh/config for "${name}" (matched by host key,`);
 		console.log(`  so any spelling of it gets the tunnel; socket ${socketPath}).`);
 		console.log('');
-		console.log(`Next: ssh into ${name} as usual and paste this there, once:`);
-		console.log('');
-		console.log(`  ${pasteCommand()}`);
-		console.log('');
-		console.log(`After that: \`ssh ${name}\`, run claude, tickets appear on your phone.`);
-		console.log('(Already had the mini-client there? Paste it again anyway — it upgrades');
-		console.log(' the box to the socket tunnel and the tap helper.)');
+		console.log(`Done. From now on: \`ssh ${name}\`, run claude, tickets appear on your phone.`);
 		process.exit(0);
 	}
 
@@ -367,11 +378,12 @@ if (SHOW_HELP) {
 	console.log('  update                 Pull the latest and rebuild in place.');
 	console.log('                         Add --dev (or --no-pull) to skip the pull and rebuild the');
 	console.log('                         current checkout, e.g. when updating from a feature branch.');
-	console.log('  install remote <name>  Set up tickets for claude sessions on an ssh host: writes');
-	console.log('                         that host\'s tunnel block into ~/.ssh/config and prints the');
-	console.log('                         command to paste on the box. `expediter install remote how`');
-	console.log('                         prints the plain-language steps; `uninstall remote <name>`');
-	console.log('                         undoes that host.');
+	console.log('  install remote <name>  Set up tickets for claude sessions on an ssh host: prints');
+	console.log('                         the command to paste on the box, which ends by printing a');
+	console.log('                         finish command to paste back here (that one writes the');
+	console.log('                         host\'s tunnel block into ~/.ssh/config). `expediter install');
+	console.log('                         remote how` prints the plain-language steps; `uninstall');
+	console.log('                         remote <name>` undoes that host.');
 	console.log('  --print-url            Also print the tethered URL as text (default: QR only).');
 	console.log('                         Use this only if your phone cannot scan the QR — the URL');
 	console.log('                         contains the session token and will stay in scrollback.');

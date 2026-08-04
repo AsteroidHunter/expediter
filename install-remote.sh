@@ -5,14 +5,19 @@
 # codex on). The normal path: on the Mac run `expediter install remote
 # <host>`, then ssh into the box as usual and paste the command it printed:
 #
-#   curl -fsSL https://raw.githubusercontent.com/AsteroidHunter/expediter/main/install-remote.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/AsteroidHunter/expediter/main/install-remote.sh | bash -s -- --name <host>
 #
-# (Running it from a full clone of the repo works too.)
+# It ends by printing the finish command to paste back on the Mac (which
+# writes the tunnel block there). Running it from a full clone of the repo
+# works too.
 #
 # Flags:
 #   --branch <b>   Fetch the hook script from branch <b> instead of main —
 #                  the Mac-side command appends this automatically when the
 #                  install it came from runs a non-main branch.
+#   --name <n>     The ssh host name the Mac side used — appended automatically
+#                  by `expediter install remote <n>` so the finish command this
+#                  script prints at the end is exact instead of a placeholder.
 #   --uninstall    Reverse the install: splice the expediter hook entries out
 #                  of ~/.claude/settings.json and $CODEX_HOME/hooks.json
 #                  (plus their hooks.state trust entries in config.toml;
@@ -55,6 +60,7 @@ err() { printf '%s\n' "$*" >&2; }
 
 BRANCH="main"
 UNINSTALL=0
+MAC_NAME=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--branch)
@@ -65,12 +71,20 @@ while [ $# -gt 0 ]; do
 			BRANCH="$2"
 			shift 2
 			;;
+		--name)
+			if [ $# -lt 2 ] || [ -z "$2" ]; then
+				err "install-remote.sh: --name needs a value."
+				exit 1
+			fi
+			MAC_NAME="$2"
+			shift 2
+			;;
 		--uninstall)
 			UNINSTALL=1
 			shift
 			;;
 		*)
-			err "install-remote.sh: unknown flag: $1 (supported: --branch <b>, --uninstall)"
+			err "install-remote.sh: unknown flag: $1 (supported: --branch <b>, --name <n>, --uninstall)"
 			exit 1
 			;;
 	esac
@@ -543,7 +557,9 @@ install_repo_script() { # $1 = script filename, $2 = destination path
 	fi
 	cp "$src" "$2"
 	chmod +x "$2"
-	[ -n "$fetched" ] && rm -f "$fetched"
+	# Plain `[ -n ] && rm` here would return 1 on the local-copy path and kill
+	# the whole install under set -e, with no message.
+	if [ -n "$fetched" ]; then rm -f "$fetched"; fi
 }
 
 HOOK_SCRIPT="$HOOK_DIR/expediter-hook.sh"
@@ -557,11 +573,12 @@ install_repo_script "expediter-remote-helper.sh" "$HELPER_SCRIPT"
 printf '✓ Tap helper installed at %s\n' "$HELPER_SCRIPT"
 
 # The tunnel's near end is a user-private unix socket (D17) in the per-login
-# runtime dir — the same path `expediter install remote <name>` probed and
-# wrote into the Mac's ssh config; both sides compute it with this exact
-# formula. The hook and the helper read it from ~/.expediter/socket-path.
+# runtime dir. Only this box knows the path, and sshd expands no ~ in forward
+# paths — so the finish command printed at the end carries it back to the Mac,
+# where `expediter install remote <name> --socket-path <path>` writes it into
+# the ssh config. The hook and the helper read it from ~/.expediter/socket-path.
 # On boxes without XDG_RUNTIME_DIR (no systemd) the fallback dir persists
-# under $HOME and is created 0700 here and by the Mac-side probe.
+# under $HOME and is created 0700 here.
 RUNDIR="${XDG_RUNTIME_DIR:-}"
 if [ -z "$RUNDIR" ]; then
 	RUNDIR="$HOME/.expediter/run"
@@ -733,8 +750,12 @@ fi
 # --- done ---------------------------------------------------------------------
 
 printf '\n✦ Expediter mini-client is ready on this machine.\n\n'
-printf 'Reminders:\n'
-printf '  - The Mac side needs the reverse-tunnel block in ~/.ssh/config for this\n'
-printf '    host (`expediter install remote <host>` on the Mac writes it).\n'
-printf '  - Steady state: ssh in from a local tmux pane and run `claude` (or `codex`).\n'
-printf '    Nothing else.\n'
+if [ -n "$MAC_NAME" ]; then
+	printf 'Last step, back on your Mac, run:\n\n'
+	printf '  expediter install remote %s --socket-path %s\n\n' "$MAC_NAME" "$SOCKET_PATH"
+else
+	printf 'Last step, back on your Mac (with <name> = what you type after `ssh`), run:\n\n'
+	printf '  expediter install remote <name> --socket-path %s\n\n' "$SOCKET_PATH"
+fi
+printf 'That writes the reverse-tunnel block into the Mac'\''s ~/.ssh/config.\n'
+printf 'Steady state after that: ssh in from a local tmux pane and run `claude` (or `codex`).\n'
