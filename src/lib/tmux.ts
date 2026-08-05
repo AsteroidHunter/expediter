@@ -281,8 +281,13 @@ export async function focusPane(pane: string): Promise<void> {
 		() => new FocusError(`tmux select-window/select-pane failed for '${pane}'`)
 	);
 
-	// const pre = await captureTerminalState();
-	// console.log(`[focus] state pre=${pre}`);
+	// Ground truth for "the host said hit but nothing moved": what macOS actually
+	// shows before and after the raise. Both captures are DEBUG_FOCUS-only — each
+	// is a fresh osascript spawn, and putting one on every tap's critical path
+	// would undo the focus host's whole reason for existing.
+	const tracing = !!process.env.DEBUG_FOCUS;
+	const pre = tracing ? await captureTerminalState() : '';
+	debugFocus(`[focus] state pre=${pre}`);
 
 	const cached = tty ? ttyToTab.get(tty) ?? null : null;
 	const tRaise = Date.now();
@@ -311,9 +316,17 @@ export async function focusPane(pane: string): Promise<void> {
 	const selectErr = await selectFailure;
 	if (selectErr) throw selectErr;
 
-	// const post = await captureTerminalState();
-	// const moved = pre !== post;
-	// console.log(`[focus] state post=${post} moved=${moved} wanted_tty=${tty ?? '<none>'}`);
+	if (tracing) {
+		// macOS finishes window ordering asynchronously, so an immediate capture
+		// can still read the OLD front window on a raise that did land. Wait out
+		// that gap before judging — otherwise the diagnostic invents failures.
+		await new Promise((r) => setTimeout(r, 150));
+		const post = await captureTerminalState();
+		const moved = pre !== post;
+		console.log(
+			`[focus] state pre=${pre} post=${post} moved=${moved} wanted_tty=${tty ?? '<none>'}`
+		);
+	}
 }
 
 // Re-attach a detached session by opening a NEW Terminal window running
